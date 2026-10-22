@@ -76,6 +76,27 @@ class PtpMediaClock
         return reference + static_cast<std::uint64_t>(static_cast<std::int64_t>(delta));
     }
 
+    /// The RTP timestamp of sample n in a stream whose media clock is
+    /// `direct=<offset>` (RFC 7273 section 5.2): the low 32 bits of n + offset.
+    [[nodiscard]] static constexpr auto rtp_timestamp(std::uint64_t index, std::uint32_t offset) noexcept -> std::uint32_t
+    {
+        return static_cast<std::uint32_t>(index) + offset;
+    }
+
+    /// The sample index an RTP timestamp names in a stream with that offset: the
+    /// offset removed, then unwrap()ped about `reference`.
+    [[nodiscard]] static constexpr auto index_of_rtp(
+        std::uint32_t timestamp, std::uint32_t offset, std::uint64_t reference) noexcept -> std::uint64_t
+    {
+        return unwrap(timestamp - offset, reference);
+    }
+
+    /// The AVTP timestamp of sample n: its PTP presentation time, mod 2^32 ns.
+    [[nodiscard]] constexpr auto avtp_timestamp(std::uint64_t index) const noexcept -> std::uint32_t
+    {
+        return static_cast<std::uint32_t>(time_of(index));
+    }
+
   private:
     explicit constexpr PtpMediaClock(std::uint32_t sample_rate_hz) noexcept
         : fs_{sample_rate_hz}

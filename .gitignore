@@ -3,3 +3,4 @@ build-*/
 build/
 deb-output/
 .cache/
+*.swp

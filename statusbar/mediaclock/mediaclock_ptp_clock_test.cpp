@@ -71,4 +71,22 @@ TEST(mediaclock_ptp_clock, rtp_timestamp_is_the_low_32_bits)
     EXPECT_EQ(PtpMediaClock::unwrap(static_cast<std::uint32_t>(wrap - 3), wrap + 3), wrap - 3);
 }
 
+TEST(mediaclock_ptp_clock, rtp_timestamps_carry_the_direct_offset)
+{
+    // a Dante stream: a=mediaclk:direct=1266592257
+    constexpr std::uint32_t OFFSET = 1266592257;
+    auto const clock = PtpMediaClock::make(48000).value();
+    std::uint64_t const n = clock.index_at(NOW_NS);
+    std::uint32_t const rtp = PtpMediaClock::rtp_timestamp(n, OFFSET);
+    EXPECT_EQ(rtp, static_cast<std::uint32_t>(n) + OFFSET);
+    EXPECT_EQ(PtpMediaClock::index_of_rtp(rtp, OFFSET, n), n);
+    EXPECT_EQ(PtpMediaClock::index_of_rtp(rtp, OFFSET, n + 1000), n);
+    EXPECT_EQ(PtpMediaClock::index_of_rtp(rtp, OFFSET, n - 1000), n);
+    EXPECT_EQ(PtpMediaClock::index_of_rtp(rtp + 6, OFFSET, n), n + 6);  // the next 125 us packet
+    EXPECT_EQ(PtpMediaClock::rtp_timestamp(n, 0), static_cast<std::uint32_t>(n));
+    // the same sample on the AVB side: its presentation time, mod 2^32
+    EXPECT_EQ(clock.avtp_timestamp(n), static_cast<std::uint32_t>(clock.time_of(n)));
+    EXPECT_EQ(clock.avtp_timestamp(n + 6) - clock.avtp_timestamp(n), std::uint32_t{125'000});
+}
+
 TEST_MAIN(statusbar_mediaclock, mediaclock_ptp_clock_test)
