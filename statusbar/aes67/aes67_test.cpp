@@ -268,11 +268,17 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     EXPECT_EQ(again->session_id, session->session_id);
     EXPECT_EQ(again->session_version, session->session_version + 1);
 
-    // A grandmaster in another domain names it; none leaves ts-refclk out.
+    // A grandmaster in another domain names it, one version on; the same
+    // grandmaster again changes nothing; none leaves ts-refclk out.
     sender.set_grandmaster(Grandmaster{.identity = GRANDMASTER.identity, .domain = 5});
     EXPECT_TRUE(
         sdp::to_string(*sender.session()).find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:5\r\n") != std::string::npos);
+    EXPECT_EQ(sender.session()->session_version, again->session_version + 1);
+    EXPECT_EQ(sender.session()->session_id, session->session_id);
+    sender.set_grandmaster(Grandmaster{.identity = GRANDMASTER.identity, .domain = 5});
+    EXPECT_EQ(sender.session()->session_version, again->session_version + 1);
     sender.set_grandmaster(std::nullopt);
+    EXPECT_EQ(sender.session()->session_version, again->session_version + 2);
     EXPECT_TRUE(sdp::to_string(*sender.session()).find("ts-refclk") == std::string::npos);
     EXPECT_TRUE(sdp::to_string(*sender.session()).find("clock-domain") == std::string::npos);
 }

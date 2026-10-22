@@ -119,7 +119,11 @@ void Sender::continue_from(Sender const& previous)
 
 void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
 {
+    if (grandmaster == grandmaster_) {
+        return;
+    }
     grandmaster_ = grandmaster;
+    ++session_version_;  // the SDP changed: a receiver keying on o= sees a new version
 }
 
 void Sender::tick(uint64_t const now_index) noexcept

@@ -86,7 +86,8 @@ class Sender
     }
 
     /// The PTP grandmaster ts-refclk names; nullopt until it is known, and the
-    /// SDP then has no ts-refclk.
+    /// SDP then has no ts-refclk. A change bumps the session version (o=), as
+    /// configure() does.
     void set_grandmaster(std::optional<Grandmaster> const& grandmaster);
 
     [[nodiscard]] auto grandmaster() const noexcept -> std::optional<Grandmaster> const& { return grandmaster_; }
