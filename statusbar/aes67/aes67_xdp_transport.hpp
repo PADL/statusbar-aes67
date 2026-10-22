@@ -58,6 +58,15 @@
 
 namespace statusbar::aes67 {
 
+/// What XdpTransport::open() takes past the interface (outside the class so it
+/// can be a defaulted argument there).
+struct XdpTransportOptions
+{
+    /// Zero-copy or copy bind; auto_ lets the kernel pick (zero-copy when the
+    /// driver offers it).
+    net::XdpBindMode bind_mode{net::XdpBindMode::auto_};
+};
+
 class XdpTransport final : public Transport
 {
   public:
@@ -113,16 +122,21 @@ class XdpTransport final : public Transport
         rtp::RtpHeader const& header,
         std::span<uint8_t const> payload) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>;
 
+    using Options = XdpTransportOptions;
+
     /// The XdpConfig open() uses on `interface`: UMEM_FRAMES frames, a
-    /// FILL_RING fill ring, rx_drain_max RECEIVE_BATCH, queue 0, no rules yet.
-    [[nodiscard]] static auto config_for(std::string_view interface) noexcept -> net::XdpConfig;
+    /// FILL_RING fill ring, rx_drain_max RECEIVE_BATCH, queue 0, no rules yet,
+    /// and `options`' bind mode.
+    [[nodiscard]] static auto config_for(std::string_view interface, Options const& options = {}) noexcept -> net::XdpConfig;
 
     /// The rule redirecting `group`'s frames to the socket.
     [[nodiscard]] static auto group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>;
 
     /// Open AF_XDP on `interface`'s queue 0. Fails without a supported NIC,
-    /// libxdp, or the privileges (CAP_NET_ADMIN, CAP_BPF / root).
-    [[nodiscard]] static auto open(std::string_view interface) -> StatusValue<std::unique_ptr<XdpTransport>>;
+    /// libxdp, or the privileges (CAP_NET_ADMIN, CAP_BPF / root), and with
+    /// bind_mode zero_copy when the driver offers no zero-copy.
+    [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
+        -> StatusValue<std::unique_ptr<XdpTransport>>;
 
     /// Every receive port must be gone first (asserted); the real-time thread
     /// must have stopped ticking the transport.
@@ -133,6 +147,12 @@ class XdpTransport final : public Transport
     auto operator=(XdpTransport&&) -> XdpTransport& = delete;
 
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
+    /// The interface the socket is bound on.
+    [[nodiscard]] auto interface_name() const noexcept -> std::string_view { return interface_.name; }
+    /// True when the socket got zero-copy (read back after the bind), false in copy mode.
+    [[nodiscard]] auto zero_copy() const noexcept -> bool { return context_.zero_copy(); }
+    /// The bind mode open() asked for.
+    [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode { return context_.bind_mode(); }
     /// Fails with too_many_filter_rules past MAX_GROUPS groups, and with
     /// resource_unavailable_try_again past MAX_PORTS ports or when the queue to
     /// the real-time thread is full.

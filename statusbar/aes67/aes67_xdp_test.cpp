@@ -28,6 +28,16 @@ TEST(aes67_xdp, ships_a_umem_sized_for_the_rings_and_the_tx_pool)
     EXPECT_TRUE(config.umem_frame_count >= config.fill_ring_size + XdpTransport::TX_POOL + XdpTransport::RECEIVE_BATCH);
     EXPECT_EQ(config.rx_drain_max, XdpTransport::RECEIVE_BATCH);
     EXPECT_TRUE(config.default_action == net::XdpAction::pass_kernel);
+    EXPECT_TRUE(config.bind_mode == net::XdpBindMode::auto_);
+}
+
+TEST(aes67_xdp, passes_the_bind_mode_through)
+{
+    auto const copy = XdpTransport::config_for("eth0", {.bind_mode = net::XdpBindMode::copy});
+    EXPECT_TRUE(copy.bind_mode == net::XdpBindMode::copy);
+    auto const zero_copy = XdpTransport::config_for("eth0", {.bind_mode = net::XdpBindMode::zero_copy});
+    EXPECT_TRUE(zero_copy.bind_mode == net::XdpBindMode::zero_copy);
+    EXPECT_EQ(zero_copy.fill_ring_size, XdpTransport::FILL_RING);
 }
 
 TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
@@ -89,11 +99,13 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
 {
     EXPECT_FALSE(XdpTransport::open("no-such-interface0").has_value());
 
-    auto transport = XdpTransport::open("lo");
+    auto transport = XdpTransport::open("lo", {.bind_mode = net::XdpBindMode::copy});
     if (!transport) {
         std::println("  skipped: AF_XDP unavailable ({})", transport.error().message());
         return;
     }
+    EXPECT_FALSE((*transport)->zero_copy());  // copy was forced (and lo has no zero-copy)
+    EXPECT_TRUE((*transport)->bind_mode() == net::XdpBindMode::copy);
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};
     EXPECT_TRUE((*transport)->open_receive(unicast).error() == Aes67Error::unsupported_destination);
     EXPECT_TRUE((*transport)->open_send({.destination = unicast}).error() == Aes67Error::unsupported_destination);

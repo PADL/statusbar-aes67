@@ -137,7 +137,7 @@ XdpTransport::~XdpTransport()
     }
 }
 
-auto XdpTransport::config_for(std::string_view const interface) noexcept -> net::XdpConfig
+auto XdpTransport::config_for(std::string_view const interface, Options const& options) noexcept -> net::XdpConfig
 {
     return net::XdpConfig{
         .interface_name = interface,
@@ -147,6 +147,7 @@ auto XdpTransport::config_for(std::string_view const interface) noexcept -> net:
         .fill_ring_size = FILL_RING,
         .umem_frame_count = UMEM_FRAMES,
         .rx_drain_max = RECEIVE_BATCH,
+        .bind_mode = options.bind_mode,
     };
 }
 
@@ -173,14 +174,14 @@ auto XdpTransport::group_rule(ip::IPv4Address const& group) noexcept -> net::Com
     return rule;
 }
 
-auto XdpTransport::open(std::string_view const interface) -> StatusValue<std::unique_ptr<XdpTransport>>
+auto XdpTransport::open(std::string_view const interface, Options const& options) -> StatusValue<std::unique_ptr<XdpTransport>>
 {
     auto info = find_interface(interface);
     if (!info) {
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    if (auto opened = transport->context_.open(config_for(transport->interface_.name)); !opened) {
+    if (auto opened = transport->context_.open(config_for(transport->interface_.name, options)); !opened) {
         return failure(opened.error());
     }
     return transport;
