@@ -16,7 +16,7 @@
 // Exact integer arithmetic, no 128-bit types: a time is split into whole
 // seconds and nanoseconds, and only the sub-second part is scaled, so the
 // largest intermediate is 1e9 * fs (< 2^48 at 192 kHz). Only the 48 kHz family
-// is supported (fs a multiple of 6000), which keeps every 125 µs tick a whole
+// is supported (fs a multiple of 24 kHz), which keeps every 125 µs tick a whole
 // number of samples.
 
 #pragma once
@@ -30,14 +30,14 @@ class PtpMediaClock
   public:
     static constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
-    /// fs must be a nonzero multiple of 6000 (48, 96 or 192 kHz in practice).
+    /// fs must pass supports() (48, 96 or 192 kHz in practice).
     explicit constexpr PtpMediaClock(std::uint32_t sample_rate_hz) noexcept
         : fs_{sample_rate_hz}
     {}
 
     [[nodiscard]] static constexpr auto supports(std::uint32_t sample_rate_hz) noexcept -> bool
     {
-        return sample_rate_hz != 0 && sample_rate_hz % 6000 == 0;
+        return sample_rate_hz != 0 && sample_rate_hz % 24000 == 0;
     }
 
     [[nodiscard]] constexpr auto sample_rate_hz() const noexcept -> std::uint32_t { return fs_; }

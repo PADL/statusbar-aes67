@@ -23,6 +23,8 @@ TEST(mediabus_ptp_clock, supports_only_the_48k_family)
     EXPECT_TRUE(PtpMediaClock::supports(192000));
     EXPECT_FALSE(PtpMediaClock::supports(44100));
     EXPECT_FALSE(PtpMediaClock::supports(0));
+    EXPECT_FALSE(PtpMediaClock::supports(6000));   // under a sample per tick
+    EXPECT_FALSE(PtpMediaClock::supports(36000));  // 4.5 samples per tick
     EXPECT_EQ(PtpMediaClock{48000}.samples_per_tick(), std::uint32_t{6});
     EXPECT_EQ(PtpMediaClock{96000}.samples_per_tick(), std::uint32_t{12});
     EXPECT_EQ(PtpMediaClock{192000}.samples_per_tick(), std::uint32_t{24});
@@ -65,3 +67,5 @@ TEST(mediabus_ptp_clock, rtp_timestamp_is_the_low_32_bits)
     EXPECT_EQ(PtpMediaClock::unwrap(static_cast<std::uint32_t>(wrap + 3), wrap - 3), wrap + 3);
     EXPECT_EQ(PtpMediaClock::unwrap(static_cast<std::uint32_t>(wrap - 3), wrap + 3), wrap - 3);
 }
+
+TEST_MAIN(statusbar_mediabus, mediabus_ptp_clock_test)

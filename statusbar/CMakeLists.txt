@@ -8,8 +8,7 @@ add_subdirectory(mediabus)
 # Populate the package INTERFACE library — skipped under an outer aggregate
 # build, which populates a single shared `statusbar` itself.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
-  target_link_libraries(statusbar INTERFACE statusbar-mediabus statusbar::itc
-                                            statusbar::status statusbar::test)
+  target_link_libraries(statusbar INTERFACE statusbar-mediabus statusbar::test)
 endif()
 
 # Standalone per-package test binary (statusbar_package_test_binary in
