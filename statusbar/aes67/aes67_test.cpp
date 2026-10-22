@@ -1,0 +1,751 @@
+// Copyright 2026 PADL Software Pty Ltd
+// SPDX-License-Identifier: MIT
+
+#include "statusbar/aes67/aes67_error.hpp"
+#include "statusbar/aes67/aes67_receiver.hpp"
+#include "statusbar/aes67/aes67_sender.hpp"
+#include "statusbar/aes67/aes67_socket.hpp"
+#include "statusbar/aes67/aes67_udp_transport.hpp"
+#include "statusbar/rtp/rtp_header.hpp"
+#include "statusbar/test/test.hpp"
+
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <print>
+#include <thread>
+#include <vector>
+
+#include <net/if.h>
+#include <sys/socket.h>
+
+using namespace statusbar;
+using namespace statusbar::aes67;
+using statusbar::ip::IPv4Address;
+
+namespace {
+
+constexpr uint32_t FPP = 48;
+
+Grandmaster const GRANDMASTER{.identity = *ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"), .domain = 0};
+
+constexpr StreamFormat STEREO_L24{.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP};
+
+/// Byte `b` of frame `index`: a pattern a receiver can check by index.
+auto pattern(uint64_t const index, size_t const b) -> uint8_t
+{
+    return static_cast<uint8_t>((index * 7) + b);
+}
+
+/// Generates the pattern for any index, or refuses indices in `missing`.
+class PatternSource
+{
+  public:
+    explicit PatternSource(uint32_t const frame_bytes)
+        : frame_bytes_{frame_bytes}
+    {}
+
+    auto provider() -> FrameProvider
+    {
+        return [this](uint64_t const first_index, uint32_t const frames, std::span<uint8_t> const out) {
+            return pull(first_index, frames, out) ? Supply::frames : Supply::missing;
+        };
+    }
+
+    auto pull(uint64_t const first_index, uint32_t const frames, std::span<uint8_t> const out) noexcept -> bool
+    {
+        ++pulls;
+        if (first_index == refuse_index) {
+            return false;
+        }
+        for (uint32_t f = 0; f < frames; ++f) {
+            for (uint32_t b = 0; b < frame_bytes_; ++b) {
+                out[(size_t{f} * frame_bytes_) + b] = pattern(first_index + f, b);
+            }
+        }
+        return true;
+    }
+
+    uint64_t refuse_index{UINT64_MAX};
+    size_t pulls{0};
+
+  private:
+    uint32_t frame_bytes_;
+};
+
+struct Received
+{
+    uint64_t first_index;
+    uint32_t frames;
+    std::vector<uint8_t> bytes;
+};
+
+class RecordingSink
+{
+  public:
+    auto handler() -> FrameHandler
+    {
+        return [this](uint64_t const first_index, uint32_t const frames, std::span<uint8_t const> const bytes) {
+            blocks.push_back({first_index, frames, {bytes.begin(), bytes.end()}});
+        };
+    }
+    std::vector<Received> blocks;
+};
+
+/// A transport in memory: what senders send, receivers receive.
+class LoopTransport final : public Transport
+{
+  public:
+    struct Packet
+    {
+        Endpoint destination;
+        std::vector<uint8_t> bytes;
+    };
+
+    class Rx final : public ReceivePort
+    {
+      public:
+        Rx(LoopTransport& t, Endpoint const& d)
+            : transport{t}
+            , destination{d}
+        {}
+        auto receive(std::span<Datagram> const out) noexcept -> size_t override
+        {
+            held.clear();
+            size_t n = 0;
+            while (n < out.size() && !transport.queue.empty()) {
+                auto packet = std::move(transport.queue.front());
+                transport.queue.pop_front();
+                if (packet.destination != destination) {
+                    continue;
+                }
+                held.push_back(std::move(packet.bytes));
+                out[n++] = {.payload = held.back(), .source = transport.source};
+            }
+            return n;
+        }
+        LoopTransport& transport;
+        Endpoint destination;
+        std::deque<std::vector<uint8_t>> held;
+    };
+
+    class Tx final : public SendPort
+    {
+      public:
+        Tx(LoopTransport& t, Endpoint const& d)
+            : transport{t}
+            , destination{d}
+        {}
+        auto send(rtp::RtpHeader const& header, std::span<uint8_t const> const payload) noexcept -> bool override
+        {
+            std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
+            (void)rtp::serialize_rtp(header, payload, bytes);
+            transport.queue.push_back({destination, std::move(bytes)});
+            return true;
+        }
+        auto flush() noexcept -> size_t override { return 0; }
+        LoopTransport& transport;
+        Endpoint destination;
+    };
+
+    [[nodiscard]] auto local_address() const noexcept -> IPv4Address override { return source.address; }
+    auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override
+    {
+        return std::make_unique<Rx>(*this, destination);
+    }
+    auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override
+    {
+        return std::make_unique<Tx>(*this, options.destination);
+    }
+
+    std::deque<Packet> queue;
+    Endpoint source{.address = IPv4Address{192, 168, 1, 10}, .port = 5004};
+};
+
+auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
+{
+    sdp::Session session{};
+    session.origin_address = "192.168.1.10";
+    session.connection = sdp::Connection{.address = destination.address, .ttl = 32};
+    sdp::Media media{};
+    media.port = destination.port;
+    media.payload_type = 97;
+    media.encoding = sdp::Encoding::l24;
+    media.channels = 2;
+    if (offset) {
+        media.media_clock = sdp::MediaClock{.direct_offset = *offset};
+    }
+    session.media.push_back(media);
+    return session;
+}
+
+auto rtp_packet(uint16_t const seq, uint32_t const timestamp, uint32_t const ssrc = 0x1234, uint8_t const pt = 97)
+    -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload(size_t{FPP} * 6);
+    for (size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = pattern(timestamp + (i / 6), i % 6);
+    }
+    rtp::RtpHeader header{};
+    header.init(pt, seq, timestamp, ssrc);
+    std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
+    (void)rtp::serialize_rtp(header, payload, bytes);
+    return bytes;
+}
+
+void expect_pattern(Received const& block)
+{
+    for (size_t i = 0; i < block.bytes.size(); ++i) {
+        EXPECT_EQ(block.bytes[i], pattern(block.first_index + (i / 6), i % 6));
+    }
+}
+
+}  // namespace
+
+TEST(aes67_sender, parses_a_grandmaster)
+{
+    auto const gm = parse_grandmaster("00-1D-C1-FF-FE-12-34-56:3");
+    EXPECT_TRUE(gm.has_value());
+    EXPECT_EQ(gm->domain, uint8_t{3});
+    EXPECT_TRUE(gm->identity == *ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"));
+    auto const colons = parse_grandmaster("00:1d:c1:ff:fe:12:34:56:0");
+    EXPECT_TRUE(colons.has_value());
+    EXPECT_EQ(colons->domain, uint8_t{0});
+    auto const bare = parse_grandmaster("001DC1FFFE123456");
+    EXPECT_TRUE(bare.has_value());
+    EXPECT_FALSE(parse_grandmaster("not a clock").has_value());
+    EXPECT_FALSE(parse_grandmaster("00-1D-C1-FF-FE-12-34-56:x").has_value());
+    EXPECT_FALSE(parse_grandmaster("00-1D-C1-FF-FE-12-34-56:128").has_value());
+}
+
+TEST(aes67_sender, writes_sdp_that_parses_back)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);  // these tests time packets by their last frame
+    EXPECT_FALSE(sender.session().has_value());
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 98}));
+    sender.set_grandmaster(GRANDMASTER);
+
+    auto const session = sender.session();
+    EXPECT_TRUE(session.has_value());
+    std::string const text = sdp::to_string(*session);
+    auto const parsed = sdp::parse(text);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->origin_address, std::string{"192.168.1.10"});
+    EXPECT_EQ(parsed->name, std::string{"Test"});
+    EXPECT_EQ(parsed->media.size(), size_t{1});
+    auto const& media = parsed->media[0];
+    EXPECT_EQ(media.port, uint16_t{5004});
+    EXPECT_EQ(media.payload_type, uint8_t{98});
+    EXPECT_TRUE(media.encoding == sdp::Encoding::l24);
+    EXPECT_EQ(media.channels, uint16_t{2});
+    EXPECT_EQ(media.sample_rate, uint32_t{48000});
+    EXPECT_EQ(media.packet_time_us, uint32_t{1000});
+    EXPECT_EQ(media.frames_per_packet(), FPP);
+    EXPECT_TRUE(parsed->effective_direction(media) == sdp::Direction::recvonly);
+    EXPECT_TRUE(parsed->effective_media_clock_offset(media) == uint32_t{0});
+    auto const clock = parsed->effective_clock(media);
+    EXPECT_TRUE(clock.has_value());
+    EXPECT_TRUE(clock->grandmaster == ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"));
+    auto const connection = parsed->effective_connection(media);
+    EXPECT_TRUE(connection.has_value());
+    EXPECT_TRUE(connection->address == (IPv4Address{239, 69, 1, 2}));
+    EXPECT_EQ(connection->ttl, uint8_t{32});
+    auto const filter = parsed->effective_source_filter(media);
+    EXPECT_TRUE(filter.has_value());
+    EXPECT_TRUE(filter->source == (IPv4Address{192, 168, 1, 10}));
+    EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=mediaclk:direct=0\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=clock-domain:PTPv2 0\r\n") != std::string::npos);
+    EXPECT_TRUE(parsed->effective_clock_domain(media) == uint8_t{0});
+
+    // Reconfiguring bumps the version and keeps the session id.
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 3}, .port = 5004}));
+    auto const again = sender.session();
+    EXPECT_EQ(again->session_id, session->session_id);
+    EXPECT_EQ(again->session_version, session->session_version + 1);
+
+    // A grandmaster in another domain names it; none leaves ts-refclk out.
+    sender.set_grandmaster(Grandmaster{.identity = GRANDMASTER.identity, .domain = 5});
+    EXPECT_TRUE(
+        sdp::to_string(*sender.session()).find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:5\r\n") != std::string::npos);
+    sender.set_grandmaster(std::nullopt);
+    EXPECT_TRUE(sdp::to_string(*sender.session()).find("ts-refclk") == std::string::npos);
+    EXPECT_TRUE(sdp::to_string(*sender.session()).find("clock-domain") == std::string::npos);
+}
+
+TEST(aes67_sender, writes_a_125_us_ptime)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    auto format = STEREO_L24;
+    format.frames_per_packet = 6;
+    Sender sender{format, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    std::string const text = sdp::to_string(*sender.session());
+    EXPECT_TRUE(text.find("a=ptime:0.125\r\n") != std::string::npos);
+    EXPECT_EQ(sdp::parse(text)->media[0].frames_per_packet(), uint32_t{6});
+}
+
+TEST(aes67_sender, refuses_what_aes67_cannot_carry)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    auto format = STEREO_L24;
+    format.sample_rate = 44100;
+    Sender rate{format, source.provider(), transport, "Test"};
+    EXPECT_TRUE(rate.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}).error() == Aes67Error::unsupported_format);
+
+    format = STEREO_L24;
+    format.channels = 16;  // 48 frames of 16 x L24 is 2304 bytes
+    Sender big{format, source.provider(), transport, "Test"};
+    EXPECT_TRUE(big.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}).error() == Aes67Error::packet_too_large);
+}
+
+TEST(aes67_sender, sends_packets_on_the_grid_when_due)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);  // these tests time packets by their last frame
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+
+    uint64_t const base = 48'000ULL * 1'000'000;  // some PTP time well past the epoch
+    sender.tick(base + 46);                       // packet [base - 48, base) is due: last index base - 1
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    sender.tick(base + 46);  // nothing new
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    sender.tick(base + 47);  // [base, base + 48) completes
+    EXPECT_EQ(transport.queue.size(), size_t{2});
+    sender.tick(base + 47 + (3 * 48));  // three more at once
+    EXPECT_EQ(transport.queue.size(), size_t{5});
+
+    uint16_t expected_seq = 0;
+    for (size_t i = 0; i < transport.queue.size(); ++i) {
+        auto const packet = rtp::parse_rtp(transport.queue[i].bytes);
+        EXPECT_TRUE(packet.has_value());
+        uint64_t const first = base - 48 + (i * 48);
+        EXPECT_EQ(packet->header.timestamp.get(), static_cast<uint32_t>(first));
+        EXPECT_EQ(packet->header.ssrc.get(), sender.ssrc());
+        EXPECT_EQ(packet->header.payload_type(), uint8_t{96});
+        EXPECT_FALSE(packet->header.marker());
+        if (i > 0) {
+            EXPECT_EQ(packet->header.sequence.get(), expected_seq);
+        }
+        expected_seq = static_cast<uint16_t>(packet->header.sequence.get() + 1);
+        EXPECT_EQ(packet->payload.size(), size_t{FPP} * 6);
+        EXPECT_EQ(packet->payload[0], pattern(first, 0));
+        EXPECT_EQ(packet->payload[(47 * 6) + 5], pattern(first + 47, 5));
+    }
+    EXPECT_EQ(sender.counters().packets, uint64_t{5});
+    EXPECT_EQ(sender.counters().frames, uint64_t{5 * 48});
+    EXPECT_TRUE(sender.state() == State::running);
+}
+
+TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);  // these tests time packets by their last frame
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+
+    uint64_t const base = 4800 * 48;
+    sender.tick(base - 1);  // sends [base - 48, base)
+    source.refuse_index = base;
+    sender.tick(base + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{2});
+    auto const silent = rtp::parse_rtp(transport.queue[1].bytes);
+    EXPECT_TRUE(std::ranges::all_of(silent->payload, [](uint8_t b) { return b == 0; }));
+    EXPECT_EQ(sender.counters().lost, uint64_t{48});
+
+    // 100 packets later: only the newest is sent, the rest counted lost.
+    transport.queue.clear();
+    sender.tick(base + 47 + (100 * 48));
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    EXPECT_EQ(rtp::parse_rtp(transport.queue[0].bytes)->header.timestamp.get(), static_cast<uint32_t>(base + (100 * 48)));
+    EXPECT_EQ(sender.counters().lost, uint64_t{48 + (99 * 48)});
+}
+
+TEST(aes67_sender, waits_out_the_read_delay)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_EQ(sender.read_delay(), FPP + 12);  // the default: a packet and two ticks
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    sender.set_read_delay(100);
+
+    uint64_t const base = 48'000ULL * 1000;  // a multiple of 48
+    sender.tick(base + 47 + 99);             // [base, base + 48) is one frame short of due
+    std::size_t const before = transport.queue.size();
+    sender.tick(base + 47 + 100);  // due now
+    EXPECT_EQ(transport.queue.size(), before + 1);
+    EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(base));
+}
+
+TEST(aes67_sender, sends_uncounted_silence_with_no_provider)
+{
+    LoopTransport transport;
+    Sender sender{STEREO_L24, FrameProvider{}, transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    sender.tick(48'000ULL * 1000 + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    EXPECT_TRUE(std::ranges::all_of(rtp::parse_rtp(transport.queue[0].bytes)->payload, [](uint8_t b) { return b == 0; }));
+    EXPECT_EQ(sender.counters().lost, uint64_t{0});
+    EXPECT_EQ(sender.counters().packets, uint64_t{1});
+}
+
+TEST(aes67_sender, waits_out_a_small_backward_step)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    uint64_t const base = 48'000ULL * 1000;
+    for (uint64_t k = 0; k < 4; ++k) {
+        sender.tick(base + 47 + (k * FPP));  // sends [base, ...) .. [base + 3 * 48, ...)
+    }
+    EXPECT_EQ(transport.queue.size(), size_t{4});
+    // Two packets back: nothing is sent again, and sending resumes where it left off.
+    sender.tick(base + 47 + FPP);
+    sender.tick(base + 47 + (3 * FPP));
+    EXPECT_EQ(transport.queue.size(), size_t{4});
+    sender.tick(base + 47 + (4 * FPP));
+    EXPECT_EQ(transport.queue.size(), size_t{5});
+    EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(base + (4 * FPP)));
+    for (size_t i = 1; i < transport.queue.size(); ++i) {
+        auto const previous = rtp::parse_rtp(transport.queue[i - 1].bytes)->header.timestamp.get();
+        EXPECT_EQ(rtp::parse_rtp(transport.queue[i].bytes)->header.timestamp.get(), previous + FPP);  // none repeated
+    }
+}
+
+TEST(aes67_sender, resynchronises_after_a_large_backward_step)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    uint64_t const base = 48'000ULL * 1000;
+    sender.tick(base + 47);
+    // A step back of more than MAX_BURST packets: start again from now.
+    uint64_t const back = base - (uint64_t{Sender::MAX_BURST + 2} * FPP);
+    sender.tick(back + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{2});
+    EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(back));
+}
+
+TEST(aes67_receiver, refuses_streams_it_cannot_take)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+
+    EXPECT_TRUE(receiver.configure(stream_session(group, std::nullopt)).error() == Aes67Error::not_ptp_locked);
+    auto session = stream_session(group);
+    session.media[0].channels = 8;
+    EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::format_mismatch);
+    session = stream_session(group);
+    session.media[0].sample_rate = 44100;
+    EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::unsupported_format);
+    session = stream_session(group);
+    session.media[0].encoding = sdp::Encoding::am824;
+    EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::format_mismatch);
+    EXPECT_TRUE(receiver.configure(stream_session(group), 1).error() == Aes67Error::no_media);
+    EXPECT_FALSE(receiver.configured());
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    EXPECT_TRUE(receiver.configured());
+    EXPECT_TRUE(receiver.state() == State::ready);
+}
+
+TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    uint32_t const offset = 0x1000;
+    EXPECT_TRUE(receiver.configure(stream_session(group, offset)));
+
+    // Indices just past 2^32 so the timestamps wrap: the reference unwraps them.
+    uint64_t const base = (1ULL << 32U) + 96;
+    auto send = [&](uint16_t const seq, uint64_t const index, uint32_t const ssrc = 0x1234, uint8_t const pt = 97) {
+        auto bytes = rtp_packet(seq, static_cast<uint32_t>(index), ssrc, pt);
+        // Timestamps carry the offset; the pattern is by index.
+        rtp::RtpHeader header{};
+        header.init(pt, seq, static_cast<uint32_t>(index) + offset, ssrc);
+        (void)store_unchecked(std::span{bytes}, header);
+        transport.queue.push_back({group, std::move(bytes)});
+    };
+    auto at = [&](uint16_t const n) { return base + (uint64_t{n} * FPP); };
+
+    send(10, at(0));  // on probation, handed on all the same
+    send(11, at(1));
+    send(12, at(2));
+    send(14, at(4));                                   // 13 missing
+    send(13, at(3));                                   // ...arrives late
+    send(13, at(3));                                   // duplicate
+    send(16, at(6));                                   // 15 lost for good
+    send(17, at(7), 0x9999);                           // another source
+    send(17, at(7), 0x1234, 96);                       // another payload type
+    transport.queue.push_back({group, {0x80, 0x61}});  // malformed
+    receiver.drain(at(7));
+
+    EXPECT_EQ(sink.blocks.size(), size_t{6});
+    std::array<uint16_t, 6> const order{0, 1, 2, 4, 3, 6};
+    for (size_t i = 0; i < order.size(); ++i) {
+        EXPECT_EQ(sink.blocks[i].first_index, at(order[i]));
+        EXPECT_EQ(sink.blocks[i].frames, FPP);
+        expect_pattern(sink.blocks[i]);
+    }
+    auto const& c = receiver.counters();
+    EXPECT_EQ(c.packets, uint64_t{6});
+    EXPECT_EQ(c.frames, uint64_t{6 * FPP});
+    EXPECT_EQ(c.lost, uint64_t{FPP});   // 15; 13 was recovered
+    EXPECT_EQ(c.late, uint64_t{FPP});   // 13
+    EXPECT_EQ(c.dropped, uint64_t{4});  // duplicate, source, payload type, malformed
+    EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{0x1234});
+    EXPECT_TRUE(receiver.state() == State::running);
+
+    // A second of silence from 0x1234, and a new source is adopted.
+    uint64_t const later = at(7) + 48000;
+    send(500, later, 0x5555);
+    send(501, later + FPP, 0x5555);
+    receiver.drain(later + FPP);
+    EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{0x5555});
+    EXPECT_EQ(sink.blocks.back().first_index, later + FPP);
+}
+
+TEST(aes67_receiver, takes_late_packets_as_far_back_as_rtp_sequence_does)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    uint64_t const base = 48'000ULL * 2000;
+    auto send = [&](uint16_t const n) {
+        transport.queue.push_back({group, rtp_packet(n, static_cast<uint32_t>(base + (uint64_t{n} * FPP)))});
+    };
+    // 0..200 except 136 and 101, then those two: 64 and 99 behind the high-water mark 200.
+    for (uint16_t n = 0; n <= 200; ++n) {
+        if (n != 136 && n != 101 && n != 100) {
+            send(n);
+        }
+    }
+    while (!transport.queue.empty()) {
+        receiver.drain(base + (201 * FPP));  // a drain takes at most MAX_BATCHES batches
+    }
+    auto const lost = receiver.counters().lost;
+    EXPECT_EQ(lost, uint64_t{3 * FPP});
+    send(136);  // 64 behind
+    send(101);  // 99 behind: RtpSequence's last late packet
+    send(100);  // 100 behind: RtpSequence takes it for a jump
+    receiver.drain(base + (201 * FPP));
+    EXPECT_EQ(receiver.counters().late, uint64_t{2 * FPP});
+    EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{1});
+    EXPECT_EQ(sink.blocks.back().first_index, base + (101 * FPP));
+}
+
+TEST(aes67_udp, two_receivers_share_a_port)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    uint16_t const port = 45030;
+    Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = port};
+    Endpoint const group{.address = IPv4Address{239, 69, 250, 9}, .port = port};
+    RecordingSink unicast_sink;
+    Receiver unicast_receiver{STEREO_L24, unicast_sink.handler(), **transport};
+    EXPECT_TRUE(unicast_receiver.configure(stream_session(unicast)));
+    RecordingSink group_sink;
+    Receiver group_receiver{STEREO_L24, group_sink.handler(), **transport};
+    bool const multicast = group_receiver.configure(stream_session(group)).has_value();
+
+    // A second unicast receiver on the same address and port is refused.
+    RecordingSink other_sink;
+    Receiver other{STEREO_L24, other_sink.handler(), **transport};
+    EXPECT_TRUE(other.configure(stream_session(unicast)).error() == std::errc::address_in_use);
+
+    auto socket = net::make_udp_socket();
+    EXPECT_TRUE(socket.has_value());
+    EXPECT_TRUE(net::set_multicast_send(socket->get(), ::if_nametoindex("lo"), 1, true).has_value());
+    auto send_to = [&](Endpoint const& to, uint16_t const seq) {
+        auto const bytes = rtp_packet(seq, static_cast<uint32_t>(seq * FPP));
+        sockaddr_in const address = to_sockaddr(to);
+        return ::sendto(socket->get(), bytes.data(), bytes.size(), 0, reinterpret_cast<sockaddr const*>(&address), sizeof(address));
+    };
+    for (uint16_t seq = 0; seq < 3; ++seq) {
+        EXPECT_TRUE(send_to(unicast, seq) > 0);
+        if (multicast) {
+            (void)send_to(group, static_cast<uint16_t>(seq + 1000));
+        }
+    }
+    uint64_t const now = 1000 * FPP;
+    for (int tries = 0; tries < 100 && unicast_receiver.counters().packets < 3; ++tries) {
+        unicast_receiver.drain(now);
+        group_receiver.drain(now);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    unicast_receiver.drain(now);
+    group_receiver.drain(now);
+    EXPECT_EQ(unicast_receiver.counters().packets, uint64_t{3});
+    EXPECT_EQ(unicast_receiver.counters().dropped, uint64_t{0});  // the group's datagrams never reach it
+    if (!multicast || group_receiver.counters().packets == 0) {
+        std::println("  skipped (multicast part): no multicast on lo here");
+        return;
+    }
+    EXPECT_EQ(group_receiver.counters().packets, uint64_t{3});
+    EXPECT_EQ(group_receiver.counters().dropped, uint64_t{0});  // nor the unicast ones it
+}
+
+TEST(aes67_udp, sender_to_receiver_over_loopback)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    EXPECT_TRUE((*transport)->local_address() == (IPv4Address{127, 0, 0, 1}));
+
+    Endpoint const destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45004};
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
+    sender.set_read_delay(0);  // these tests time packets by their last frame
+    EXPECT_TRUE(sender.configure(Destination{.address = destination.address, .port = destination.port, .payload_type = 97}));
+    sender.set_grandmaster(GRANDMASTER);
+
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), **transport};
+    // The receiver configured from the sender's own SDP, as text and back.
+    auto const sdp_text = sdp::to_string(*sender.session());
+    auto const parsed = sdp::parse(sdp_text);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(receiver.configure(*parsed));
+
+    // A fake PTP clock: 1 ms (one packet) per step, from an index past 2^32.
+    uint64_t now = (5ULL << 32U) + 47;
+    for (int step = 0; step < 10; ++step) {
+        sender.tick(now);
+        receiver.drain(now);
+        for (int tries = 0; tries < 100 && receiver.counters().packets < static_cast<uint64_t>(step + 1); ++tries) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            receiver.drain(now);
+        }
+        now += FPP;
+    }
+    receiver.drain(now);
+    EXPECT_EQ(receiver.counters().packets, uint64_t{10});
+    EXPECT_EQ(sink.blocks.size(), size_t{10});
+    // Packets lie on the 48-frame grid; the second one sent is the first kept.
+    uint64_t const first = ((((5ULL << 32U) + 48) / FPP) * FPP) - FPP;  // the first packet sent
+    for (size_t i = 0; i < sink.blocks.size(); ++i) {
+        EXPECT_EQ(sink.blocks[i].first_index, first + (i * FPP));
+        expect_pattern(sink.blocks[i]);
+    }
+    EXPECT_EQ(receiver.counters().lost, uint64_t{0});
+    EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{sender.ssrc()});
+    EXPECT_EQ(sender.counters().packets, uint64_t{10});
+}
+
+TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
+    sender.set_read_delay(0);
+    // Nothing listens on this port: each datagram draws an ICMP port-unreachable.
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45010}));
+    uint64_t now = 48'000ULL * 900 + 47;
+    for (int step = 0; step < 20; ++step, now += FPP) {
+        sender.tick(now);
+        std::this_thread::sleep_for(std::chrono::microseconds{200});  // let the ICMP come back
+    }
+    EXPECT_EQ(sender.counters().dropped, uint64_t{0});
+    EXPECT_EQ(sender.counters().packets, uint64_t{20});
+
+    // A listener that appears later gets what follows.
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), **transport};
+    auto session = stream_session({.address = IPv4Address{127, 0, 0, 1}, .port = 45010});
+    session.media[0].payload_type = 96;
+    EXPECT_TRUE(receiver.configure(session));
+    for (int step = 0; step < 3; ++step, now += FPP) {
+        sender.tick(now);
+    }
+    for (int tries = 0; tries < 100 && receiver.counters().packets < 3; ++tries) {
+        receiver.drain(now);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    EXPECT_EQ(receiver.counters().packets, uint64_t{3});
+    EXPECT_EQ(sender.counters().dropped, uint64_t{0});
+}
+
+TEST(aes67_udp, counts_loss_and_reorder_from_the_wire)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    Endpoint const destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45006};
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), **transport};
+    EXPECT_TRUE(receiver.configure(stream_session(destination)));
+
+    auto socket = net::make_udp_socket();
+    EXPECT_TRUE(socket.has_value());
+    sockaddr_in const to = to_sockaddr(destination);
+    uint64_t const base = 48000ULL * 3600;
+    for (uint16_t const n : {0, 1, 2, 4, 3, 6, 7}) {
+        auto const bytes = rtp_packet(static_cast<uint16_t>(100 + n), static_cast<uint32_t>(base + (n * FPP)));
+        EXPECT_EQ(
+            ::sendto(socket->get(), bytes.data(), bytes.size(), 0, reinterpret_cast<sockaddr const*>(&to), sizeof(to)),
+            static_cast<ssize_t>(bytes.size()));
+    }
+    uint64_t const now = base + (8 * FPP);
+    for (int tries = 0; tries < 100 && receiver.counters().packets < 7; ++tries) {
+        receiver.drain(now);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    EXPECT_EQ(receiver.counters().packets, uint64_t{7});
+    EXPECT_EQ(receiver.counters().late, uint64_t{FPP});  // 3 after 4
+    EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});  // 5
+    EXPECT_EQ(sink.blocks.back().first_index, base + (7 * FPP));
+    expect_pattern(sink.blocks.back());
+}
+
+TEST(aes67_udp, multicast_over_loopback_when_the_host_allows)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    Endpoint const group{.address = IPv4Address{239, 69, 250, 1}, .port = 45008};
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), **transport};
+    if (!receiver.configure(stream_session(group))) {
+        std::println("  skipped: cannot join a group on lo");
+        return;
+    }
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
+    sender.set_read_delay(0);  // these tests time packets by their last frame
+    EXPECT_TRUE(sender.configure(Destination{.address = group.address, .port = group.port, .payload_type = 97}));
+    uint64_t now = 48000ULL * 7200 + 47;
+    for (int step = 0; step < 5; ++step, now += FPP) {
+        sender.tick(now);
+    }
+    for (int tries = 0; tries < 50 && receiver.counters().packets < 5; ++tries) {
+        receiver.drain(now);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    if (sender.counters().dropped != 0 || receiver.counters().packets == 0) {
+        std::println("  skipped: the host does not route multicast on lo");
+        return;
+    }
+    EXPECT_EQ(receiver.counters().packets, uint64_t{5});
+    expect_pattern(sink.blocks.back());
+}
+
+TEST_MAIN(statusbar_aes67, aes67_test)

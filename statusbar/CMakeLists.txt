@@ -6,11 +6,14 @@ statusbar_package_module_init()
 add_subdirectory(mediaclock)
 add_subdirectory(rtp)
 add_subdirectory(sdp)
+add_subdirectory(sap)
+add_subdirectory(aes67)
 
 # Populate the package INTERFACE library — skipped under an outer aggregate
 # build, which populates a single shared `statusbar` itself.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   target_link_libraries(statusbar INTERFACE statusbar-mediaclock statusbar-rtp statusbar-sdp
+                                            statusbar-sap statusbar-aes67
                                             statusbar::test)
 endif()
 

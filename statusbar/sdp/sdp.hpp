@@ -8,7 +8,8 @@
 /// Parses and writes the subset AES67 uses: an origin, a session name, IPv4
 /// connection data (multicast TTL included), and audio media over RTP/AVP with
 /// L16/L24 rtpmaps, ptime, the RFC 7273 reference clock and media clock
-/// (`ts-refclk:ptp=...`, `mediaclk:direct=<offset>`), and RFC 4570 source
+/// (`ts-refclk:ptp=...`, `mediaclk:direct=<offset>`), RAVENNA's
+/// `clock-domain:PTPv2 <n>`, and RFC 4570 source
 /// filters. A session may hold several audio media (ST 2022-7 sends the same
 /// stream twice); other media are skipped. Attributes the bridge has no use for
 /// are ignored. Connection, clock and media clock may be given at session or
@@ -77,7 +78,8 @@ struct Connection
 
 /// `a=ts-refclk:ptp=<version>:<grandmaster>[:<domain>]` or `ptp=<version>:traceable`
 /// (RFC 7273 section 4.8). The domain may be written bare (`:0`, as AES67 devices
-/// do) or as `domain-nmbr=0`; a 2002 `domain-name=` is read as domain 0. RFC 7273
+/// do), as `domain-nmbr=0`, or left out (domain 0); to_string() always writes it
+/// bare, 0 included; a 2002 `domain-name=` is read as domain 0. RFC 7273
 /// requires a grandmaster or `traceable`; parse() tolerates a bare version (the
 /// grandmaster stays nullopt), to_string() writes nothing for one.
 struct PtpReference
@@ -133,6 +135,7 @@ struct Media
     std::optional<PtpReference> clock;
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
+    std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see ClockDomain below)
 
     /// Bytes in one frame: one sample of every channel.
     [[nodiscard]] constexpr auto frame_bytes() const noexcept -> uint32_t { return channels * bytes_per_sample(encoding); }
@@ -161,6 +164,7 @@ struct Session
     std::optional<PtpReference> clock;
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
+    std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see effective_clock_domain())
     std::vector<Media> media;
 
     [[nodiscard]] auto effective_direction(Media const& m) const noexcept -> Direction
@@ -175,6 +179,14 @@ struct Session
     [[nodiscard]] auto effective_source_filter(Media const& m) const noexcept -> std::optional<SourceFilter>
     {
         return m.source_filter ? m.source_filter : source_filter;
+    }
+    /// `a=clock-domain:PTPv2 <domain>` in force for `m` (media level over
+    /// session level): the PTPv2 domain of the reference clock, which RAVENNA
+    /// and Dante write beside ts-refclk and some receivers look for. Other clock
+    /// kinds are not kept. It duplicates PtpReference::domain; writers set both.
+    [[nodiscard]] auto effective_clock_domain(Media const& m) const noexcept -> std::optional<uint8_t>
+    {
+        return m.clock_domain ? m.clock_domain : clock_domain;
     }
     /// The direct media clock offset in force for `m`, or nullopt when no media
     /// clock was given or the one in force (media level over session level) is

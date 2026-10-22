@@ -187,7 +187,7 @@ TEST(sdp, writes_what_it_parses)
                     "a=recvonly\r\n"
                     "a=rtpmap:97 L24/48000/2\r\n"
                     "a=ptime:0.125\r\n"
-                    "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4\r\n"
+                    "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n"
                     "a=mediaclk:direct=1266592257\r\n"});
     auto const again = parse(text);
     EXPECT_TRUE(again.has_value());
@@ -406,6 +406,40 @@ TEST(sdp, writes_only_what_the_rfcs_allow)
     EXPECT_TRUE(text.find("ts-refclk") == std::string::npos);
     EXPECT_TRUE(text.find("c=IN IP4 10.1.2.3\r\n") != std::string::npos);
     EXPECT_TRUE(parse(text).has_value());
+}
+
+TEST(sdp, writes_domain_zero_and_reads_both_forms)
+{
+    std::string text{DANTE};
+    text.replace(text.find(":0\r\n"), 2, "");  // the bare form, no domain
+    auto const bare = parse(text);
+    EXPECT_TRUE(bare.has_value());
+    EXPECT_EQ(bare->media.at(0).clock->domain, uint8_t{0});
+    EXPECT_TRUE(to_string(*bare).find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n") != std::string::npos);
+}
+
+TEST(sdp, carries_the_ravenna_clock_domain)
+{
+    std::string text{DANTE};
+    text += "a=clock-domain:PTPv2 3\r\n";
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const& m = session->media.at(0);
+    EXPECT_EQ(m.clock_domain, std::optional<uint8_t>{3});
+    EXPECT_EQ(session->effective_clock_domain(m), std::optional<uint8_t>{3});
+    auto const written = to_string(*session);
+    EXPECT_TRUE(written.find("a=mediaclk:direct=1266592257\r\na=clock-domain:PTPv2 3\r\n") != std::string::npos);
+    EXPECT_TRUE(*parse(written) == *session);
+
+    // Session level applies to every media; other kinds and bad domains are ignored.
+    Session level;
+    level.clock_domain = 1;
+    Media media{};
+    level.media.push_back(media);
+    EXPECT_EQ(level.effective_clock_domain(level.media[0]), std::optional<uint8_t>{1});
+    std::string other{DANTE};
+    other += "a=clock-domain:IEEE1588-2002 _DFLT\r\na=clock-domain:PTPv2 200\r\n";
+    EXPECT_FALSE(parse(other)->media.at(0).clock_domain.has_value());
 }
 
 TEST_MAIN(statusbar_sdp, sdp_test)

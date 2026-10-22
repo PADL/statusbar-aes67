@@ -38,22 +38,6 @@ auto parse_number(std::string_view const text) noexcept -> std::optional<T>
     return value;
 }
 
-auto parse_ipv4(std::string_view text) noexcept -> std::optional<ip::IPv4Address>
-{
-    std::array<uint8_t, 4> octets{};
-    for (size_t i = 0; i < octets.size(); ++i) {
-        auto const octet = parse_number<uint8_t>(take(text, '.'));
-        if (!octet) {
-            return std::nullopt;
-        }
-        octets[i] = *octet;
-    }
-    if (!text.empty()) {
-        return std::nullopt;
-    }
-    return ip::IPv4Address{octets[0], octets[1], octets[2], octets[3]};
-}
-
 /// A ptime in milliseconds ("1", "0.125", "0.12") as whole microseconds.
 auto parse_ptime_us(std::string_view text) noexcept -> std::optional<uint32_t>
 {
@@ -116,7 +100,7 @@ auto parse_connection(std::string_view rest) noexcept -> StatusValue<Connection>
         return std::unexpected(network.error());
     }
     Connection connection{};
-    auto const address = parse_ipv4(take(rest, '/'));
+    auto const address = ip::parse_ipv4(take(rest, '/'));
     if (!address) {
         return failure(SdpError::malformed_line);
     }
@@ -199,12 +183,12 @@ auto parse_source_filter(std::string_view rest) noexcept -> StatusValue<std::opt
     }
     SourceFilter filter{};
     if (auto const destination = take(rest, ' '); destination != "*") {
-        filter.destination = parse_ipv4(destination);
+        filter.destination = ip::parse_ipv4(destination);
         if (!filter.destination) {
             return failure(SdpError::malformed_line);
         }
     }
-    auto const source = parse_ipv4(take(rest, ' '));
+    auto const source = ip::parse_ipv4(take(rest, ' '));
     if (!source) {
         return failure(SdpError::malformed_line);
     }
@@ -434,6 +418,16 @@ class Parser
             auto& slot = media_ != nullptr ? media_->media_clock : session_.media_clock;
             if (!(slot && slot->direct_offset && !clock->direct_offset)) {
                 slot = *clock;
+            }
+            return success();
+        }
+        if (name == "clock-domain") {
+            // `PTPv2 <domain>`; another clock kind, or a domain out of range, is ignored
+            if (rest.starts_with("PTPv2 ")) {
+                auto const domain = parse_number<uint8_t>(rest.substr(6));
+                if (domain && *domain <= 127) {
+                    (media_ != nullptr ? media_->clock_domain : session_.clock_domain) = *domain;
+                }
             }
             return success();
         }

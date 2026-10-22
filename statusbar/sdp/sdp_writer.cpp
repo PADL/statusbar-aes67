@@ -73,7 +73,8 @@ void write_source_filter(Out out, SourceFilter const& filter)
 }
 
 /// RFC 7273: the grandmaster as an EUI-64 in IEEE canonical form, upper case;
-/// the domain in the bare form AES67 devices write and read. A reference with
+/// the domain in the bare form AES67 devices write and read, 0 included (as
+/// Dante writes it). A reference with
 /// neither grandmaster nor traceable has no valid form, and is not written.
 void write_clock(Out out, PtpReference const& clock)
 {
@@ -87,9 +88,7 @@ void write_clock(Out out, PtpReference const& clock)
         auto const g = clock.grandmaster->span();
         out = std::format_to(
             out, ":{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}", g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
-        if (clock.domain != 0) {
-            out = std::format_to(out, ":{}", clock.domain);
-        }
+        out = std::format_to(out, ":{}", clock.domain);
     }
     std::format_to(out, "\r\n");
 }
@@ -141,6 +140,9 @@ void write_media(Out out, Media const& media)
     if (media.media_clock) {
         write_media_clock(out, *media.media_clock);
     }
+    if (media.clock_domain) {
+        out = std::format_to(out, "a=clock-domain:PTPv2 {}\r\n", *media.clock_domain);
+    }
     if (media.source_filter) {
         write_source_filter(out, *media.source_filter);
     }
@@ -175,6 +177,9 @@ auto to_string(Session const& session) -> std::string
     }
     if (session.media_clock) {
         write_media_clock(out, *session.media_clock);
+    }
+    if (session.clock_domain) {
+        out = std::format_to(out, "a=clock-domain:PTPv2 {}\r\n", *session.clock_domain);
     }
     if (session.source_filter) {
         write_source_filter(out, *session.source_filter);

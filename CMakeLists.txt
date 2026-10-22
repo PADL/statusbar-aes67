@@ -24,6 +24,8 @@ add_subdirectory(statusbar)
 set_target_properties(statusbar-mediaclock PROPERTIES EXPORT_NAME mediaclock)
 set_target_properties(statusbar-rtp PROPERTIES EXPORT_NAME rtp)
 set_target_properties(statusbar-sdp PROPERTIES EXPORT_NAME sdp)
+set_target_properties(statusbar-sap PROPERTIES EXPORT_NAME sap)
+set_target_properties(statusbar-aes67 PROPERTIES EXPORT_NAME aes67)
 
 # Uniform statusbar- prefixed on-disk names for installed executables
 # (statusbar_prefix_tool_names in cmake/module.cmake).
