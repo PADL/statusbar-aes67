@@ -82,7 +82,7 @@ struct Connection
 /// grandmaster stays nullopt), to_string() writes nothing for one.
 struct PtpReference
 {
-    std::string version{"IEEE1588-2008"};    ///< or IEEE802.1AS-2011, ...
+    std::string version{"IEEE1588-2008"};    ///< a sender writes PTPv2; IEEE802.1AS-2011 etc. are read
     std::optional<ieee::Eui64> grandmaster;  ///< nullopt when not given, or traceable
     bool traceable{false};
     uint8_t domain{0};
