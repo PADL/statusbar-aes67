@@ -1,0 +1,26 @@
+CompileFlags:
+  Remove:
+    - -O3
+    - -DNDEBUG
+    # CMake emits an empty @<dir>/<tu>.cpp.o.modmap response file for every
+    # C++20-module-eligible TU even when the TU imports no modules. clang
+    # handles the empty file fine; clangd 22.x can mis-parse it and the
+    # downstream effect is phantom diagnostics on template instantiations
+    # ("no member named 'X' in <fully-qualified-type>" on code that
+    # compiles cleanly). Strip the response-file arg so clangd never sees
+    # it. clangd's Remove pattern only supports leading/trailing wildcard,
+    # so match the .modmap suffix. Drop this once clangd's modmap handling
+    # stabilizes.
+    - "*.modmap"
+
+Diagnostics:
+  Suppress:
+    - "fatal_too_many_errors"
+  UnusedIncludes: None
+
+Index:
+  Background: Build
+  StandardLibrary: Yes
+
+InlayHints:
+  Enabled: No

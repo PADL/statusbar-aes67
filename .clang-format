@@ -1,0 +1,56 @@
+---
+BasedOnStyle: LLVM
+AlignAfterOpenBracket: AlwaysBreak
+AllowAllParametersOfDeclarationOnNextLine: true
+AlignOperands: DontAlign
+AllowShortFunctionsOnASingleLine: InlineOnly
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+BraceWrapping:
+  AfterClass:            true
+  AfterControlStatement: false
+  AfterEnum:             true
+  AfterExternBlock:      false
+  AfterFunction:         true
+  AfterNamespace:        false
+  AfterObjCDeclaration:  true
+  AfterStruct:           true
+  AfterUnion:            true
+  BeforeCatch:           false
+  BeforeElse:            false
+  IndentBraces:          false
+  SplitEmptyFunction:    false
+  SplitEmptyNamespace:   false
+  SplitEmptyRecord:      false
+BreakBeforeBraces: Custom
+BreakConstructorInitializers: BeforeComma
+BreakInheritanceList: BeforeComma
+ColumnLimit: 132
+CommentPragmas: '^ IWYU pragma:'
+ConstructorInitializerIndentWidth: 4
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex:    '^"'
+    Priority: 5
+  - Regex:    '^<[^./]+\.h>$'
+    Priority: 10
+  - Regex:    '^<[a-z_]+>$'
+    Priority: 15
+  - Regex:    '^<[^./]+\.hpp>$'
+    Priority: 20
+  - Regex:    '^<'
+    Priority: 25
+IncludeIsMainRegex: '(_test.*)?$'
+InsertBraces: true
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+IndentWidth: 4
+ObjCSpaceBeforeProtocolList: false
+PackConstructorInitializers: Never
+PenaltyReturnTypeOnItsOwnLine: 200
+PointerAlignment: Left
+ReflowComments: false
+SpacesBeforeTrailingComments: 2
+QualifierAlignment: Right
+...

@@ -1,0 +1,100 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  misc-redundant-expression,
+  modernize-*,
+  performance-*,
+  readability-*,
+  readability-redundant-casting,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-c-arrays,
+  -modernize-avoid-c-arrays,
+  -readability-magic-numbers,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -readability-identifier-length,
+  -readability-identifier-naming,
+  -readability-convert-member-functions-to-static,
+  -readability-redundant-member-init,
+  -readability-make-member-function-const,
+  -bugprone-easily-swappable-parameters,
+  bugprone-unused-return-value,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  cppcoreguidelines-pro-type-reinterpret-cast,
+  -modernize-use-auto,
+  misc-const-correctness,
+  -cppcoreguidelines-init-variables,
+  -performance-enum-size,
+  -cppcoreguidelines-avoid-do-while,
+  -modernize-use-trailing-return-type,
+  readability-implicit-bool-conversion,
+  -readability-function-cognitive-complexity,
+  readability-math-missing-parentheses,
+  -readability-named-parameter,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-avoid-const-or-ref-data-members,
+  -readability-use-concise-preprocessor-directives,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -modernize-use-equals-default,
+  -readability-avoid-nested-conditional-operator,
+  readability-braces-around-statements,
+  readability-else-after-return,
+  -cppcoreguidelines-pro-type-member-init,
+  -bugprone-branch-clone,
+  -cppcoreguidelines-rvalue-reference-param-not-moved,
+  -performance-unnecessary-value-param,
+  -modernize-return-braced-init-list,
+  -readability-use-anyofallof,
+  -readability-use-std-min-max,
+  -readability-non-const-parameter,
+  -modernize-use-equals-delete,
+  -cppcoreguidelines-owning-memory,
+  -modernize-use-nodiscard,
+  -modernize-use-constraints,
+  -modernize-type-traits,
+  -readability-isolate-declaration,
+  -cppcoreguidelines-pro-type-const-cast,
+  -performance-inefficient-string-concatenation,
+  -cppcoreguidelines-prefer-member-initializer,
+  -readability-redundant-casting,
+  -modernize-use-ranges,
+  -readability-container-data-pointer,
+  -modernize-concat-nested-namespaces,
+  -modernize-use-integer-sign-comparison,
+  -modernize-use-emplace,
+  -modernize-loop-convert,
+  -cppcoreguidelines-use-enum-class,
+  -cppcoreguidelines-special-member-functions,
+  -readability-redundant-declaration,
+  -bugprone-exception-escape,
+  -cppcoreguidelines-no-malloc,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -readability-uppercase-literal-suffix
+
+WarningsAsErrors: '*'
+
+HeaderFilterRegex: '.*'
+# Suppress all warnings from third-party SG14 reference implementations
+# (sg14/inplace_vector.h, sg14/inplace_function.h). We don't own this code.
+ExcludeHeaderFilterRegex: '.*/sg14/.*'
+
+FormatStyle: file
+
+CheckOptions:
+  - key: bugprone-unused-return-value.AllowCastToVoid
+    value: 'true'
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case

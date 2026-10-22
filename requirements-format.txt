@@ -1,0 +1,16 @@
+# Pinned code-formatting toolchain — install the SAME versions on every build
+# context (host, dev container, CI) so `reformat.sh` never produces different
+# output depending on where it ran. clang-format in particular changes its line
+# breaking/alignment between major versions, which silently churns unrelated
+# files when contexts drift.
+#
+# 19.1.7 matches the trixie/arm64 clang the Raspberry Pi target builds with, so
+# the formatter and the compiler stay on the same LLVM line.
+#
+# Install (host):
+#     pipx install clang-format==19.1.7         # isolated, on PATH
+#   or into a venv:
+#     python3 -m venv .venv && .venv/bin/pip install -r requirements-format.txt
+#
+# reformat.sh enforces this exact version and fails loudly on a mismatch.
+clang-format==19.1.7
