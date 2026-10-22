@@ -1,13 +1,13 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "statusbar/mediabus/mediabus_ptp_clock.hpp"
+#include "statusbar/mediaclock/mediaclock_ptp_clock.hpp"
 
 #include "statusbar/test/test.hpp"
 
 #include <cstdint>
 
-using namespace statusbar::mediabus;
+using namespace statusbar::mediaclock;
 
 namespace {
 
@@ -16,7 +16,7 @@ constexpr std::uint64_t NOW_NS = 1'792'627'237'000'000'000ULL;
 
 }  // namespace
 
-TEST(mediabus_ptp_clock, supports_only_the_48k_family)
+TEST(mediaclock_ptp_clock, supports_only_the_48k_family)
 {
     EXPECT_TRUE(PtpMediaClock::supports(48000));
     EXPECT_TRUE(PtpMediaClock::supports(96000));
@@ -30,7 +30,7 @@ TEST(mediabus_ptp_clock, supports_only_the_48k_family)
     EXPECT_EQ(PtpMediaClock{192000}.samples_per_tick(), std::uint32_t{24});
 }
 
-TEST(mediabus_ptp_clock, index_is_ptp_time_times_rate)
+TEST(mediaclock_ptp_clock, index_is_ptp_time_times_rate)
 {
     PtpMediaClock const clock{48000};
     EXPECT_EQ(clock.index_at(0), std::uint64_t{0});
@@ -40,7 +40,7 @@ TEST(mediabus_ptp_clock, index_is_ptp_time_times_rate)
     EXPECT_EQ(clock.index_at(NOW_NS), (NOW_NS / 1'000'000'000ULL) * 48000ULL);
 }
 
-TEST(mediabus_ptp_clock, time_of_inverts_index_at)
+TEST(mediaclock_ptp_clock, time_of_inverts_index_at)
 {
     for (std::uint32_t const fs : {48000U, 96000U, 192000U}) {
         PtpMediaClock const clock{fs};
@@ -53,7 +53,7 @@ TEST(mediabus_ptp_clock, time_of_inverts_index_at)
     }
 }
 
-TEST(mediabus_ptp_clock, rtp_timestamp_is_the_low_32_bits)
+TEST(mediaclock_ptp_clock, rtp_timestamp_is_the_low_32_bits)
 {
     PtpMediaClock const clock{48000};
     std::uint64_t const n = clock.index_at(NOW_NS);
@@ -68,4 +68,4 @@ TEST(mediabus_ptp_clock, rtp_timestamp_is_the_low_32_bits)
     EXPECT_EQ(PtpMediaClock::unwrap(static_cast<std::uint32_t>(wrap - 3), wrap + 3), wrap - 3);
 }
 
-TEST_MAIN(statusbar_mediabus, mediabus_ptp_clock_test)
+TEST_MAIN(statusbar_mediaclock, mediaclock_ptp_clock_test)

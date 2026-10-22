@@ -3,15 +3,14 @@
 
 // The PTP-locked media clock: sample index n is presented at PTP time n / fs.
 //
-// This is the AES67 media clock with RFC 7273 `a=mediaclk:direct=0`: the media
-// clock is the PTP clock itself, so a sample's index is a pure function of PTP
-// time and every device on the same grandmaster agrees on it without exchanging
-// anything. An RTP timestamp is the low 32 bits of the index; an AVTP
-// presentation time is time_of(index) (mod 2^32 on the wire). The bus uses the
-// index as its frame address, so an AES67 receiver writes a packet at
-// `unwrapped RTP timestamp + link offset` and an AVB talker reads the frames
-// whose presentation time it is about to send -- no rate estimation, no
-// anchoring, no state.
+// This is the AES67 media clock of RFC 7273 `a=mediaclk:direct=<offset>`: the
+// media clock is the PTP clock itself, so a sample's index is a pure function
+// of PTP time and every device on the same grandmaster agrees on it without
+// exchanging anything. An RTP timestamp is the low 32 bits of the index plus
+// the stream's direct offset (subtract it before unwrap()); an AVTP
+// presentation time is time_of(index) (mod 2^32 on the wire). A bridge maps a
+// sample from one wire to the other with this arithmetic alone -- no rate
+// estimation, no anchoring, no state.
 //
 // Exact integer arithmetic, no 128-bit types: a time is split into whole
 // seconds and nanoseconds, and only the sub-second part is scaled, so the
@@ -23,7 +22,7 @@
 
 #include <cstdint>
 
-namespace statusbar::mediabus {
+namespace statusbar::mediaclock {
 
 class PtpMediaClock
 {
@@ -65,8 +64,7 @@ class PtpMediaClock
     /// The full index of a 32-bit wire timestamp (RTP), taken as the nearest
     /// index to `reference` with those low 32 bits. Unambiguous within +/- 2^31
     /// samples of the reference (about 12 hours at 48 kHz).
-    [[nodiscard]] static constexpr auto unwrap(std::uint32_t timestamp, std::uint64_t reference) noexcept
-        -> std::uint64_t
+    [[nodiscard]] static constexpr auto unwrap(std::uint32_t timestamp, std::uint64_t reference) noexcept -> std::uint64_t
     {
         auto const delta = static_cast<std::int32_t>(timestamp - static_cast<std::uint32_t>(reference));
         return reference + static_cast<std::uint64_t>(static_cast<std::int64_t>(delta));
@@ -76,4 +74,4 @@ class PtpMediaClock
     std::uint32_t fs_;
 };
 
-}  // namespace statusbar::mediabus
+}  // namespace statusbar::mediaclock
