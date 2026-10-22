@@ -40,22 +40,21 @@ auto one_line(std::string_view const text) -> std::string
     return line;
 }
 
-/// An o= username: a single non-empty token.
-auto username(std::string_view const name) -> std::string_view
+/// A single non-empty token, or `fallback`: an o= username or unicast address.
+auto token(std::string_view const text, std::string_view const fallback) -> std::string_view
 {
-    bool const token = !name.empty() && name.find_first_of(" \r\n") == std::string_view::npos;
-    return token ? name : "-";
+    bool const is_token = !text.empty() && text.find_first_of(" \r\n") == std::string_view::npos;
+    return is_token ? text : fallback;
 }
 
 void write_connection(Out out, Connection const& connection)
 {
     out = std::format_to(out, "c=IN IP4 ");
     out = ip::format_to(out, connection.address);
+    // RFC 8866 section 5.7: a TTL only for, and always for, a multicast address
     if (connection.address.is_multicast()) {
         auto const ttl = connection.ttl != 0 ? connection.ttl : Connection::DEFAULT_MULTICAST_TTL;
         out = std::format_to(out, "/{}", ttl);
-    } else if (connection.ttl != 0) {
-        out = std::format_to(out, "/{}", connection.ttl);
     }
     std::format_to(out, "\r\n");
 }
@@ -74,9 +73,13 @@ void write_source_filter(Out out, SourceFilter const& filter)
 }
 
 /// RFC 7273: the grandmaster as an EUI-64 in IEEE canonical form, upper case;
-/// the domain in the bare form AES67 devices write and read.
+/// the domain in the bare form AES67 devices write and read. A reference with
+/// neither grandmaster nor traceable has no valid form, and is not written.
 void write_clock(Out out, PtpReference const& clock)
 {
+    if (!clock.traceable && !clock.grandmaster) {
+        return;
+    }
     out = std::format_to(out, "a=ts-refclk:ptp={}", one_line(clock.version));
     if (clock.traceable) {
         out = std::format_to(out, ":traceable");
@@ -89,6 +92,17 @@ void write_clock(Out out, PtpReference const& clock)
         }
     }
     std::format_to(out, "\r\n");
+}
+
+/// RFC 7273 section 5: a direct clock with its offset; any other is written as
+/// `sender`, the media clock that is asynchronous to the reference clock.
+void write_media_clock(Out out, MediaClock const& clock)
+{
+    if (clock.direct_offset) {
+        std::format_to(out, "a=mediaclk:direct={}\r\n", *clock.direct_offset);
+    } else {
+        std::format_to(out, "a=mediaclk:sender\r\n");
+    }
 }
 
 /// A packet time in milliseconds, with no trailing zeros: 1000 -> "1", 125 -> "0.125".
@@ -129,8 +143,8 @@ void write_media(Out out, Media const& media)
     if (media.clock) {
         write_clock(out, *media.clock);
     }
-    if (media.media_clock_offset) {
-        out = std::format_to(out, "a=mediaclk:direct={}\r\n", *media.media_clock_offset);
+    if (media.media_clock) {
+        write_media_clock(out, *media.media_clock);
     }
     if (media.source_filter) {
         write_source_filter(out, *media.source_filter);
@@ -143,9 +157,14 @@ auto to_string(Session const& session) -> std::string
 {
     std::string text;
     auto out = std::back_inserter(text);
-    out = std::format_to(out, "v=0\r\no={} {} {} IN IP4 ", username(session.username), session.session_id, session.session_version);
-    out = ip::format_to(out, session.origin);
-    out = std::format_to(out, "\r\ns={}\r\n", session.name.empty() ? std::string{"-"} : one_line(session.name));
+    out = std::format_to(
+        out,
+        "v=0\r\no={} {} {} IN IP4 {}\r\ns={}\r\n",
+        token(session.username, "-"),
+        session.session_id,
+        session.session_version,
+        token(session.origin_address, "0.0.0.0"),
+        session.name.empty() ? std::string{"-"} : one_line(session.name));
     if (!session.information.empty()) {
         out = std::format_to(out, "i={}\r\n", one_line(session.information));
     }
@@ -159,8 +178,8 @@ auto to_string(Session const& session) -> std::string
     if (session.clock) {
         write_clock(out, *session.clock);
     }
-    if (session.media_clock_offset) {
-        out = std::format_to(out, "a=mediaclk:direct={}\r\n", *session.media_clock_offset);
+    if (session.media_clock) {
+        write_media_clock(out, *session.media_clock);
     }
     if (session.source_filter) {
         write_source_filter(out, *session.source_filter);

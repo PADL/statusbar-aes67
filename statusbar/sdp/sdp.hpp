@@ -51,9 +51,11 @@ struct Connection
     auto operator==(Connection const&) const noexcept -> bool = default;
 };
 
-/// `a=ts-refclk:ptp=<version>[:<grandmaster>[:<domain>]]` or `ptp=<version>:traceable`
-/// (RFC 7273 section 4.3). The domain may be written bare (`:0`, as AES67 devices
-/// do) or as `domain-nmbr=0`; a 2002 `domain-name=` is read as domain 0.
+/// `a=ts-refclk:ptp=<version>:<grandmaster>[:<domain>]` or `ptp=<version>:traceable`
+/// (RFC 7273 section 4.8). The domain may be written bare (`:0`, as AES67 devices
+/// do) or as `domain-nmbr=0`; a 2002 `domain-name=` is read as domain 0. RFC 7273
+/// requires a grandmaster or `traceable`; parse() tolerates a bare version (the
+/// grandmaster stays nullopt), to_string() writes nothing for one.
 struct PtpReference
 {
     std::string version{"IEEE1588-2008"};    ///< or IEEE802.1AS-2011, ...
@@ -73,6 +75,17 @@ struct SourceFilter
     auto operator==(SourceFilter const&) const noexcept -> bool = default;
 };
 
+/// `a=mediaclk:` (RFC 7273 section 5): `direct[=<offset>]` is the PTP clock itself,
+/// offset by `<offset>` (0 when absent); any other kind (`sender`, `IEEE1722`) is a
+/// clock the bridge cannot derive from PTP. A media-level clock of either kind
+/// overrides a session-level one; a level naming both keeps the direct one.
+struct MediaClock
+{
+    std::optional<uint32_t> direct_offset;  ///< nullopt for a media clock that is not direct
+
+    auto operator==(MediaClock const&) const noexcept -> bool = default;
+};
+
 enum class Direction : uint8_t
 {
     sendrecv,
@@ -81,11 +94,11 @@ enum class Direction : uint8_t
     inactive,
 };
 
-/// One `m=audio <port> RTP/AVP <pt>` section
+/// One `m=audio <port> RTP/AVP <pt>...` section
 struct Media
 {
     uint16_t port{0};
-    uint8_t payload_type{0};
+    uint8_t payload_type{0};  ///< the first on the m= line with an L16 or L24 rtpmap
     Encoding encoding{Encoding::l24};
     uint32_t sample_rate{48000};
     uint16_t channels{1};
@@ -94,7 +107,7 @@ struct Media
     std::optional<Direction> direction;
     std::optional<Connection> connection;
     std::optional<PtpReference> clock;
-    std::optional<uint32_t> media_clock_offset;  ///< mediaclk:direct=, mod 2^32
+    std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
 
     /// Bytes in one frame: one sample of every channel.
@@ -116,13 +129,13 @@ struct Session
     std::string username{"-"};
     uint64_t session_id{0};
     uint64_t session_version{0};
-    ip::IPv4Address origin;
-    std::string name{"-"};  ///< s=; RFC 8866 requires one, "-" when there is nothing to say
+    std::string origin_address{"0.0.0.0"};  ///< o= unicast-address: an IPv4 literal or a host name
+    std::string name{"-"};                  ///< s=; RFC 8866 requires one, "-" when there is nothing to say
     std::string information;
     std::optional<Direction> direction;
     std::optional<Connection> connection;
     std::optional<PtpReference> clock;
-    std::optional<uint32_t> media_clock_offset;
+    std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
     std::vector<Media> media;
 
@@ -139,10 +152,13 @@ struct Session
     {
         return m.source_filter ? m.source_filter : source_filter;
     }
-    /// RFC 7273: a media clock without an offset is direct=0.
-    [[nodiscard]] auto effective_media_clock_offset(Media const& m) const noexcept -> uint32_t
+    /// The direct media clock offset in force for `m`, or nullopt when no media
+    /// clock was given or the one in force (media level over session level) is
+    /// not direct: the stream's timestamps are then not PTP-locked.
+    [[nodiscard]] auto effective_media_clock_offset(Media const& m) const noexcept -> std::optional<uint32_t>
     {
-        return m.media_clock_offset.value_or(media_clock_offset.value_or(0));
+        auto const& clock = m.media_clock ? m.media_clock : media_clock;
+        return clock ? clock->direct_offset : std::nullopt;
     }
 
     auto operator==(Session const&) const -> bool = default;
@@ -150,14 +166,20 @@ struct Session
 
 /// Parse a session description. Lines may end in CRLF or LF. Fails unless it
 /// has v=0, an IN IP4 origin, s= and t=, and every audio media kept has a
-/// connection at media or session level. Audio media whose rtpmap is not L16 or
-/// L24 are skipped; if that leaves none, the error is unsupported_encoding.
+/// connection at media or session level. An audio media is kept with the first
+/// payload type on its m= line that has an L16 or L24 rtpmap; one offering only
+/// other encodings, or only static payload types without an rtpmap, is skipped,
+/// and if that leaves none the error is unsupported_encoding. A dynamic payload
+/// type without an rtpmap is missing_field.
 [[nodiscard]] auto parse(std::string_view text) -> StatusValue<Session>;
 
 /// Write a session description, CRLF line endings, fields in RFC 8866 order.
-/// Line breaks in text fields become spaces, and a username that is empty or
-/// has a space in it is written as "-", so the output always parses. Every
-/// media should have an effective connection, as parse() guarantees.
+/// Line breaks in text fields become spaces, a username that is empty or has a
+/// space in it is written as "-", and an origin address that is not one token
+/// as 0.0.0.0, so the output always parses. A PtpReference with neither
+/// grandmaster nor traceable is not written, and a unicast connection's TTL is
+/// dropped, as RFC 7273 and RFC 8866 require. Every media should have an
+/// effective connection, as parse() guarantees.
 [[nodiscard]] auto to_string(Session const& session) -> std::string;
 
 }  // namespace statusbar::sdp

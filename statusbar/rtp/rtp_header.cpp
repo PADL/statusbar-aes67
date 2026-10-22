@@ -5,23 +5,12 @@
 
 namespace statusbar::rtp {
 
-namespace {
-
-// RFC 5761 section 4: RTCP packet types 192-223 occupy the RTP marker + payload type byte.
-constexpr uint8_t RTCP_TYPE_FIRST = 192;
-constexpr uint8_t RTCP_TYPE_LAST = 223;
-
-}  // namespace
-
 auto parse_rtp(std::span<uint8_t const> const datagram) noexcept -> std::optional<RtpPacket>
 {
     RtpPacket packet{};
     BufferDeserializerBuilder reader{datagram};
     reader.parse(&packet.header);
     if (!reader || packet.header.version() != RtpHeader::VERSION) {
-        return std::nullopt;
-    }
-    if (uint8_t const type = packet.header.m_pt; type >= RTCP_TYPE_FIRST && type <= RTCP_TYPE_LAST) {
         return std::nullopt;
     }
 

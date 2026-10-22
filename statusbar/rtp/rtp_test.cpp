@@ -158,15 +158,17 @@ TEST(rtp_sequence, a_jump_is_believed_only_when_confirmed)
     EXPECT_EQ(seq.expected(), uint32_t{1});
 }
 
-TEST(rtp_header, refuses_rtcp)
+TEST(rtp_header, a_marked_packet_of_any_payload_type_is_rtp)
 {
-    auto sender_report = bytes(BASIC);
-    sender_report[1] = 200;  // RTCP SR
-    EXPECT_FALSE(parse_rtp(sender_report).has_value());
-    sender_report[1] = 223;
-    EXPECT_FALSE(parse_rtp(sender_report).has_value());
-    sender_report[1] = 0xFF;  // marker + PT 127: RTP
-    EXPECT_TRUE(parse_rtp(sender_report).has_value());
+    // marker + PT 72 is 200, an RTCP SR type; without RTCP on the port it is RTP
+    auto marked = bytes(BASIC);
+    marked[1] = 200;
+    auto const packet = parse_rtp(marked);
+    EXPECT_TRUE(packet.has_value());
+    EXPECT_TRUE(packet->header.marker());
+    EXPECT_EQ(packet->header.payload_type(), uint8_t{72});
+    marked[1] = 0xFF;  // marker + PT 127
+    EXPECT_EQ(parse_rtp(marked)->header.payload_type(), uint8_t{127});
 }
 
 TEST(rtp_header, padding_may_consume_the_whole_payload)

@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::mediaclock {
 
@@ -29,14 +30,19 @@ class PtpMediaClock
   public:
     static constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
-    /// fs must pass supports() (48, 96 or 192 kHz in practice).
-    explicit constexpr PtpMediaClock(std::uint32_t sample_rate_hz) noexcept
-        : fs_{sample_rate_hz}
-    {}
-
     [[nodiscard]] static constexpr auto supports(std::uint32_t sample_rate_hz) noexcept -> bool
     {
         return sample_rate_hz != 0 && sample_rate_hz % 24000 == 0;
+    }
+
+    /// The clock for a rate supports() (48, 96 or 192 kHz in practice), else
+    /// nullopt: a rate from an SDP is checked here, not assumed.
+    [[nodiscard]] static constexpr auto make(std::uint32_t sample_rate_hz) noexcept -> std::optional<PtpMediaClock>
+    {
+        if (!supports(sample_rate_hz)) {
+            return std::nullopt;
+        }
+        return PtpMediaClock{sample_rate_hz};
     }
 
     [[nodiscard]] constexpr auto sample_rate_hz() const noexcept -> std::uint32_t { return fs_; }
@@ -71,6 +77,10 @@ class PtpMediaClock
     }
 
   private:
+    explicit constexpr PtpMediaClock(std::uint32_t sample_rate_hz) noexcept
+        : fs_{sample_rate_hz}
+    {}
+
     std::uint32_t fs_;
 };
 

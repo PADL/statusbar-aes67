@@ -39,7 +39,7 @@ statusbar_package_install_export(NAME aes67)
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   statusbar_package_cpack_defaults(
     NAME aes67 DESCRIPTION
-    "AES67 — RTP, SDP, SAP and a wire-format media bus for bridging.")
+    "AES67 — the PTP media clock, RTP and SDP for bridging.")
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
       "statusbar-aes67 (>= ${PROJECT_VERSION}), statusbar-core-dev (>= ${statusbar-core_VERSION})"
   )

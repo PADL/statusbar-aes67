@@ -52,7 +52,7 @@ TEST(sdp, parses_a_dante_announcement)
     auto const session = parse(DANTE);
     EXPECT_TRUE(session.has_value());
     EXPECT_EQ(session->session_id, uint64_t{1311738121});
-    EXPECT_EQ(session->origin, (ip::IPv4Address{192, 168, 1, 20}));
+    EXPECT_EQ(session->origin_address, std::string{"192.168.1.20"});
     EXPECT_EQ(session->name, std::string{"AVIO-Bluetooth : 2"});
     EXPECT_EQ(session->media.size(), size_t{1});
 
@@ -77,7 +77,7 @@ TEST(sdp, parses_a_dante_announcement)
     EXPECT_EQ(clock->version, std::string{"IEEE1588-2008"});
     EXPECT_EQ(*clock->grandmaster, *ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4"));
     EXPECT_EQ(clock->domain, uint8_t{0});
-    EXPECT_EQ(session->effective_media_clock_offset(m), uint32_t{1266592257});
+    EXPECT_EQ(session->effective_media_clock_offset(m).value_or(0), uint32_t{1266592257});
 }
 
 TEST(sdp, parses_lib_aes67_output)
@@ -148,7 +148,8 @@ TEST(sdp, parses_a_2022_7_pair_and_skips_other_media)
     EXPECT_EQ(session->media[0].packet_time_us, uint32_t{1000});  // AES67 default
     EXPECT_EQ(session->media[0].source_filter->source, (ip::IPv4Address{10, 0, 0, 9}));
     EXPECT_EQ(session->media[1].connection->address, (ip::IPv4Address{239, 20, 0, 1}));
-    EXPECT_EQ(session->effective_media_clock_offset(session->media[1]), uint32_t{0});
+    // no a=mediaclk anywhere: the stream's timestamps are not known to be PTP-locked
+    EXPECT_FALSE(session->effective_media_clock_offset(session->media[1]).has_value());
 }
 
 TEST(sdp, refuses_what_the_bridge_cannot_use)
@@ -198,7 +199,7 @@ TEST(sdp, writes_a_sender_description)
     Session session;
     session.session_id = 99;
     session.session_version = 100;
-    session.origin = ip::IPv4Address{10, 1, 2, 3};
+    session.origin_address = "10.1.2.3";
     session.name = "Bridge out 1";
     session.clock = PtpReference{.grandmaster = ieee::eui64_from_string("00-11-22-ff-fe-33-44-55"), .domain = 2};
     session.media.push_back(Media{
@@ -208,7 +209,7 @@ TEST(sdp, writes_a_sender_description)
         .packet_time_us = 250,
         .direction = Direction::sendonly,
         .connection = Connection{.address = ip::IPv4Address{239, 1, 1, 1}, .ttl = 16},
-        .media_clock_offset = 0});
+        .media_clock = MediaClock{.direct_offset = 0}});
     EXPECT_EQ(
         to_string(session),
         std::string{"v=0\r\n"
@@ -233,7 +234,7 @@ TEST(sdp, keeps_the_ptp_clock_among_others)
     EXPECT_TRUE(session.has_value());
     auto const& m = session->media.at(0);
     EXPECT_TRUE(session->effective_clock(m)->grandmaster.has_value());
-    EXPECT_EQ(session->effective_media_clock_offset(m), uint32_t{1266592257});
+    EXPECT_EQ(session->effective_media_clock_offset(m).value_or(0), uint32_t{1266592257});
 }
 
 TEST(sdp, reads_every_rfc_7273_form)
@@ -247,13 +248,13 @@ TEST(sdp, reads_every_rfc_7273_form)
     auto const nmbr = clock_of("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:domain-nmbr=5", "direct");
     EXPECT_TRUE(nmbr.has_value());
     EXPECT_EQ(nmbr->media.at(0).clock->domain, uint8_t{5});
-    EXPECT_EQ(nmbr->effective_media_clock_offset(nmbr->media.at(0)), uint32_t{0});
+    EXPECT_EQ(nmbr->effective_media_clock_offset(nmbr->media.at(0)).value_or(1), uint32_t{0});
 
     auto const version_only = clock_of("ptp=IEEE802.1AS-2011", "direct=7 rate=48000/1");
     EXPECT_TRUE(version_only.has_value());
     EXPECT_EQ(version_only->media.at(0).clock->version, std::string{"IEEE802.1AS-2011"});
     EXPECT_FALSE(version_only->media.at(0).clock->grandmaster.has_value());
-    EXPECT_EQ(version_only->effective_media_clock_offset(version_only->media.at(0)), uint32_t{7});
+    EXPECT_EQ(version_only->effective_media_clock_offset(version_only->media.at(0)).value_or(0), uint32_t{7});
 
     auto const named = clock_of("ptp=IEEE1588-2002:00-1D-C1-FF-FE-0E-10-C4:domain-name=_DFLT", "direct=1");
     EXPECT_TRUE(named.has_value());
@@ -315,6 +316,83 @@ TEST(sdp, writes_only_what_parses)
     EXPECT_TRUE(again.has_value());
     EXPECT_EQ(again->name, std::string{"Out 1  a=source-filter: excl IN IP4 * 1.2.3.4"});
     EXPECT_FALSE(again->source_filter.has_value());
+}
+
+TEST(sdp, a_media_clock_that_is_not_direct_overrides_a_direct_one)
+{
+    // RFC 7273 section 5: the media-level attribute is the one in force
+    std::string text{DANTE};
+    text.replace(text.find("a=mediaclk:direct=1266592257"), 28, "a=mediaclk:sender");
+    text.replace(text.find("t=0 0\r\n") + 7, 0, "a=mediaclk:direct=5\r\n");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.size(), size_t{1});
+    EXPECT_FALSE(session->effective_media_clock_offset(session->media.at(0)).has_value());
+    EXPECT_TRUE(session->media_clock == std::optional{MediaClock{.direct_offset = 5}});
+    // and it is written back as sender
+    EXPECT_TRUE(to_string(*session).find("a=mediaclk:sender\r\n") != std::string::npos);
+}
+
+TEST(sdp, picks_the_first_offered_payload_type_it_can_carry)
+{
+    std::string text{DANTE};
+    text.replace(text.find("m=audio 5004 RTP/AVP 97"), 23, "m=audio 5004 RTP/AVP 0 99 97");
+    text.replace(text.find("a=rtpmap:97 L24/48000/2"), 0, "a=rtpmap:99 AM824/48000/2\r\n");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.size(), size_t{1});
+    EXPECT_EQ(session->media.at(0).payload_type, uint8_t{97});
+    EXPECT_TRUE(session->media.at(0).encoding == Encoding::l24);
+
+    // only a static payload type, with no rtpmap (RFC 3551 PCMU): skipped, not an error
+    std::string pcmu{DANTE};
+    pcmu.replace(pcmu.find("m=audio 5004 RTP/AVP 97"), 23, "m=audio 5004 RTP/AVP 0");
+    pcmu.erase(pcmu.find("a=rtpmap:97 L24/48000/2\r\n"), 25);
+    auto const skipped = parse(pcmu);
+    EXPECT_FALSE(skipped.has_value());
+    EXPECT_TRUE(skipped.error() == SdpError::unsupported_encoding);
+
+    // a dynamic payload type with no rtpmap is a malformed description
+    std::string dynamic{DANTE};
+    dynamic.erase(dynamic.find("a=rtpmap:97 L24/48000/2\r\n"), 25);
+    EXPECT_TRUE(parse(dynamic).error() == SdpError::missing_field);
+}
+
+TEST(sdp, accepts_a_host_name_origin_and_a_wildcard_source_filter)
+{
+    std::string text{DANTE};
+    text.replace(text.find("IN IP4 192.168.1.20"), 19, "IN IP4 studio-node.local");
+    text.replace(text.find("t=0 0\r\n") + 7, 0, "a=source-filter: incl IN * 239.69.161.58 192.168.1.20\r\n");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->origin_address, std::string{"studio-node.local"});
+    EXPECT_TRUE(session->source_filter.has_value());
+    EXPECT_EQ(session->source_filter->source, (ip::IPv4Address{192, 168, 1, 20}));
+    EXPECT_TRUE(to_string(*session).find("o=- 1311738121 1311738121 IN IP4 studio-node.local\r\n") != std::string::npos);
+
+    // a filter on another network is not ours to apply, and not an error
+    std::string ip6{DANTE};
+    ip6.replace(ip6.find("t=0 0\r\n") + 7, 0, "a=source-filter: incl IN IP6 FF1E::1 2001:db8::1\r\n");
+    auto const ignored = parse(ip6);
+    EXPECT_TRUE(ignored.has_value());
+    EXPECT_FALSE(ignored->source_filter.has_value());
+}
+
+TEST(sdp, writes_only_what_the_rfcs_allow)
+{
+    Session session;
+    session.origin_address = "not a token";
+    session.clock = PtpReference{};  // neither grandmaster nor traceable: no valid form
+    session.media.push_back(Media{
+        .port = 5004,
+        .payload_type = 96,
+        .connection = Connection{.address = ip::IPv4Address{10, 1, 2, 3}, .ttl = 16},  // unicast: no TTL
+    });
+    auto const text = to_string(session);
+    EXPECT_TRUE(text.find("o=- 0 0 IN IP4 0.0.0.0\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("ts-refclk") == std::string::npos);
+    EXPECT_TRUE(text.find("c=IN IP4 10.1.2.3\r\n") != std::string::npos);
+    EXPECT_TRUE(parse(text).has_value());
 }
 
 TEST_MAIN(statusbar_sdp, sdp_test)

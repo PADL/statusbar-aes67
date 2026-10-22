@@ -8,9 +8,11 @@
 #include <cctype>
 #include <charconv>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace statusbar::sdp {
 
@@ -97,13 +99,14 @@ auto parse_origin(std::string_view rest, Session& session) -> Status
     if (auto const network = parse_network(rest); !network) {
         return network;
     }
-    auto const address = parse_ipv4(take(rest, ' '));
-    if (!address) {
+    // RFC 8866 section 5.2: an IPv4 literal or a fully qualified domain name
+    auto const address = take(rest, ' ');
+    if (address.empty()) {
         return failure(SdpError::malformed_line);
     }
     session.session_id = *id;
     session.session_version = *version;
-    session.origin = *address;
+    session.origin_address = std::string{address};
     return success();
 }
 
@@ -160,25 +163,26 @@ auto parse_ptp_reference(std::string_view rest) -> StatusValue<PtpReference>
     return clock;
 }
 
-/// `direct[=<offset>][ <parameters>]`: the offset (0 if absent), or nullopt for
-/// another kind of media clock.
-auto parse_media_clock(std::string_view rest) noexcept -> StatusValue<std::optional<uint32_t>>
+/// `direct[=<offset>][ <parameters>]`: a direct clock with its offset (0 if
+/// absent); any other kind is a media clock that is not direct.
+auto parse_media_clock(std::string_view rest) noexcept -> StatusValue<MediaClock>
 {
     auto clock = take(rest, ' ');
     if (take(clock, '=') != "direct") {
-        return std::optional<uint32_t>{};
+        return MediaClock{};
     }
     if (clock.empty()) {
-        return std::optional<uint32_t>{0};
+        return MediaClock{.direct_offset = 0};
     }
     auto const offset = parse_number<uint64_t>(clock);
     if (!offset) {
         return failure(SdpError::malformed_line);
     }
-    return std::optional{static_cast<uint32_t>(*offset)};
+    return MediaClock{.direct_offset = static_cast<uint32_t>(*offset)};
 }
 
-/// ` incl IN IP4 <destination>|* <source>...`; nullopt for exclusions.
+/// ` incl IN IP4|* <destination>|* <source>...`; nullopt for exclusions and for
+/// filters on another network or address type (RFC 4570 allows `*` for both).
 auto parse_source_filter(std::string_view rest) noexcept -> StatusValue<std::optional<SourceFilter>>
 {
     while (rest.starts_with(' ')) {
@@ -187,8 +191,11 @@ auto parse_source_filter(std::string_view rest) noexcept -> StatusValue<std::opt
     if (take(rest, ' ') != "incl") {
         return std::optional<SourceFilter>{};
     }
-    if (auto const network = parse_network(rest); !network) {
-        return std::unexpected(network.error());
+    if (take(rest, ' ') != "IN") {
+        return std::optional<SourceFilter>{};
+    }
+    if (auto const address_type = take(rest, ' '); address_type != "IP4" && address_type != "*") {
+        return std::optional<SourceFilter>{};
     }
     SourceFilter filter{};
     if (auto const destination = take(rest, ' '); destination != "*") {
@@ -220,21 +227,23 @@ enum class RtpmapResult
 };
 
 /// `<pt> <encoding>/<rate>[/<channels>]`, applied to `media` if the payload type
-/// is its own and the encoding L16 or L24 (subtype names are case-insensitive).
-auto parse_rtpmap(std::string_view rest, Media& media) noexcept -> StatusValue<RtpmapResult>
+/// is one its m= line offers and the encoding L16 or L24 (subtype names are
+/// case-insensitive).
+auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered, Media& media) noexcept -> StatusValue<RtpmapResult>
 {
     auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
     if (!payload_type) {
         return failure(SdpError::malformed_line);
     }
-    if (*payload_type != media.payload_type) {
+    if (!std::ranges::contains(offered, *payload_type)) {
         return RtpmapResult::other_payload_type;
     }
     auto const encoding = take(rest, '/');
+    Encoding parsed{};
     if (equal_ignoring_case(encoding, "L16")) {
-        media.encoding = Encoding::l16;
+        parsed = Encoding::l16;
     } else if (equal_ignoring_case(encoding, "L24")) {
-        media.encoding = Encoding::l24;
+        parsed = Encoding::l24;
     } else {
         return RtpmapResult::unsupported;
     }
@@ -243,6 +252,8 @@ auto parse_rtpmap(std::string_view rest, Media& media) noexcept -> StatusValue<R
     if (!rate || !channels || *rate == 0 || *channels == 0) {
         return failure(SdpError::malformed_line);
     }
+    media.payload_type = *payload_type;
+    media.encoding = parsed;
     media.sample_rate = *rate;
     media.channels = *channels;
     return RtpmapResult::applied;
@@ -346,37 +357,46 @@ class Parser
         auto port_field = take(rest, ' ');
         auto const port = parse_number<uint16_t>(take(port_field, '/'));  // a "/<count>" of ports is ignored
         auto const proto = take(rest, ' ');
-        auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
         if (kind != "audio" || proto != "RTP/AVP") {
             skipping_ = true;
             return success();
         }
-        if (!port || !payload_type || *payload_type > 127) {
+        // RFC 8866 section 5.14: one or more payload types, in order of preference
+        offered_.clear();
+        while (!rest.empty()) {
+            auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
+            if (!payload_type || *payload_type > 127) {
+                return failure(SdpError::malformed_line);
+            }
+            offered_.push_back(*payload_type);
+        }
+        if (!port || offered_.empty()) {
             return failure(SdpError::malformed_line);
         }
         skipping_ = false;
-        media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = *payload_type});
+        media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = offered_.front()});
         rtpmap_ = RtpmapResult::other_payload_type;
         return success();
     }
 
-    /// Close the current audio media: an error if it had no rtpmap for its payload
-    /// type, dropped if the rtpmap was an encoding the bridge does not carry.
+    /// Close the current audio media: kept if a payload type it offers has an L16
+    /// or L24 rtpmap, dropped if it offers only other encodings or only static
+    /// payload types (RFC 3551 section 6: 0-95, which need no rtpmap), an error if
+    /// a dynamic payload type has no rtpmap.
     auto end_media() -> Status
     {
         auto const* const closing = std::exchange(media_, nullptr);
         if (closing == nullptr) {
             return success();
         }
-        switch (rtpmap_) {
-            case RtpmapResult::applied:
-                return success();
-            case RtpmapResult::unsupported:
-                unsupported_media_ = true;
-                session_.media.pop_back();
-                return success();
-            case RtpmapResult::other_payload_type:
-                break;
+        if (rtpmap_ == RtpmapResult::applied) {
+            return success();
+        }
+        bool const all_static = std::ranges::all_of(offered_, [](uint8_t const pt) { return pt < 96; });
+        if (rtpmap_ == RtpmapResult::unsupported || all_static) {
+            unsupported_media_ = true;
+            session_.media.pop_back();
+            return success();
         }
         return failure(SdpError::missing_field);
     }
@@ -404,12 +424,14 @@ class Parser
             return success();
         }
         if (name == "mediaclk") {
-            auto const offset = parse_media_clock(rest);
-            if (!offset) {
-                return std::unexpected(offset.error());
+            auto const clock = parse_media_clock(rest);
+            if (!clock) {
+                return std::unexpected(clock.error());
             }
-            if (*offset) {
-                (media_ != nullptr ? media_->media_clock_offset : session_.media_clock_offset) = *offset;
+            // a level that names both a direct clock and another keeps the direct one
+            auto& slot = media_ != nullptr ? media_->media_clock : session_.media_clock;
+            if (!(slot && slot->direct_offset && !clock->direct_offset)) {
+                slot = *clock;
             }
             return success();
         }
@@ -427,7 +449,11 @@ class Parser
             return success();
         }
         if (name == "rtpmap") {
-            auto const result = parse_rtpmap(rest, *media_);
+            // the first payload type with a usable rtpmap is the one kept
+            if (rtpmap_ == RtpmapResult::applied) {
+                return success();
+            }
+            auto const result = parse_rtpmap(rest, offered_, *media_);
             if (!result) {
                 return std::unexpected(result.error());
             }
@@ -449,6 +475,7 @@ class Parser
 
     Session session_;
     Media* media_{nullptr};
+    std::vector<uint8_t> offered_;  ///< the current media's payload types, from its m= line
     RtpmapResult rtpmap_{RtpmapResult::other_payload_type};
     bool seen_version_{false};
     bool seen_origin_{false};

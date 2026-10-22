@@ -1,8 +1,8 @@
 # statusbar-aes67
 
-AES67 for the [statusbar](https://codeberg.org/statusbar) stack, and the media bus
-an AES67/AVB bridge is built on. A package of the statusbar umbrella; it depends on
-`statusbar-core`.
+AES67 for the [statusbar](https://codeberg.org/statusbar) stack: the media clock, RTP
+and SDP an AES67/AVB bridge is built on. A package of the statusbar umbrella; it depends
+on `statusbar-core`.
 
 | Module | What it is |
 | --- | --- |
