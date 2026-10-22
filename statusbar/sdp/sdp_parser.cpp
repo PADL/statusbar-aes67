@@ -244,6 +244,8 @@ auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered,
         parsed = Encoding::l16;
     } else if (equal_ignoring_case(encoding, "L24")) {
         parsed = Encoding::l24;
+    } else if (equal_ignoring_case(encoding, "AM824")) {
+        parsed = Encoding::am824;
     } else {
         return RtpmapResult::unsupported;
     }

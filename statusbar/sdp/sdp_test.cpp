@@ -283,11 +283,24 @@ TEST(sdp, encodings_are_case_insensitive_and_others_are_skipped)
     std::string text{DANTE};
     text.replace(text.find("L24/"), 3, "l24");
     text += "m=audio 5006 RTP/AVP 98\r\n"
-            "a=rtpmap:98 AM824/48000/8\r\n";
+            "a=rtpmap:98 L20/48000/8\r\n";  // RFC 3190 L20: not carried
     auto const session = parse(text);
     EXPECT_TRUE(session.has_value());
     EXPECT_EQ(session->media.size(), size_t{1});
     EXPECT_TRUE(session->media.at(0).encoding == Encoding::l24);
+}
+
+TEST(sdp, carries_ravenna_aes3_as_am824)
+{
+    // RAVENNA's AES3 transport (and ST 2110-31): 32-bit IEC 61883-6 subframes
+    std::string text{DANTE};
+    text.replace(text.find("a=rtpmap:97 L24/48000/2"), 23, "a=rtpmap:97 AM824/48000/2");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.size(), size_t{1});
+    EXPECT_TRUE(session->media.at(0).encoding == Encoding::am824);
+    EXPECT_EQ(session->media.at(0).frame_bytes(), uint32_t{8});
+    EXPECT_TRUE(to_string(*session).find("a=rtpmap:97 AM824/48000/2\r\n") != std::string::npos);
 }
 
 TEST(sdp, requires_a_name_and_timing)
@@ -337,7 +350,7 @@ TEST(sdp, picks_the_first_offered_payload_type_it_can_carry)
 {
     std::string text{DANTE};
     text.replace(text.find("m=audio 5004 RTP/AVP 97"), 23, "m=audio 5004 RTP/AVP 0 99 97");
-    text.replace(text.find("a=rtpmap:97 L24/48000/2"), 0, "a=rtpmap:99 AM824/48000/2\r\n");
+    text.replace(text.find("a=rtpmap:97 L24/48000/2"), 0, "a=rtpmap:99 L20/48000/2\r\n");
     auto const session = parse(text);
     EXPECT_TRUE(session.has_value());
     EXPECT_EQ(session->media.size(), size_t{1});

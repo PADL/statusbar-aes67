@@ -17,7 +17,7 @@ enum class SdpError
     unsupported_version,   ///< v= other than 0
     missing_field,         ///< a required line or attribute is absent
     unsupported_network,   ///< a network or address type other than IN IP4
-    unsupported_encoding,  ///< an rtpmap other than L16 or L24
+    unsupported_encoding,  ///< an rtpmap other than L16, L24 or AM824
 };
 
 /// Error category for SDP errors

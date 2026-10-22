@@ -27,16 +27,40 @@
 
 namespace statusbar::sdp {
 
-/// AES67 linear PCM encodings (RFC 3551 L16, RFC 3190 L24)
+/// The encodings carried: AES67 linear PCM (RFC 3551 L16, RFC 3190 L24) and
+/// RAVENNA's AES3 transport, AM824 (IEC 61883-6 32-bit subframes, as ST 2110-31).
 enum class Encoding : uint8_t
 {
     l16,
     l24,
+    am824,
 };
 
 [[nodiscard]] constexpr auto bytes_per_sample(Encoding const encoding) noexcept -> uint32_t
 {
-    return encoding == Encoding::l16 ? 2 : 3;
+    switch (encoding) {
+        case Encoding::l16:
+            return 2;
+        case Encoding::l24:
+            return 3;
+        case Encoding::am824:
+            return 4;
+    }
+    return 0;
+}
+
+/// The rtpmap encoding name
+[[nodiscard]] constexpr auto encoding_name(Encoding const encoding) noexcept -> char const*
+{
+    switch (encoding) {
+        case Encoding::l16:
+            return "L16";
+        case Encoding::l24:
+            return "L24";
+        case Encoding::am824:
+            return "AM824";
+    }
+    return "";
 }
 
 /// `c=IN IP4 <address>[/<ttl>]`

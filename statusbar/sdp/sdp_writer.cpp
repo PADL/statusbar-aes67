@@ -133,12 +133,7 @@ void write_media(Out out, Media const& media)
         out = std::format_to(out, "a={}\r\n", direction_name(*media.direction));
     }
     out = std::format_to(
-        out,
-        "a=rtpmap:{} L{}/{}/{}\r\n",
-        media.payload_type,
-        bytes_per_sample(media.encoding) * 8,
-        media.sample_rate,
-        media.channels);
+        out, "a=rtpmap:{} {}/{}/{}\r\n", media.payload_type, encoding_name(media.encoding), media.sample_rate, media.channels);
     write_ptime(out, media.packet_time_us);
     if (media.clock) {
         write_clock(out, *media.clock);
