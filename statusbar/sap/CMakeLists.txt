@@ -6,6 +6,7 @@ statusbar_add_module(
   sap
   SOURCES
   sap.cpp
+  sap_receiver.cpp
   DEPS
   statusbar::ip
   statusbar::net

@@ -82,8 +82,9 @@ auto parse_sap_packet(std::span<uint8_t const> const packet) -> std::optional<Sa
     message.message_id_hash = static_cast<uint16_t>((packet[2] << 8U) | packet[3]);
     message.origin = ip::IPv4Address{packet[4], packet[5], packet[6], packet[7]};
     std::string_view rest{reinterpret_cast<char const*>(packet.data()) + 8 + auth, packet.size() - 8 - auth};
-    // The payload type is optional: SDP text starts "v=0".
-    if (!rest.starts_with("v=")) {
+    // The payload type is optional: SDP text starts "v=0" (a deletion's may
+    // be only its "o=" line, or nothing).
+    if (!rest.empty() && !rest.starts_with("v=") && !rest.starts_with("o=")) {
         auto const nul = rest.find('\0');
         if (nul == std::string_view::npos) {
             return std::nullopt;
