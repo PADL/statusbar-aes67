@@ -299,6 +299,19 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     EXPECT_EQ(sender.session()->session_version, again->session_version + 2);
     EXPECT_TRUE(sdp::to_string(*sender.session()).find("ts-refclk") == std::string::npos);
     EXPECT_TRUE(sdp::to_string(*sender.session()).find("clock-domain") == std::string::npos);
+
+    // A new name is a new s=, one version on, the same session id; the same name changes nothing.
+    sender.set_name("Bridge : Test");
+    EXPECT_EQ(sender.name(), std::string{"Bridge : Test"});
+    EXPECT_EQ(sender.session()->name, std::string{"Bridge : Test"});
+    EXPECT_EQ(sender.session()->session_version, again->session_version + 3);
+    EXPECT_EQ(sender.session()->session_id, session->session_id);
+    sender.set_name("Bridge : Test");
+    EXPECT_EQ(sender.session()->session_version, again->session_version + 3);
+    // A replacement sender continues the session under its name.
+    Sender replacement{STEREO_L24, source.provider(), transport, "Test"};
+    replacement.continue_from(sender);
+    EXPECT_EQ(replacement.name(), std::string{"Bridge : Test"});
 }
 
 TEST(aes67_sender, writes_a_125_us_ptime)

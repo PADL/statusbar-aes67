@@ -40,10 +40,10 @@
 /// host for a multicast group, and `a=recvonly` as AES67's examples and Dante
 /// write it. Its o= session id is stable across restarts (set_session_id());
 /// the version starts at the wall clock's seconds (RFC 4566's suggestion, so
-/// it grows across restarts too) and goes up by one with each configure() and
-/// grandmaster change.
+/// it grows across restarts too) and goes up by one with each configure(),
+/// grandmaster change and rename (set_name()).
 ///
-/// Threading: configure(), clear(), set_grandmaster() and session() allocate:
+/// Threading: configure(), clear(), set_grandmaster(), set_name() and session() allocate:
 /// call them off the real-time thread. tick() and the accessors are real-time
 /// safe.
 
@@ -146,8 +146,15 @@ class Sender
 
     [[nodiscard]] auto grandmaster() const noexcept -> std::optional<Grandmaster> const& { return grandmaster_; }
 
+    /// The session name (s=) of session(), the constructor's until changed:
+    /// a new one bumps the session version, as set_grandmaster() does (a
+    /// receiver keying on the name sees a new session). Off the real-time
+    /// thread.
+    void set_name(std::string name);
+    [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
+
     /// Take what `previous` was given outside its destination: the read delay,
-    /// the grandmaster, and the SDP session id and version (so a replacement
+    /// the grandmaster, the session name, and the SDP session id and version (so a replacement
     /// sender's next configure() announces the same session, one version on).
     /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);

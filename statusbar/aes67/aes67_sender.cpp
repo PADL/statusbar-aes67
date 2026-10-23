@@ -12,6 +12,8 @@
 #include <charconv>
 #include <chrono>
 #include <random>
+#include <string>
+#include <utility>
 
 namespace statusbar::aes67 {
 
@@ -116,6 +118,7 @@ void Sender::continue_from(Sender const& previous)
 {
     read_delay_.store(previous.read_delay(), std::memory_order_relaxed);
     grandmaster_ = previous.grandmaster_;
+    name_ = previous.name_;
     session_id_ = previous.session_id_;
     session_version_ = previous.session_version_;
 }
@@ -128,6 +131,15 @@ void Sender::bump_session_version()
         session_version_ = static_cast<uint64_t>(std::max<int64_t>(seconds.count(), 0)) & SESSION_ID_MASK;
     }
     session_version_ = (session_version_ + 1) & SESSION_ID_MASK;
+}
+
+void Sender::set_name(std::string name)
+{
+    if (name == name_) {
+        return;
+    }
+    name_ = std::move(name);
+    bump_session_version();
 }
 
 void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
