@@ -504,4 +504,14 @@ auto parse(std::string_view text) -> StatusValue<Session>
     return parser.finish();
 }
 
+auto parse_origin_line(std::string_view const value, Session& session) -> Status
+{
+    Session parsed = session;
+    if (auto const status = parse_origin(value, parsed); !status) {
+        return status;  // `session` untouched
+    }
+    session = std::move(parsed);
+    return success();
+}
+
 }  // namespace statusbar::sdp

@@ -209,6 +209,11 @@ struct Session
 /// type without an rtpmap is missing_field.
 [[nodiscard]] auto parse(std::string_view text) -> StatusValue<Session>;
 
+/// Read the value of an `o=` line ("<username> <sess-id> <sess-version> IN
+/// IP4 <address>") into `session`'s origin fields, as parse() does: for a SAP
+/// deletion, which may carry only that line. On failure `session` is unchanged.
+[[nodiscard]] auto parse_origin_line(std::string_view value, Session& session) -> Status;
+
 /// Write a session description, CRLF line endings, fields in RFC 8866 order.
 /// Line breaks in text fields become spaces, a username that is empty or has a
 /// space in it is written as "-", and an origin address that is not one token
