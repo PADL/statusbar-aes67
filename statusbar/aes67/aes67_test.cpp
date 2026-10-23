@@ -14,7 +14,9 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <print>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -392,12 +394,53 @@ TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
     EXPECT_EQ(sender.counters().lost, uint64_t{48 + (99 * 48)});
 }
 
+TEST(aes67_sender, keeps_its_session_id_across_restarts)
+{
+    // Two senders for the same stream, as before and after a restart: the
+    // same o= session id, and a version at least the wall clock's seconds.
+    auto const start = [](std::string name, IPv4Address const& group) {
+        auto transport = std::make_unique<LoopTransport>();
+        auto sender = std::make_unique<Sender>(STEREO_L24, FrameProvider{}, *transport, std::move(name));
+        EXPECT_TRUE(sender->configure(Destination{.address = group, .port = 5004}));
+        auto session = *sender->session();
+        return session;
+    };
+    auto const first = start("Test", IPv4Address{239, 69, 1, 2});
+    auto const again = start("Test", IPv4Address{239, 69, 1, 2});
+    EXPECT_EQ(again.session_id, first.session_id);
+    EXPECT_NE(first.session_id, uint64_t{0});
+    EXPECT_EQ(first.session_id >> 63U, uint64_t{0});  // positive in a signed reading
+    EXPECT_TRUE(first.session_version > uint64_t{1'700'000'000});
+    EXPECT_TRUE(again.session_version >= first.session_version);
+    EXPECT_NE(start("Other", IPv4Address{239, 69, 1, 2}).session_id, first.session_id);
+    EXPECT_EQ(start("Test", IPv4Address{239, 69, 1, 3}).session_id, first.session_id);  // moved, not a new stream
+
+    // One the caller gives is kept (to 63 bits), across reconfigures too.
+    LoopTransport transport;
+    Sender sender{STEREO_L24, FrameProvider{}, transport, "Test"};
+    sender.set_session_id(0xFFFF'0000'0000'1234ULL);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    EXPECT_EQ(sender.session()->session_id, uint64_t{0x7FFF'0000'0000'1234ULL});
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 4}}));
+    EXPECT_EQ(sender.session()->session_id, uint64_t{0x7FFF'0000'0000'1234ULL});
+    // A grandmaster known before the destination: the version still starts at the clock.
+    Sender early{STEREO_L24, FrameProvider{}, transport, "Test"};
+    early.set_grandmaster(GRANDMASTER);
+    EXPECT_TRUE(early.configure(Destination{.address = IPv4Address{239, 69, 1, 5}}));
+    EXPECT_TRUE(early.session()->session_version > uint64_t{1'700'000'000});
+    EXPECT_EQ(Sender::stable_session_id("aes67-out-0"), Sender::stable_session_id("aes67-out-0"));
+    EXPECT_NE(Sender::stable_session_id("aes67-out-0"), Sender::stable_session_id("aes67-out-1"));
+}
+
 TEST(aes67_sender, waits_out_the_read_delay)
 {
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    EXPECT_EQ(sender.read_delay(), FPP + 12);  // the default: a packet and two ticks
+    EXPECT_EQ(sender.read_delay(), uint32_t{6});  // the default: one 125 us tick
+    EXPECT_EQ(Sender::default_read_delay(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 44100}), uint32_t{6});
+    EXPECT_EQ(Sender::default_read_delay(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 96000}), uint32_t{12});
+    EXPECT_EQ(Sender::relay_read_delay(STEREO_L24), FPP + 12);  // a packet and two ticks
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     sender.set_read_delay(100);
 

@@ -38,7 +38,10 @@
 /// `clock-domain:PTPv2 <domain>` from set_grandmaster() (always PTPv2, the
 /// domain always written), `mediaclk:direct=0`, a source filter naming this
 /// host for a multicast group, and `a=recvonly` as AES67's examples and Dante
-/// write it.
+/// write it. Its o= session id is stable across restarts (set_session_id());
+/// the version starts at the wall clock's seconds (RFC 4566's suggestion, so
+/// it grows across restarts too) and goes up by one with each configure() and
+/// grandmaster change.
 ///
 /// Threading: configure(), clear(), set_grandmaster() and session() allocate:
 /// call them off the real-time thread. tick() and the accessors are real-time
@@ -49,6 +52,7 @@
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -72,6 +76,8 @@ class Sender
     static constexpr uint32_t MAX_BURST = 8;
     /// The largest payload sent: a 1500-byte MTU less IPv4, UDP and RTP headers.
     static constexpr uint32_t MAX_PAYLOAD = 1500 - 20 - 8 - 12;
+    /// Session ids and versions are kept to 63 bits: positive in any signed reading.
+    static constexpr uint64_t SESSION_ID_MASK = 0x7FFF'FFFF'FFFF'FFFFULL;
 
     /// `name` is the session name (s=) of session().
     Sender(StreamFormat const& format, FrameProvider provider, Transport& transport, std::string name);
@@ -85,14 +91,52 @@ class Sender
     void clear() noexcept;
 
     /// The read delay (link offset) in frames: a packet is sent once its last
-    /// frame is this far behind now. Default: default_read_delay(). Any thread
-    /// before the sender is ticked; real-time safe.
-    void set_read_delay(uint32_t const frames) noexcept { read_delay_ = frames; }
-    [[nodiscard]] auto read_delay() const noexcept -> uint32_t { return read_delay_; }
-    /// One packet of this stream plus two 125 us ticks.
+    /// frame is this far behind now. Default: default_read_delay(). Any thread,
+    /// also while the sender is ticked (a change takes effect at the next tick:
+    /// a longer delay waits, a shorter one catches up, up to MAX_BURST
+    /// packets); real-time safe.
+    void set_read_delay(uint32_t const frames) noexcept { read_delay_.store(frames, std::memory_order_relaxed); }
+    [[nodiscard]] auto read_delay() const noexcept -> uint32_t { return read_delay_.load(std::memory_order_relaxed); }
+    /// One 125 us tick (rounded up: 6 frames at 48 kHz): a packet goes out as
+    /// soon as its last frame is available, for a provider whose frames are
+    /// there by their index (generated or captured locally, or placed ahead of
+    /// time), so a receiver sees it about a packet time after its RTP
+    /// timestamp (1.125 ms for 1 ms packets at 48 kHz). The trade-off: the
+    /// lower the delay, the more of a receiver's latency budget is left (a
+    /// Dante receiver at its 1 ms setting is already late with 1 ms packets),
+    /// but a provider whose frames land later than that (relayed from the
+    /// network) has them counted lost: use relay_read_delay() for one.
     [[nodiscard]] static constexpr auto default_read_delay(StreamFormat const& format) noexcept -> uint32_t
     {
+        return (format.sample_rate + 7999) / 8000;
+    }
+    /// One packet of this stream plus two 125 us ticks: for a provider whose
+    /// frames arrive over a network (an AES67 receiver's), a packet time plus
+    /// arrival jitter after their index.
+    [[nodiscard]] static constexpr auto relay_read_delay(StreamFormat const& format) noexcept -> uint32_t
+    {
         return format.frames_per_packet + (format.sample_rate / 4000);
+    }
+
+    /// The SDP session id (o=), stable for the same stream across restarts
+    /// (RFC 4566: a receiver, Dante Controller say, keys a session on it and
+    /// the origin, so a new id each start leaves stale sessions behind). 0
+    /// (the default): the first configure() derives one, stable_session_id()
+    /// of the origin address and the name (so two senders on one host with
+    /// the same name need ids of their own). Call before configure(), off the
+    /// real-time thread.
+    void set_session_id(uint64_t const id) noexcept { session_id_ = id & SESSION_ID_MASK; }
+    [[nodiscard]] auto session_id() const noexcept -> uint64_t { return session_id_; }
+    /// A session id from `key` (FNV-1a), the same for the same key, positive
+    /// in any signed 64-bit reading and never 0.
+    [[nodiscard]] static constexpr auto stable_session_id(std::string_view const key) noexcept -> uint64_t
+    {
+        uint64_t hash = 0xCBF2'9CE4'8422'2325ULL;
+        for (char const c : key) {
+            hash = (hash ^ static_cast<uint8_t>(c)) * 0x0000'0100'0000'01B3ULL;
+        }
+        hash &= SESSION_ID_MASK;
+        return hash == 0 ? 1 : hash;
     }
 
     /// The PTP grandmaster ts-refclk names; nullopt until it is known, and the
@@ -130,6 +174,8 @@ class Sender
     std::string name_;
     /// Fill `payload` with the provider's frames from `first_index`, or
     /// silence when it has none; what the provider said.
+    /// One version on (the first: the wall clock's seconds, one on).
+    void bump_session_version();
     [[nodiscard]] auto render_payload(uint64_t first_index, std::span<uint8_t> payload) noexcept -> Supply;
 
     std::unique_ptr<SendPort> port_;
@@ -141,7 +187,7 @@ class Sender
     uint64_t session_id_{0};
     uint64_t session_version_{0};
     std::optional<Grandmaster> grandmaster_;
-    uint32_t read_delay_;
+    std::atomic<uint32_t> read_delay_;
     bool started_{false};
     uint64_t next_index_{0};  ///< first frame of the next packet to send
     Counters counters_;

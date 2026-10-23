@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <random>
 
 namespace statusbar::aes67 {
@@ -71,10 +72,12 @@ auto Sender::configure(Destination const& destination) -> Status
     ssrc_ = random();
     sequence_ = static_cast<uint16_t>(random());
     if (session_id_ == 0) {
-        session_id_ = (uint64_t{random()} << 32U) | random();
-        session_id_ &= 0x7FFF'FFFF'FFFF'FFFFULL;  // positive in any signed reading
+        std::string key = ip::to_string(transport_.local_address());
+        key += '/';
+        key += name_;
+        session_id_ = stable_session_id(key);
     }
-    ++session_version_;
+    bump_session_version();
     started_ = false;
     state_ = State::ready;
     error_.clear();
@@ -111,10 +114,20 @@ void Sender::clear() noexcept
 
 void Sender::continue_from(Sender const& previous)
 {
-    read_delay_ = previous.read_delay_;
+    read_delay_.store(previous.read_delay(), std::memory_order_relaxed);
     grandmaster_ = previous.grandmaster_;
     session_id_ = previous.session_id_;
     session_version_ = previous.session_version_;
+}
+
+void Sender::bump_session_version()
+{
+    if (session_version_ == 0) {
+        // Seconds since the epoch: a restart's versions follow the last run's.
+        auto const seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch());
+        session_version_ = static_cast<uint64_t>(std::max<int64_t>(seconds.count(), 0)) & SESSION_ID_MASK;
+    }
+    session_version_ = (session_version_ + 1) & SESSION_ID_MASK;
 }
 
 void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
@@ -123,7 +136,7 @@ void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
         return;
     }
     grandmaster_ = grandmaster;
-    ++session_version_;  // the SDP changed: a receiver keying on o= sees a new version
+    bump_session_version();  // the SDP changed: a receiver keying on o= sees a new version
 }
 
 void Sender::tick(uint64_t const now_index) noexcept
@@ -132,11 +145,12 @@ void Sender::tick(uint64_t const now_index) noexcept
         return;
     }
     uint64_t const fpp = format_.frames_per_packet;
-    if (now_index + 1 < uint64_t{read_delay_} + fpp) {
+    uint64_t const read_delay = read_delay_.load(std::memory_order_relaxed);
+    if (now_index + 1 < read_delay + fpp) {
         return;  // no packet due yet (only near the epoch)
     }
-    // The newest packet whose last frame is read_delay_ or more behind now.
-    uint64_t const newest = (((now_index + 1 - read_delay_) / fpp) - 1) * fpp;
+    // The newest packet whose last frame is read_delay or more behind now.
+    uint64_t const newest = (((now_index + 1 - read_delay) / fpp) - 1) * fpp;
     if (!started_) {
         next_index_ = newest;
         started_ = true;

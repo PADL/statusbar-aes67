@@ -71,8 +71,14 @@ class SapAnnouncer final : public net::Pollable
     /// announced under it; the next tick sends it. A changed session gets a new
     /// message id hash, so listeners take it as new.
     void announce(std::string const& key, sdp::Session const& session);
-    /// Stop announcing `key`, sending its deletion now.
-    void withdraw(std::string const& key);
+    /// Stop announcing `key`, sending its deletion now (not at the next
+    /// tick: a caller shutting down may withdraw and close straight away).
+    /// The deletion's send error, if it had one; success for a key not
+    /// announced.
+    auto withdraw(std::string const& key) -> Status;
+    /// withdraw() every announced key: how many deletions went out, or the
+    /// first send error (every key is withdrawn either way).
+    auto withdraw_all() -> StatusValue<size_t>;
 
     [[nodiscard]] auto announced() const noexcept -> size_t { return entries_.size(); }
 
@@ -91,7 +97,7 @@ class SapAnnouncer final : public net::Pollable
         bool due{true};
     };
 
-    void send(bool deletion, Entry const& entry);
+    auto send(bool deletion, Entry const& entry) -> Status;
 
     net::FileDescriptor fd_;
     ip::IPv4Address origin_;

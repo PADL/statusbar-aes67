@@ -5,6 +5,7 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <optional>
@@ -146,7 +147,7 @@ TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
     EXPECT_NE(parse_sap_packet(*changed)->message_id_hash, message->message_id_hash);
     EXPECT_EQ(sdp::parse(parse_sap_packet(*changed)->sdp)->name, std::string{"B"});
 
-    sap.withdraw("aes67-out-0");
+    EXPECT_TRUE(sap.withdraw("aes67-out-0").has_value());
     EXPECT_EQ(sap.announced(), size_t{0});
     auto const gone = listener.next();
     EXPECT_TRUE(gone.has_value());
@@ -156,6 +157,40 @@ TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
     sap.tick(t0 + (3 * SapAnnouncer::INTERVAL_NS));
     EXPECT_TRUE(listener.quiet());
     EXPECT_FALSE(sap.finished());
+}
+
+TEST(sap, withdraw_all_sends_every_deletion_at_once)
+{
+    // As a daemon shutting down: every announced session's deletion goes out
+    // before withdraw_all() returns, with no tick after it.
+    Listener listener{49876};
+    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, 49876);
+    EXPECT_TRUE(announcer.has_value());
+    auto& sap = **announcer;
+    sap.announce("aes67-out-0", session("A"));
+    sap.announce("aes67-out-1", session("B"));
+    sap.tick(1'000'000'000);
+    std::vector<uint16_t> hashes;
+    for (int i = 0; i < 2; ++i) {
+        auto const packet = listener.next();
+        EXPECT_TRUE(packet.has_value());
+        hashes.push_back(parse_sap_packet(*packet)->message_id_hash);
+    }
+
+    auto const sent = sap.withdraw_all();
+    EXPECT_TRUE(sent.has_value());
+    EXPECT_EQ(*sent, size_t{2});
+    EXPECT_EQ(sap.announced(), size_t{0});
+    for (int i = 0; i < 2; ++i) {
+        auto const packet = listener.next();
+        EXPECT_TRUE(packet.has_value());
+        auto const message = parse_sap_packet(*packet);
+        EXPECT_TRUE(message->deletion);
+        EXPECT_TRUE(std::ranges::find(hashes, message->message_id_hash) != hashes.end());
+    }
+    EXPECT_TRUE(listener.quiet());
+    EXPECT_EQ(*sap.withdraw_all(), size_t{0});  // nothing left
+    EXPECT_TRUE(sap.withdraw("aes67-out-0").has_value());
 }
 
 TEST_MAIN(statusbar_sap, sap_test)

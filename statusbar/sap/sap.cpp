@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include <system_error>
+#include <utility>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -133,7 +134,7 @@ void SapAnnouncer::announce(std::string const& key, sdp::Session const& session)
         if (it->sdp == text) {
             return;
         }
-        send(true, *it);  // the old description goes before the new one comes
+        (void)send(true, *it);  // the old description goes before the new one comes
         it->sdp = std::move(text);
         it->hash = hash_of(it->sdp);
         it->due = true;
@@ -144,31 +145,53 @@ void SapAnnouncer::announce(std::string const& key, sdp::Session const& session)
     entries_.push_back(std::move(entry));
 }
 
-void SapAnnouncer::withdraw(std::string const& key)
+auto SapAnnouncer::withdraw(std::string const& key) -> Status
 {
     auto const it = std::ranges::find(entries_, key, &Entry::key);
     if (it == entries_.end()) {
-        return;
+        return success();
     }
-    send(true, *it);
+    auto status = send(true, *it);
     entries_.erase(it);
+    return status;
+}
+
+auto SapAnnouncer::withdraw_all() -> StatusValue<size_t>
+{
+    auto const entries = std::exchange(entries_, {});
+    size_t sent = 0;
+    Status first = success();
+    for (auto const& entry : entries) {
+        if (auto status = send(true, entry); status) {
+            ++sent;
+        } else if (first) {
+            first = status;
+        }
+    }
+    if (!first) {
+        return failure(first.error());
+    }
+    return sent;
 }
 
 void SapAnnouncer::tick(int64_t const now_ns)
 {
     for (auto& entry : entries_) {
         if (entry.due || now_ns >= entry.next_ns) {
-            send(false, entry);
+            (void)send(false, entry);
             entry.due = false;
             entry.next_ns = now_ns + INTERVAL_NS;
         }
     }
 }
 
-void SapAnnouncer::send(bool const deletion, Entry const& entry)
+auto SapAnnouncer::send(bool const deletion, Entry const& entry) -> Status
 {
     auto const packet = make_sap_packet(deletion, entry.hash, origin_, deletion ? origin_line(entry.sdp) : entry.sdp);
-    (void)::send(fd_.get(), packet.data(), packet.size(), MSG_DONTWAIT);
+    if (::send(fd_.get(), packet.data(), packet.size(), MSG_DONTWAIT) < 0) {
+        return failure(net::errno_code());
+    }
+    return success();
 }
 
 }  // namespace statusbar::sap
