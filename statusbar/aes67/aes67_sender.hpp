@@ -26,9 +26,11 @@
 /// Each packet's payload is rendered in place: tick() hands the provider the
 /// payload span of the transport's next TX buffer (SendPort::send_rendered()),
 /// after the RTP header, so the frames are copied once, provider to wire
-/// buffer. Only when the transport cannot take the packet (counted dropped)
-/// are the frames pulled into a staging buffer instead, so a missing pull is
-/// counted lost all the same.
+/// buffer. When the transport cannot take the packet (counted dropped) before
+/// rendering, the frames are pulled into a staging buffer instead, so a missing
+/// pull is counted lost all the same; when it refuses the packet after
+/// rendering (the XDP TX ring is full) the frames were already pulled, and the
+/// packet is counted dropped without a second pull.
 ///
 /// session() describes the stream for SAP and control: origin the transport's
 /// interface address, the group with its TTL, the encoding, channels, rate and

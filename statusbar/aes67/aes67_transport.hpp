@@ -69,7 +69,9 @@ class ReceivePort
 
 /// Writes a packet's payload in place: `payload` is exactly the length the
 /// caller asked send_rendered() for, inside the transport's TX buffer. False
-/// abandons the packet. Runs on the real-time thread, inside send_rendered().
+/// abandons the packet. Runs on the real-time thread, inside send_rendered(),
+/// at most once per call: a sender pulls its frames from it, so a transport
+/// must never call it again for the same packet.
 using PayloadRenderer = sg14::inplace_function<bool(std::span<uint8_t> payload), 64>;
 
 /// RTP packets from one sender to its destination.
