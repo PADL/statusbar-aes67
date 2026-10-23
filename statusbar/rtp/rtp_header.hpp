@@ -101,6 +101,13 @@ struct RtpPacket
 [[nodiscard]] auto serialize_rtp(RtpHeader const& header, std::span<uint8_t const> payload, std::span<uint8_t> datagram) noexcept
     -> std::optional<size_t>;
 
+/// Write `header` as serialize_rtp() does, leaving room for a payload of
+/// `payload_length` bytes that the caller writes in place after it. Returns
+/// the payload's offset in `datagram` (RtpHeader::LENGTH), or nullopt if the
+/// header and payload together do not fit.
+[[nodiscard]] auto serialize_rtp_header(RtpHeader const& header, size_t payload_length, std::span<uint8_t> datagram) noexcept
+    -> std::optional<size_t>;
+
 }  // namespace statusbar::rtp
 
 // Serialization traits - RtpHeader is a packed wire format struct

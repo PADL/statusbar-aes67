@@ -6,6 +6,7 @@
 #include "statusbar/ip/ip_ipv4.hpp"
 #include "statusbar/ip/ip_udp.hpp"
 
+#include <algorithm>
 #include <limits>
 
 namespace statusbar::rtp {
@@ -88,16 +89,17 @@ auto parse_rtp_frame(std::span<uint8_t const> const frame) noexcept -> std::opti
     return result;
 }
 
-auto serialize_rtp_frame(
+auto serialize_rtp_frame_headers(
     FrameAddressing const& addressing,
     RtpHeader const& header,
-    std::span<uint8_t const> const payload,
+    size_t const payload_length,
     std::span<uint8_t> const buffer) noexcept -> std::optional<size_t>
 {
-    size_t const rtp_length = RtpHeader::LENGTH + payload.size();
-    if (rtp_length > std::numeric_limits<uint16_t>::max() - ip::IPv4Header::MIN_LENGTH - ip::UdpHeader::LENGTH) {
+    if (payload_length >
+        std::numeric_limits<uint16_t>::max() - ip::IPv4Header::MIN_LENGTH - ip::UdpHeader::LENGTH - RtpHeader::LENGTH) {
         return std::nullopt;
     }
+    size_t const rtp_length = RtpHeader::LENGTH + payload_length;
     auto const udp_length = static_cast<uint16_t>(ip::UdpHeader::LENGTH + rtp_length);
 
     ieee::EthernetFrame ethernet{};
@@ -122,11 +124,25 @@ auto serialize_rtp_frame(
         return std::nullopt;
     }
     size_t const headers = writer.position();
-    auto const written = serialize_rtp(header, payload, buffer.subspan(headers));
-    if (!written) {
+    auto const offset = serialize_rtp_header(header, payload_length, buffer.subspan(headers));
+    if (!offset) {
         return std::nullopt;
     }
-    return headers + *written;
+    return headers + *offset;
+}
+
+auto serialize_rtp_frame(
+    FrameAddressing const& addressing,
+    RtpHeader const& header,
+    std::span<uint8_t const> const payload,
+    std::span<uint8_t> const buffer) noexcept -> std::optional<size_t>
+{
+    auto const offset = serialize_rtp_frame_headers(addressing, header, payload.size(), buffer);
+    if (!offset) {
+        return std::nullopt;
+    }
+    std::ranges::copy(payload, buffer.begin() + static_cast<std::ptrdiff_t>(*offset));
+    return *offset + payload.size();
 }
 
 }  // namespace statusbar::rtp

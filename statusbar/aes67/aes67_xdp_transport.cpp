@@ -91,6 +91,16 @@ class XdpTransport::Sender final : public SendPort
         return transport_.context_.tx_commit(frame->first.handle, frame->second).has_value();  // a full ring frees the frame
     }
 
+    auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
+        -> bool override
+    {
+        auto const frame = render_frame(transport_.tx_pool_, addressing_, header, payload_length, render);
+        if (!frame) {
+            return false;
+        }
+        return transport_.context_.tx_commit(frame->first.handle, frame->second).has_value();  // a full ring frees the frame
+    }
+
     /// The transport flushes every sender's frames in end_tick().
     auto flush() noexcept -> size_t override { return 0; }
 
@@ -105,16 +115,29 @@ auto XdpTransport::write_frame(
     rtp::RtpHeader const& header,
     std::span<uint8_t const> const payload) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>
 {
+    return render_frame(pool, addressing, header, payload.size(), [payload](std::span<uint8_t> const out) noexcept {
+        std::ranges::copy(payload, out.begin());
+        return true;
+    });
+}
+
+auto XdpTransport::render_frame(
+    TxPool& pool,
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    size_t const payload_length,
+    PayloadRenderer const& render) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>
+{
     auto slot = pool.take();
     if (!slot) {
         return std::nullopt;
     }
-    auto const length = rtp::serialize_rtp_frame(addressing, header, payload, slot->buffer);
-    if (!length) {
+    auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, payload_length, slot->buffer);
+    if (!offset || !render(slot->buffer.subspan(*offset, payload_length))) {
         (void)pool.put(*slot);  // back to the pool unused
         return std::nullopt;
     }
-    return std::pair{*slot, *length};
+    return std::pair{*slot, *offset + payload_length};
 }
 
 XdpTransport::XdpTransport(InterfaceInfo interface) noexcept

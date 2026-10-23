@@ -11,12 +11,12 @@
 /// Threads and lifetimes, the contract every transport keeps:
 /// - The control thread (one thread) calls open_receive() / open_send() and
 ///   destroys the ports. These may allocate and make syscalls.
-/// - The real-time thread calls ReceivePort::receive(), SendPort::send() and
-///   flush(), and begin_tick() / end_tick(): no allocation, no blocking, no
-///   logging. Each tick is bracketed by begin_tick() (before any receiver
-///   drains) and end_tick() (after every sender has sent): the XDP transport
-///   drains its shared RX ring in begin_tick() and kicks the NIC in end_tick();
-///   for UDP both do nothing.
+/// - The real-time thread calls ReceivePort::receive(), SendPort::send(),
+///   send_rendered() and flush(), and begin_tick() / end_tick(): no
+///   allocation, no blocking, no logging. Each tick is bracketed by
+///   begin_tick() (before any receiver drains) and end_tick() (after every
+///   sender has sent): the XDP transport drains its shared RX ring in
+///   begin_tick() and kicks the NIC in end_tick(); for UDP both do nothing.
 /// - Opening and destroying ports is safe while the real-time thread ticks the
 ///   transport: a transport that shares state between ports (XDP) hands port
 ///   changes to the real-time thread through queues and applies them in
@@ -30,6 +30,7 @@
 
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/rtp/rtp_header.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
 #include <cstddef>
@@ -66,15 +67,32 @@ class ReceivePort
     [[nodiscard]] virtual auto receive(std::span<Datagram> out) noexcept -> size_t = 0;
 };
 
+/// Writes a packet's payload in place: `payload` is exactly the length the
+/// caller asked send_rendered() for, inside the transport's TX buffer. False
+/// abandons the packet. Runs on the real-time thread, inside send_rendered().
+using PayloadRenderer = sg14::inplace_function<bool(std::span<uint8_t> payload), 64>;
+
 /// RTP packets from one sender to its destination.
 class SendPort
 {
   public:
     virtual ~SendPort() = default;
-    /// Queue a packet. False if it cannot be queued (the batch or the ring is
-    /// full, or it does not fit a frame); the packet is then not sent.
+    /// Queue a packet, copying `payload` in. False if it cannot be queued (the
+    /// batch or the ring is full, or it does not fit a frame); the packet is
+    /// then not sent.
     [[nodiscard]] virtual auto send(rtp::RtpHeader const& header, std::span<uint8_t const> payload) noexcept -> bool = 0;
-    /// Send what send() queued. Returns the number of packets the network
+    /// Queue a packet whose payload of `payload_length` bytes `render` writes
+    /// straight into the transport's next TX buffer (a sendmmsg() batch slot, a
+    /// UMEM frame), after the headers, so the payload is copied once, by
+    /// whatever renders it. The buffer is reserved first: when it cannot be
+    /// (as send() fails) `render` is not called. When `render` returns false,
+    /// or the packet is refused after it ran (the XDP TX ring is full), the
+    /// buffer is released unsent: a batch slot is not counted, a UMEM frame
+    /// goes back to the pool (or, refused by the ring, is freed). Returns true
+    /// when the packet is queued, as send() does; flush() as for send().
+    [[nodiscard]] virtual auto send_rendered(
+        rtp::RtpHeader const& header, size_t payload_length, PayloadRenderer const& render) noexcept -> bool = 0;
+    /// Send what send() and send_rendered() queued. Returns the number of packets the network
     /// refused (0 on success).
     virtual auto flush() noexcept -> size_t = 0;
 };

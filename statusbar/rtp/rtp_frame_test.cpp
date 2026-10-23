@@ -5,8 +5,10 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 using namespace statusbar;
@@ -81,6 +83,28 @@ TEST(rtp_frame, serializes_the_same_bytes)
     EXPECT_EQ(*length, FRAME.size());
     EXPECT_EQ(bytes(std::span{buffer}.first(*length)), FRAME);
     EXPECT_EQ(*length, rtp_frame_overhead(false) + RtpHeader::LENGTH + 4);
+}
+
+TEST(rtp_frame, writes_the_headers_for_a_payload_written_in_place)
+{
+    auto const parsed = parse_rtp_frame(FRAME);
+    EXPECT_TRUE(parsed.has_value());
+    std::array<uint8_t, 128> buffer{};
+    auto const offset = serialize_rtp_frame_headers(parsed->addressing, parsed->packet.header, 4, buffer);
+    EXPECT_TRUE(offset.has_value());
+    EXPECT_EQ(*offset, rtp_frame_overhead(false) + RtpHeader::LENGTH);
+    std::ranges::copy(parsed->packet.payload, buffer.begin() + static_cast<std::ptrdiff_t>(*offset));
+    EXPECT_EQ(bytes(std::span{buffer}.first(*offset + 4)), FRAME);
+    // The whole frame, payload included, must fit.
+    std::vector<uint8_t> small(FRAME.size() - 1);
+    EXPECT_FALSE(serialize_rtp_frame_headers(parsed->addressing, parsed->packet.header, 4, small).has_value());
+    std::vector<uint8_t> big(70000);
+    EXPECT_FALSE(serialize_rtp_frame_headers(parsed->addressing, parsed->packet.header, 65536 - 40, big).has_value());
+    // The bare RTP header likewise.
+    std::array<uint8_t, 16> datagram{};
+    EXPECT_EQ(serialize_rtp_header(parsed->packet.header, 4, datagram), std::optional<size_t>{RtpHeader::LENGTH});
+    EXPECT_TRUE(std::ranges::equal(std::span{datagram}.first(RtpHeader::LENGTH), std::span{FRAME}.subspan(42, RtpHeader::LENGTH)));
+    EXPECT_FALSE(serialize_rtp_header(parsed->packet.header, 5, datagram).has_value());
 }
 
 TEST(rtp_frame, maps_a_group_to_its_mac)

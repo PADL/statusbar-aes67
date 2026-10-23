@@ -10,8 +10,9 @@
 /// are the whole address), and passes everything else to the kernel.
 /// begin_tick() drains the RX ring once and hands each frame, parsed with
 /// rtp::parse_rtp_frame(), to the ports for its destination group and port;
-/// senders write whole frames with rtp::serialize_rtp_frame() into UMEM, and
-/// end_tick() kicks the NIC.
+/// senders write whole frames into UMEM (headers with
+/// rtp::serialize_rtp_frame_headers(), then the payload, copied in by send()
+/// or rendered in place by send_rendered()), and end_tick() kicks the NIC.
 ///
 /// Group membership is still the kernel's: each receive port holds a plain UDP
 /// socket joined to its group, so IGMP reports go out and the NIC's multicast
@@ -28,7 +29,10 @@
 /// the real-time thread, only when receivers come or go).
 ///
 /// UMEM: senders keep TX_POOL frames back, topped up each tick before the
-/// fill ring is; those are simply never offered to the kernel. The rest of
+/// fill ring is; those are simply never offered to the kernel. A send takes a
+/// frame from the pool, writes it and commits it to the TX ring; a frame that
+/// does not fit, or whose render is abandoned, goes back to the pool (never to
+/// the kernel), and one the full TX ring refuses is freed to the UMEM. The rest of
 /// the UMEM backs the fill ring (FILL_RING entries) and the frames in flight.
 ///
 /// Limits: multicast destinations only, both ways (a unicast receiver would
@@ -121,6 +125,18 @@ class XdpTransport final : public Transport
         rtp::FrameAddressing const& addressing,
         rtp::RtpHeader const& header,
         std::span<uint8_t const> payload) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>;
+
+    /// Write an RTP frame's headers into a pooled TX frame and have `render`
+    /// write its `payload_length`-byte payload in place after them: the slot
+    /// and the frame length, or nullopt (the pool was empty, and `render` was
+    /// not called; or the frame did not fit, or `render` returned false, and
+    /// the slot went back to the pool).
+    [[nodiscard]] static auto render_frame(
+        TxPool& pool,
+        rtp::FrameAddressing const& addressing,
+        rtp::RtpHeader const& header,
+        size_t payload_length,
+        PayloadRenderer const& render) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>;
 
     using Options = XdpTransportOptions;
 

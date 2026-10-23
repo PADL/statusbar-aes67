@@ -23,6 +23,13 @@
 /// (no index goes out twice), unless the step exceeds MAX_BURST packets, when
 /// it resynchronises.
 ///
+/// Each packet's payload is rendered in place: tick() hands the provider the
+/// payload span of the transport's next TX buffer (SendPort::send_rendered()),
+/// after the RTP header, so the frames are copied once, provider to wire
+/// buffer. Only when the transport cannot take the packet (counted dropped)
+/// are the frames pulled into a staging buffer instead, so a missing pull is
+/// counted lost all the same.
+///
 /// session() describes the stream for SAP and control: origin the transport's
 /// interface address, the group with its TTL, the encoding, channels, rate and
 /// ptime, `ts-refclk:ptp=IEEE1588-2008:<EUI-64>:<domain>` and
@@ -43,6 +50,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -118,9 +126,13 @@ class Sender
     FrameProvider provider_;
     Transport& transport_;
     std::string name_;
+    /// Fill `payload` with the provider's frames from `first_index`, or
+    /// silence when it has none; what the provider said.
+    [[nodiscard]] auto render_payload(uint64_t first_index, std::span<uint8_t> payload) noexcept -> Supply;
+
     std::unique_ptr<SendPort> port_;
     Destination destination_;
-    std::vector<uint8_t> payload_;
+    std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
     uint32_t ssrc_{0};
     uint16_t sequence_{0};

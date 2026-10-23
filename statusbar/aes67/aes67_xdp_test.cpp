@@ -8,6 +8,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <print>
@@ -69,6 +70,89 @@ TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
     EXPECT_EQ(written->second, rtp::rtp_frame_overhead(false) + rtp::RtpHeader::LENGTH + payload.size());
     EXPECT_EQ(pool.size(), size_t{0});
     EXPECT_TRUE(rtp::parse_rtp_frame(std::span{big}.first(written->second)).has_value());
+}
+
+TEST(aes67_xdp, renders_the_payload_into_the_pooled_frame)
+{
+    rtp::FrameAddressing const addressing{
+        .destination_mac = rtp::multicast_mac(IPv4Address{239, 69, 1, 2}),
+        .source_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
+        .source_address = IPv4Address{10, 0, 0, 1},
+        .destination_address = IPv4Address{239, 69, 1, 2},
+        .source_port = 5004,
+        .destination_port = 5004,
+        .ttl = 32,
+    };
+    // L16 and L24, stereo and 8 channels, 48 frames: the bridge's AES67 payloads.
+    for (size_t const length : {size_t{192}, size_t{288}, size_t{768}, size_t{1152}}) {
+        std::vector<uint8_t> payload(length);
+        for (size_t i = 0; i < length; ++i) {
+            payload[i] = static_cast<uint8_t>((i * 13) + length);
+        }
+        rtp::RtpHeader header{};
+        header.init(97, static_cast<uint16_t>(length), 0x01020304U, 0xCAFEF00DU);
+
+        std::array<uint8_t, 2048> copied{};
+        std::array<uint8_t, 2048> rendered{};
+        XdpTransport::TxPool pool;
+        EXPECT_TRUE(pool.put({.handle = 1, .buffer = copied}));
+        auto const written = XdpTransport::write_frame(pool, addressing, header, payload);
+        EXPECT_TRUE(written.has_value());
+
+        EXPECT_TRUE(pool.put({.handle = 2, .buffer = rendered}));
+        uint8_t const* target = nullptr;
+        auto const frame = XdpTransport::render_frame(pool, addressing, header, length, [&](std::span<uint8_t> const out) noexcept {
+            target = out.data();
+            std::ranges::copy(payload, out.begin());
+            return true;
+        });
+        EXPECT_TRUE(frame.has_value());
+        EXPECT_EQ(frame->first.handle, uint64_t{2});
+        EXPECT_EQ(frame->second, written->second);
+        // Straight into the UMEM frame, right after the 42 bytes of headers and the RTP header.
+        EXPECT_TRUE(target == rendered.data() + rtp::rtp_frame_overhead(false) + rtp::RtpHeader::LENGTH);
+        EXPECT_TRUE(std::ranges::equal(std::span{copied}.first(written->second), std::span{rendered}.first(frame->second)));
+
+        std::array<uint8_t, 2048> reference{};
+        auto const expected = rtp::serialize_rtp_frame(addressing, header, payload, reference);
+        EXPECT_TRUE(expected.has_value());
+        EXPECT_TRUE(std::ranges::equal(std::span{reference}.first(*expected), std::span{rendered}.first(frame->second)));
+    }
+}
+
+TEST(aes67_xdp, an_abandoned_render_returns_the_frame_to_the_pool)
+{
+    std::array<uint8_t, 2048> big{};
+    std::array<uint8_t, 40> small{};
+    XdpTransport::TxPool pool;
+    rtp::RtpHeader header{};
+    header.init(96, 1, 2, 3);
+    rtp::FrameAddressing const addressing{.destination_address = IPv4Address{239, 69, 1, 2}, .destination_port = 5004};
+
+    size_t calls = 0;
+    PayloadRenderer const count = [&calls](std::span<uint8_t>) noexcept {
+        ++calls;
+        return true;
+    };
+    // Empty pool: nothing to render into.
+    EXPECT_FALSE(XdpTransport::render_frame(pool, addressing, header, 288, count).has_value());
+    EXPECT_EQ(calls, size_t{0});
+    // Too small for the headers: back to the pool, render not called.
+    EXPECT_TRUE(pool.put({.handle = 1, .buffer = small}));
+    EXPECT_FALSE(XdpTransport::render_frame(pool, addressing, header, 288, count).has_value());
+    EXPECT_EQ(calls, size_t{0});
+    EXPECT_EQ(pool.size(), size_t{1});
+    (void)pool.take();
+    // The render gives up: the frame goes back to the pool, not to the ring.
+    EXPECT_TRUE(pool.put({.handle = 2, .buffer = big}));
+    EXPECT_FALSE(XdpTransport::render_frame(pool, addressing, header, 288, [&calls](std::span<uint8_t>) noexcept {
+                     ++calls;
+                     return false;
+                 }).has_value());
+    EXPECT_EQ(calls, size_t{1});
+    EXPECT_EQ(pool.size(), size_t{1});
+    auto const back = pool.take();
+    EXPECT_EQ(back->handle, uint64_t{2});
 }
 
 TEST(aes67_xdp, group_rules_pin_the_whole_address)

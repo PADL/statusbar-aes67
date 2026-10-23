@@ -3,6 +3,8 @@
 
 #include "statusbar/rtp/rtp_header.hpp"
 
+#include <algorithm>
+
 namespace statusbar::rtp {
 
 auto parse_rtp(std::span<uint8_t const> const datagram) noexcept -> std::optional<RtpPacket>
@@ -38,17 +40,31 @@ auto parse_rtp(std::span<uint8_t const> const datagram) noexcept -> std::optiona
     return packet;
 }
 
-auto serialize_rtp(RtpHeader const& header, std::span<uint8_t const> const payload, std::span<uint8_t> const datagram) noexcept
+auto serialize_rtp_header(RtpHeader const& header, size_t const payload_length, std::span<uint8_t> const datagram) noexcept
     -> std::optional<size_t>
 {
+    if (datagram.size() < RtpHeader::LENGTH || datagram.size() - RtpHeader::LENGTH < payload_length) {
+        return std::nullopt;
+    }
     RtpHeader fixed = header;
     fixed.version_p_x_cc = static_cast<uint8_t>(RtpHeader::VERSION << 6U);
     BufferSerializerBuilderWithBuffer writer{datagram};
-    writer.append(fixed).append(payload);
+    writer.append(fixed);
     if (!writer) {
         return std::nullopt;
     }
     return writer.position();
+}
+
+auto serialize_rtp(RtpHeader const& header, std::span<uint8_t const> const payload, std::span<uint8_t> const datagram) noexcept
+    -> std::optional<size_t>
+{
+    auto const offset = serialize_rtp_header(header, payload.size(), datagram);
+    if (!offset) {
+        return std::nullopt;
+    }
+    std::ranges::copy(payload, datagram.begin() + static_cast<std::ptrdiff_t>(*offset));
+    return *offset + payload.size();
 }
 
 }  // namespace statusbar::rtp

@@ -9,7 +9,9 @@
 /// IP_PKTINFO checking each datagram's destination, drained with recvmmsg(); one unconnected socket per sender (every message names the
 /// destination, so a unicast receiver's ICMP port-unreachable never fails a
 /// send), multicast out of the interface with the configured TTL and DSCP 46,
-/// a tick's packets sent with sendmmsg().
+/// a tick's packets sent with sendmmsg(). A sender's packets are written
+/// straight into the SEND_BATCH slots of its sendmmsg() batch (send_rendered()
+/// has the payload rendered there, after the RTP header).
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"

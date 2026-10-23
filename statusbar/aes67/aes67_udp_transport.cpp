@@ -111,13 +111,22 @@ class UdpSendPort final : public SendPort
         if (!length) {
             return false;
         }
-        iov_[queued_] = {.iov_base = buffers_[queued_].data(), .iov_len = *length};
-        messages_[queued_] = {};
-        messages_[queued_].msg_hdr.msg_name = &destination_;
-        messages_[queued_].msg_hdr.msg_namelen = sizeof(destination_);
-        messages_[queued_].msg_hdr.msg_iov = &iov_[queued_];
-        messages_[queued_].msg_hdr.msg_iovlen = 1;
-        ++queued_;
+        enqueue(*length);
+        return true;
+    }
+
+    auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
+        -> bool override
+    {
+        if (queued_ == UdpTransport::SEND_BATCH) {
+            return false;
+        }
+        std::span<uint8_t> const buffer{buffers_[queued_]};
+        auto const offset = rtp::serialize_rtp_header(header, payload_length, buffer);
+        if (!offset || !render(buffer.subspan(*offset, payload_length))) {
+            return false;  // the slot stays free: queued_ is not advanced
+        }
+        enqueue(*offset + payload_length);
         return true;
     }
 
@@ -141,6 +150,18 @@ class UdpSendPort final : public SendPort
     }
 
   private:
+    /// Queue the datagram of `length` bytes written into the next batch slot.
+    void enqueue(size_t const length) noexcept
+    {
+        iov_[queued_] = {.iov_base = buffers_[queued_].data(), .iov_len = length};
+        messages_[queued_] = {};
+        messages_[queued_].msg_hdr.msg_name = &destination_;
+        messages_[queued_].msg_hdr.msg_namelen = sizeof(destination_);
+        messages_[queued_].msg_hdr.msg_iov = &iov_[queued_];
+        messages_[queued_].msg_hdr.msg_iovlen = 1;
+        ++queued_;
+    }
+
     net::FileDescriptor fd_;
     sockaddr_in destination_;  ///< every message's msg_name: unconnected, so no ICMP error reaches send
     size_t queued_{0};

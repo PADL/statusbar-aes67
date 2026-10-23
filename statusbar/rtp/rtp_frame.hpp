@@ -83,4 +83,12 @@ struct RtpFrame
     std::span<uint8_t const> payload,
     std::span<uint8_t> buffer) noexcept -> std::optional<size_t>;
 
+/// Write the headers serialize_rtp_frame() writes for a payload of
+/// `payload_length` bytes, the RTP header last, leaving the payload for the
+/// caller to write in place after them. Returns the payload's offset in
+/// `buffer`, or nullopt under the conditions serialize_rtp_frame() fails.
+[[nodiscard]] auto serialize_rtp_frame_headers(
+    FrameAddressing const& addressing, RtpHeader const& header, size_t payload_length, std::span<uint8_t> buffer) noexcept
+    -> std::optional<size_t>;
+
 }  // namespace statusbar::rtp

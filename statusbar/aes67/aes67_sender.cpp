@@ -155,19 +155,26 @@ void Sender::tick(uint64_t const now_index) noexcept
 
     uint32_t queued = 0;
     while (next_index_ <= newest) {
-        Supply const supply = provider_ ? provider_(next_index_, static_cast<uint32_t>(fpp), payload_) : Supply::none;
-        if (supply != Supply::frames) {
-            std::ranges::fill(payload_, uint8_t{0});
-            if (supply == Supply::missing) {
-                counters_.lost += fpp;
-            }
-        }
         rtp::RtpHeader header{};
         header.init(destination_.payload_type, sequence_, mediaclock::PtpMediaClock::rtp_timestamp(next_index_, 0), ssrc_);
-        if (port_->send(header, payload_)) {
+        // The provider writes straight into the transport's TX buffer; only
+        // when the transport has none to give (the packet is dropped) does it
+        // write the staging buffer, so its frames are still taken and counted.
+        std::optional<Supply> supply;
+        PayloadRenderer const render = [this, &supply](std::span<uint8_t> const payload) noexcept {
+            supply = render_payload(next_index_, payload);
+            return true;
+        };
+        if (port_->send_rendered(header, payload_.size(), render)) {
             ++queued;
         } else {
             ++counters_.dropped;
+        }
+        if (!supply) {
+            supply = render_payload(next_index_, payload_);
+        }
+        if (*supply == Supply::missing) {
+            counters_.lost += fpp;
         }
         ++sequence_;
         next_index_ += fpp;
@@ -179,6 +186,15 @@ void Sender::tick(uint64_t const now_index) noexcept
     if (queued > refused) {
         state_ = State::running;
     }
+}
+
+auto Sender::render_payload(uint64_t const first_index, std::span<uint8_t> const payload) noexcept -> Supply
+{
+    Supply const supply = provider_ ? provider_(first_index, format_.frames_per_packet, payload) : Supply::none;
+    if (supply != Supply::frames) {
+        std::ranges::fill(payload, uint8_t{0});
+    }
+    return supply;
 }
 
 auto Sender::session() const -> std::optional<sdp::Session>
