@@ -286,10 +286,15 @@ TEST(sap_directory, a_slower_announcer_gets_ten_of_its_intervals)
     int64_t const s = 1'000'000'000;
     SapDirectory directory{300 * s};
     (void)directory.handle_packet(announcement(dante_session("Slow", 1)), 0);
-    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), 600 * s);        // every 600 s: ten of them
-    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), (600 * s) + 5);  // a copy (another group)
-    EXPECT_TRUE(directory.expire((6600 * s) + 5).empty());
-    EXPECT_EQ(directory.expire((6600 * s) + 6).size(), size_t{1});
+    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), 300 * s);        // every 300 s: ten of them
+    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), (300 * s) + 5);  // a copy (another group)
+    EXPECT_TRUE(directory.expire((3300 * s) + 5).empty());
+    EXPECT_EQ(directory.expire((3300 * s) + 6).size(), size_t{1});
+    // ten intervals stop at the hour
+    (void)directory.handle_packet(announcement(dante_session("Rare", 1)), 0);
+    (void)directory.handle_packet(announcement(dante_session("Rare", 1)), 1000 * s);
+    EXPECT_TRUE(directory.expire((1000 + 3600) * s).empty());
+    EXPECT_EQ(directory.expire(((1000 + 3600) * s) + 1).size(), size_t{1});
 }
 
 TEST(sap_directory, a_late_or_foreign_reannouncement_is_ignored)
@@ -332,15 +337,35 @@ TEST(sap_directory, times_out_sessions_not_reannounced)
     (void)directory.handle_packet(announcement(dante_session("A", 1)), 0);
     (void)directory.handle_packet(announcement(dante_session("B", 1, "10.0.0.2")), 0);
     (void)directory.handle_packet(announcement(dante_session("B", 1, "10.0.0.2")), timeout / 20);  // B re-announced
-    EXPECT_TRUE(directory.expire(timeout).empty());
-    auto const expired = directory.expire(timeout + 1);
+    // B, every timeout / 20: the timeout; A, heard once: twice the timeout (its interval unknown)
+    EXPECT_TRUE(directory.expire(timeout + (timeout / 20)).empty());
+    auto const expired = directory.expire(timeout + (timeout / 20) + 1);
     EXPECT_EQ(expired.size(), size_t{1});
     EXPECT_TRUE(!expired.empty() && expired.front().kind == SapDirectory::Kind::timed_out);
-    EXPECT_TRUE(!expired.empty() && expired.front().entry.session.name == "A");
+    EXPECT_TRUE(!expired.empty() && expired.front().entry.session.name == "B");
     EXPECT_EQ(directory.entries().size(), size_t{1});
-    EXPECT_TRUE(directory.expire(timeout + (timeout / 20)).empty());
-    EXPECT_EQ(directory.expire(timeout + (timeout / 20) + 1).size(), size_t{1});
+    EXPECT_TRUE(directory.expire(2 * timeout).empty());
+    EXPECT_EQ(directory.expire((2 * timeout) + 1).size(), size_t{1});
     EXPECT_TRUE(directory.entries().empty());
+}
+
+TEST(sap_directory, a_restarted_version_counter_and_a_late_burst)
+{
+    int64_t const s = 1'000'000'000;
+    SapDirectory directory{300 * s};
+    (void)directory.handle_packet(announcement(dante_session("A", 9)), 0);
+    // version 1 after version 9: a late copy within a second, a reboot after
+    EXPECT_FALSE(directory.handle_packet(announcement(dante_session("A", 1)), s / 2).has_value());
+    auto const rebooted = directory.handle_packet(announcement(dante_session("A", 1)), 30 * s);
+    EXPECT_TRUE(rebooted.has_value() && rebooted->entry.session.session_version == 1);
+    // every 30 s, then one 240 s late: ten of the longer of the last two gaps, for two gaps only
+    (void)directory.handle_packet(announcement(dante_session("A", 1)), 60 * s);
+    (void)directory.handle_packet(announcement(dante_session("A", 1)), 300 * s);  // 240 s late
+    EXPECT_TRUE(directory.expire((300 + 2400) * s).empty());
+    (void)directory.handle_packet(announcement(dante_session("A", 1)), 330 * s);
+    (void)directory.handle_packet(announcement(dante_session("A", 1)), 360 * s);  // gaps 30, 30: the timeout again
+    EXPECT_TRUE(directory.expire((360 + 300) * s).empty());
+    EXPECT_EQ(directory.expire(((360 + 300) * s) + 1).size(), size_t{1});
 }
 
 TEST(sap_directory, ignores_compressed_encrypted_and_other_payloads)

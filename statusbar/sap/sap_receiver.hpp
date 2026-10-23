@@ -17,7 +17,8 @@
 /// the session, and not for an older version than the one announced (a
 /// sender that changes a session deletes the old one first: a late copy of
 /// that deletion must not remove the new); likewise a re-announcement counts
-/// only from that origin, and not for an older version. Compressed and encrypted packets,
+/// only from that origin, and an older version only after a second (a
+/// device whose version counter restarted, not a late copy). Compressed and encrypted packets,
 /// payloads other than application/sdp, and SDP the parser refuses are
 /// ignored. Once MAX_SESSIONS are known, new ones are ignored until some
 /// time out.
@@ -83,8 +84,12 @@ class SapDirectory
     /// 3.1 says ten of the sender's intervals or an hour, whichever is more;
     /// AES67 devices announce far more often than the RFC's 300 s minimum,
     /// and a source that is gone should show as gone within minutes. A
-    /// session re-announced at longer intervals gets ten of those instead.
+    /// session re-announced at longer intervals gets ten of those (the
+    /// longer of its last two gaps), up to MAX_TIMEOUT_NS; one heard only
+    /// once gets twice the timeout.
     static constexpr int64_t DEFAULT_TIMEOUT_NS = 10 * SapAnnouncer::INTERVAL_NS;
+    /// RFC 2974's hour: the most ten of a sender's intervals stretch the timeout to.
+    static constexpr int64_t MAX_TIMEOUT_NS = 3'600'000'000'000;
     /// The most sessions kept; announcements of more are ignored.
     static constexpr size_t MAX_SESSIONS = 1024;
 
@@ -102,7 +107,8 @@ class SapDirectory
         ip::IPv4Address sap_origin;
         uint16_t message_id_hash{0};
         int64_t last_seen_ns{0};
-        int64_t interval_ns{0};  ///< between its last two announcements (0: announced once)
+        int64_t interval_ns{0};  ///< the longer of its last two announcement gaps (0: announced once)
+        int64_t last_gap_ns{0};
     };
 
     struct Event
@@ -129,6 +135,8 @@ class SapDirectory
     [[nodiscard]] auto timeout_ns() const noexcept -> int64_t { return timeout_ns_; }
 
   private:
+    [[nodiscard]] auto entry_timeout_ns(Entry const& entry) const noexcept -> int64_t;
+
     int64_t timeout_ns_;
     std::vector<Entry> entries_;
 };

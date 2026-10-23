@@ -107,13 +107,16 @@ auto SapDirectory::handle(SapMessage const& message, int64_t const now_ns) -> st
     auto key = session_key(*session);
     auto const it = std::ranges::find(entries_, key, &Entry::key);
     if (it != entries_.end()) {
-        // Only from the origin that announced it (whose deletion counts), and
-        // not an older version (a late copy).
-        if (message.origin != it->sap_origin || session->session_version < it->session.session_version) {
+        // Only from the origin that announced it (whose deletion counts). An
+        // older version is a late copy, unless it comes after the copies'
+        // window: a device whose version counter restarted (a reboot).
+        int64_t const gap = now_ns - it->last_seen_ns;
+        if (message.origin != it->sap_origin || (session->session_version < it->session.session_version && gap < DUPLICATE_NS)) {
             return std::nullopt;
         }
-        if (now_ns - it->last_seen_ns >= DUPLICATE_NS) {  // a copy (another group, another path) is not an interval
-            it->interval_ns = now_ns - it->last_seen_ns;
+        if (gap >= DUPLICATE_NS) {                             // a copy (another group, another path) is not an interval
+            it->interval_ns = std::max(gap, it->last_gap_ns);  // the longer of the last two: one late burst passes
+            it->last_gap_ns = gap;
         }
         it->last_seen_ns = now_ns;
         it->message_id_hash = message.message_id_hash;
@@ -141,11 +144,19 @@ auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, int64_t 
     return message ? handle(*message, now_ns) : std::nullopt;
 }
 
+auto SapDirectory::entry_timeout_ns(Entry const& entry) const noexcept -> int64_t
+{
+    if (entry.interval_ns == 0) {
+        return 2 * timeout_ns_;  // heard once: its interval unknown (an RFC 2974 sender's is 300 s or more)
+    }
+    return std::clamp(10 * entry.interval_ns, timeout_ns_, std::max(timeout_ns_, MAX_TIMEOUT_NS));
+}
+
 auto SapDirectory::expire(int64_t const now_ns) -> std::vector<Event>
 {
     std::vector<Event> events;
     std::erase_if(entries_, [&](Entry& entry) {
-        if (now_ns - entry.last_seen_ns <= std::max(timeout_ns_, 10 * entry.interval_ns)) {
+        if (now_ns - entry.last_seen_ns <= entry_timeout_ns(entry)) {
             return false;
         }
         events.push_back(Event{.kind = Kind::timed_out, .entry = std::move(entry)});
