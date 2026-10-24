@@ -4,3 +4,4 @@ build/
 deb-output/
 .cache/
 *.swp
+.ruff_cache/
