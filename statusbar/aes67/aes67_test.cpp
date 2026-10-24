@@ -9,6 +9,8 @@
 #include "statusbar/rtp/rtp_header.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -30,6 +32,24 @@ using statusbar::ip::IPv4Address;
 namespace {
 
 constexpr uint32_t FPP = 48;
+
+/// A loopback address of this process's own, 127.(1-64).x.y from the pid: the suite runs in
+/// several processes at once (ctest -j, one per file and one for all), and receivers bind their
+/// destination address, so no other process's datagrams reach these tests' ports.
+auto own_loopback() -> IPv4Address
+{
+    auto const pid = static_cast<uint32_t>(::getpid());
+    return IPv4Address{
+        127, static_cast<uint8_t>(1 + ((pid >> 16U) % 64)), static_cast<uint8_t>(pid >> 8U), static_cast<uint8_t>(pid)};
+}
+
+/// A multicast group of this process's own (239.(64-127).x.y from the pid), for the same reason.
+auto own_group() -> IPv4Address
+{
+    auto const pid = static_cast<uint32_t>(::getpid());
+    return IPv4Address{
+        239, static_cast<uint8_t>(64 + ((pid >> 16U) % 64)), static_cast<uint8_t>(pid >> 8U), static_cast<uint8_t>(pid)};
+}
 
 Grandmaster const GRANDMASTER{.identity = *ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"), .domain = 0};
 
@@ -852,8 +872,8 @@ TEST(aes67_udp, two_receivers_share_a_port)
     auto transport = UdpTransport::open("lo");
     EXPECT_TRUE(transport.has_value());
     uint16_t const port = 45030;
-    Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = port};
-    Endpoint const group{.address = IPv4Address{239, 69, 250, 9}, .port = port};
+    Endpoint const unicast{.address = own_loopback(), .port = port};
+    Endpoint const group{.address = own_group(), .port = port};
     RecordingSink unicast_sink;
     Receiver unicast_receiver{STEREO_L24, unicast_sink.handler(), **transport};
     EXPECT_TRUE(unicast_receiver.configure(stream_session(unicast)));
@@ -904,7 +924,7 @@ TEST(aes67_udp, sender_to_receiver_over_loopback)
     EXPECT_TRUE(transport.has_value());
     EXPECT_TRUE((*transport)->local_address() == (IPv4Address{127, 0, 0, 1}));
 
-    Endpoint const destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45004};
+    Endpoint const destination{.address = own_loopback(), .port = 45004};
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
     sender.set_read_delay(0);  // these tests time packets by their last frame
@@ -952,7 +972,7 @@ TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)
     Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
     sender.set_read_delay(0);
     // Nothing listens on this port: each datagram draws an ICMP port-unreachable.
-    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45010}));
+    EXPECT_TRUE(sender.configure(Destination{.address = own_loopback(), .port = 45010}));
     uint64_t now = 48'000ULL * 900 + 47;
     for (int step = 0; step < 20; ++step, now += FPP) {
         sender.tick(now);
@@ -964,7 +984,7 @@ TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)
     // A listener that appears later gets what follows.
     RecordingSink sink;
     Receiver receiver{STEREO_L24, sink.handler(), **transport};
-    auto session = stream_session({.address = IPv4Address{127, 0, 0, 1}, .port = 45010});
+    auto session = stream_session({.address = own_loopback(), .port = 45010});
     session.media[0].payload_type = 96;
     EXPECT_TRUE(receiver.configure(session));
     for (int step = 0; step < 3; ++step, now += FPP) {
@@ -982,7 +1002,7 @@ TEST(aes67_udp, counts_loss_and_reorder_from_the_wire)
 {
     auto transport = UdpTransport::open("lo");
     EXPECT_TRUE(transport.has_value());
-    Endpoint const destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45006};
+    Endpoint const destination{.address = own_loopback(), .port = 45006};
     RecordingSink sink;
     Receiver receiver{STEREO_L24, sink.handler(), **transport};
     EXPECT_TRUE(receiver.configure(stream_session(destination)));
@@ -1013,7 +1033,7 @@ TEST(aes67_udp, multicast_over_loopback_when_the_host_allows)
 {
     auto transport = UdpTransport::open("lo");
     EXPECT_TRUE(transport.has_value());
-    Endpoint const group{.address = IPv4Address{239, 69, 250, 1}, .port = 45008};
+    Endpoint const group{.address = own_group(), .port = 45008};
     RecordingSink sink;
     Receiver receiver{STEREO_L24, sink.handler(), **transport};
     if (!receiver.configure(stream_session(group))) {
@@ -1073,7 +1093,7 @@ TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
 {
     auto transport = UdpTransport::open("lo");
     EXPECT_TRUE(transport.has_value());
-    Endpoint const destination{.address = IPv4Address{127, 0, 0, 1}, .port = 45020};
+    Endpoint const destination{.address = own_loopback(), .port = 45020};
     auto rx = (*transport)->open_receive(destination);
     EXPECT_TRUE(rx.has_value());
     auto tx = (*transport)->open_send({.destination = destination});
@@ -1151,7 +1171,7 @@ TEST(aes67_udp, sender_renders_each_payload_once_straight_into_the_batch)
 
     uint16_t port_number = 45030;
     for (auto const& format : RENDER_FORMATS) {
-        Endpoint const destination{.address = IPv4Address{127, 0, 0, 1}, .port = port_number++};
+        Endpoint const destination{.address = own_loopback(), .port = port_number++};
         auto rx = (*transport)->open_receive(destination);
         EXPECT_TRUE(rx.has_value());
 
