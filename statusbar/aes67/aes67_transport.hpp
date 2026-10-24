@@ -83,7 +83,7 @@ struct SendOptions
 {
     Endpoint destination;
     uint8_t ttl{32};                                 ///< multicast TTL (unicast uses the host default)
-    uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};  ///< the IPv4 DSCP; 46 (EF) by default
+    uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};  ///< the IPv4 DSCP (Sender::set_dscp())
 };
 
 /// Where an RtcpPort's reports go and arrive, and how they are marked.

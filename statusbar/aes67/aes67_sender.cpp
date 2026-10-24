@@ -62,8 +62,8 @@ auto Sender::configure(Destination const& destination) -> Status
         return failure(Aes67Error::packet_too_large);
     }
     clear();
-    auto port = transport_.open_send(
-        {.destination = {destination.address, destination.port}, .ttl = destination.ttl, .dscp = rtp::FrameAddressing::DSCP_MEDIA});
+    auto port =
+        transport_.open_send({.destination = {destination.address, destination.port}, .ttl = destination.ttl, .dscp = dscp_});
     if (!port) {
         state_ = State::error;
         error_ = port.error();
@@ -132,6 +132,7 @@ void Sender::continue_from(Sender const& previous)
     name_ = previous.name_;
     session_id_ = previous.session_id_;
     session_version_ = previous.session_version_;
+    dscp_ = previous.dscp_;
     channel_order_ = previous.channel_order_;
     info_block_version_ = previous.info_block_version_;
 }
@@ -197,7 +198,7 @@ auto Sender::rtcp_options() const noexcept -> std::optional<RtcpOptions>
         .destination = rtcp_endpoint_of({.address = destination_.address, .port = destination_.port}),
         .local = {},
         .ttl = destination_.ttl,
-        .dscp = rtp::FrameAddressing::DSCP_MEDIA,
+        .dscp = dscp_,
     };
 }
 

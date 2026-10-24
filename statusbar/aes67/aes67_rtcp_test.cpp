@@ -126,7 +126,11 @@ class FakeTransport final : public Transport
 
     [[nodiscard]] auto local_address() const noexcept -> IPv4Address override { return IPv4Address{10, 0, 0, 2}; }
     auto open_receive(Endpoint const&) -> StatusValue<std::unique_ptr<ReceivePort>> override { return std::make_unique<Rx>(*this); }
-    auto open_send(SendOptions const&) -> StatusValue<std::unique_ptr<SendPort>> override { return std::make_unique<Tx>(); }
+    auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override
+    {
+        sends.push_back(options);
+        return std::make_unique<Tx>();
+    }
     auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>> override
     {
         opened.push_back(options);
@@ -138,6 +142,7 @@ class FakeTransport final : public Transport
     std::deque<std::vector<uint8_t>> rtcp_in;
     std::vector<std::vector<uint8_t>> rtcp_out;
     std::vector<RtcpOptions> opened;
+    std::vector<SendOptions> sends;
 };
 
 auto stream_session(Endpoint const& destination) -> sdp::Session
@@ -214,6 +219,20 @@ TEST(aes67_rtcp, a_sender_session_opens_at_the_streams_rtcp_endpoint_and_dscp)
     EXPECT_EQ(opened.dscp, rtp::FrameAddressing::DSCP_MEDIA);
     EXPECT_TRUE(rig.session->role() == RtcpSession::Role::sender);
     EXPECT_EQ(rig.session->ssrc(), rig.sender.ssrc());
+}
+
+TEST(aes67_rtcp, a_senders_dscp_marks_its_stream_and_its_rtcp)
+{
+    FakeTransport transport;
+    Sender sender{STEREO_L24, {}, transport, "Out"};
+    sender.set_dscp(34);
+    EXPECT_TRUE(sender.configure(Destination{.address = GROUP.address, .port = GROUP.port}).has_value());
+    auto const session = RtcpSession::open_sender(sender, transport, options("bridge@10.0.0.2"));
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(transport.sends.size(), size_t{1});
+    EXPECT_EQ(transport.sends[0].dscp, uint8_t{34});
+    EXPECT_EQ(transport.opened.size(), size_t{1});
+    EXPECT_EQ(transport.opened[0].dscp, uint8_t{34});
 }
 
 TEST(aes67_rtcp, a_sender_sends_an_ipmx_sr_and_its_cname)

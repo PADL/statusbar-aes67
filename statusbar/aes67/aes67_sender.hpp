@@ -118,9 +118,9 @@ class Sender
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
 
-    /// Take `previous`'s read delay, grandmaster, name, SDP session id and version, channel order
-    /// and Info Block version, so this sender's next configure() announces the same session one version on. Call before
-    /// configure(), off the real-time thread.
+    /// Take `previous`'s read delay, grandmaster, name, SDP session id and version, DSCP, channel order
+    /// and Info Block version, so this sender's next configure() announces the same session one version on.
+    /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);
 
     /// The channel-order an IPMX Info Block names (ST 2110-30 Section 6.2.2), e.g. "SMPTE2110.(ST)";
@@ -130,6 +130,11 @@ class Sender
     /// The IPMX Info Block's version (TR-10-1 Section 8.7): one on with each configure(), grandmaster
     /// or channel-order change, mod 256.
     [[nodiscard]] auto info_block_version() const noexcept -> uint8_t { return info_block_version_; }
+
+    /// The DSCP the stream and its RTCP are marked with (AES67-2018 Section 6.2), DSCP_MEDIA until set.
+    /// Call before configure(), off the real-time thread.
+    void set_dscp(uint8_t const dscp) noexcept { dscp_ = dscp; }
+    [[nodiscard]] auto dscp() const noexcept -> uint8_t { return dscp_; }
 
     /// Where this stream's RTCP goes and how it is marked (AES67-2018 Section 6.2: as the stream),
     /// or nullopt when not configured.
@@ -180,6 +185,7 @@ class Sender
     std::optional<Grandmaster> grandmaster_;
     std::atomic<uint32_t> read_delay_;
     uint32_t phase_{0};
+    uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};
     bool started_{false};
     uint64_t next_index_{0};  ///< first frame of the next packet to send
     Counters counters_;

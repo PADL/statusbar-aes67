@@ -21,8 +21,8 @@ namespace statusbar::rtp {
 /// writes and parse_rtp_frame() reports.
 struct FrameAddressing
 {
-    /// The DSCP media is marked with by default: 46 (EF). AES67-2018 Section 6.2 recommends
-    /// AF41 (34) for media and EF for PTP; a sender may mark with another (dscp below).
+    /// The library's default media DSCP, 46 (EF), as Dante marks. AES67-2018 Section 6.2 recommends
+    /// AF41 (34) for media and EF (46) for clock; the caller chooses (dscp below).
     static constexpr uint8_t DSCP_MEDIA = 46;
 
     ieee::Eui48 destination_mac{};
