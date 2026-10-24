@@ -92,6 +92,7 @@ TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
     std::array<uint8_t, 40> small{};  // less than the 42 bytes of headers
     XdpTransport::TxPool pool;
     EXPECT_FALSE(XdpTransport::write_frame(pool, {}, {}, {}).has_value());  // empty pool
+    EXPECT_EQ(pool.empty_count(), uint64_t{1});
     EXPECT_TRUE(pool.put({.handle = 1, .buffer = big}));
     EXPECT_TRUE(pool.put({.handle = 2, .buffer = small}));
 
@@ -114,6 +115,7 @@ TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
     EXPECT_EQ(written->first.handle, uint64_t{1});
     EXPECT_EQ(written->second, rtp::rtp_frame_overhead(false) + rtp::RtpHeader::LENGTH + payload.size());
     EXPECT_EQ(pool.size(), size_t{0});
+    EXPECT_EQ(pool.empty_count(), uint64_t{1});  // only the take that found nothing counts
     EXPECT_TRUE(rtp::parse_rtp_frame(std::span{big}.first(written->second)).has_value());
 }
 
@@ -240,10 +242,19 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};
     EXPECT_TRUE((*transport)->open_receive(unicast).error() == Aes67Error::unsupported_destination);
     EXPECT_TRUE((*transport)->open_send({.destination = unicast}).error() == Aes67Error::unsupported_destination);
-    (*transport)->begin_tick();
+    EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{0});
+    auto sender = (*transport)->open_send({.destination = {.address = IPv4Address{239, 69, 250, 3}, .port = 5004}});
+    EXPECT_TRUE(sender.has_value());
+    (*transport)->begin_tick();  // fills the TX pool
+    rtp::RtpHeader header{};
+    header.init(96, 1, 2, 3);
+    std::array<uint8_t, 288> const payload{};
+    EXPECT_TRUE((*sender)->send(header, payload));
     (*transport)->end_tick();
     EXPECT_EQ((*transport)->tx_flush_failures(), uint64_t{0});
     EXPECT_FALSE((*transport)->send_error());
+    EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{1});  // published by end_tick()
+    EXPECT_EQ((*transport)->tx_pool_empty_count(), uint64_t{0});
 }
 
 TEST(aes67_xdp, joins_and_ticks_when_privileged)

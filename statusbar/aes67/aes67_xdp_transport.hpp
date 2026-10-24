@@ -71,9 +71,11 @@ class XdpTransport final : public Transport
     class TxPool
     {
       public:
+        /// Counts a miss (empty_count()) when empty.
         [[nodiscard]] auto take() noexcept -> std::optional<net::EthernetTxSlot>
         {
             if (count_ == 0) {
+                empty_.store(empty_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
                 return std::nullopt;
             }
             return slots_[--count_];
@@ -88,10 +90,13 @@ class XdpTransport final : public Transport
             return true;
         }
         [[nodiscard]] auto size() const noexcept -> size_t { return count_; }
+        /// take() calls that found the pool empty. Any thread.
+        [[nodiscard]] auto empty_count() const noexcept -> uint64_t { return empty_.load(std::memory_order_relaxed); }
 
       private:
         std::array<net::EthernetTxSlot, TX_POOL> slots_{};
         size_t count_{0};
+        std::atomic<uint64_t> empty_{0};  ///< written by the owning thread only
     };
 
     /// Write an RTP frame into a pooled TX frame: the slot and the frame
@@ -211,6 +216,11 @@ class XdpTransport final : public Transport
     {
         return tx_health_.failing() ? tx_health_.error() : std::error_code{};
     }
+    /// The socket's counters as of the last end_tick() (rx_count and tx_count are the
+    /// frames received and sent; tx_flush_failures() the ticks whose kick failed). Any thread.
+    [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats { return socket_stats_.load(); }
+    /// Sends that found no pooled TX frame. Any thread.
+    [[nodiscard]] auto tx_pool_empty_count() const noexcept -> uint64_t { return tx_pool_.empty_count(); }
     /// A port's datagrams last only the tick they arrived in.
     [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return true; }
     /// Fails with too_many_filter_rules past MAX_GROUPS groups, and with
@@ -255,6 +265,7 @@ class XdpTransport final : public Transport
     itc::QueuedPipe<PortState*, 128> added_;    ///< control -> real-time
     itc::QueuedPipe<PortState*, 128> retired_;  ///< real-time -> control
     itc::SeqlockValue<std::error_code> rules_error_;
+    itc::SeqlockValue<net::XdpSocketStats> socket_stats_;  ///< real-time -> any
 
     // Real-time thread only.
     std::array<PortState*, MAX_PORTS> ports_{};

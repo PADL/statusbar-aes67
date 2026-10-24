@@ -401,6 +401,7 @@ void XdpTransport::end_tick() noexcept
 {
     bool const ok = context_.tx_flush().has_value();
     tx_health_.record(ok, ok ? 0 : context_.stats().tx_flush_errno);
+    socket_stats_.store(context_.stats());
 }
 
 }  // namespace statusbar::aes67

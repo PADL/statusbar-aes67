@@ -212,6 +212,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   (`tx_flush_failures()`, `tx_flush_error()`); `TX_FAILING_AFTER` (8, 1 ms of ticks) in a
   row set `send_error()`, which every sender reports as its error, until a kick goes
   through.
+- Counters: `socket_stats()` is the socket's `net::XdpSocketStats` as of the last
+  `end_tick()` (frames received and sent, ring-full, UMEM-exhausted, kicks made, skipped
+  and transient), and `tx_pool_empty_count()` the sends that found the TX pool empty;
+  both may be read from any thread.
 - Limits: multicast destinations only, both ways (a unicast receiver would need a rule
   stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups
   (the BPF program's TCAM holds 16 rules); a joined group's frames to ports no receiver
