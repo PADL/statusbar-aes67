@@ -89,8 +89,8 @@ class Sender
 
     /// Send to `destination`, replacing any before.
     [[nodiscard]] auto configure(Destination const& destination) -> Status;
-    /// Send to `session.media[0]`'s connection, port and payload type; its
-    /// encoding, channels and rate must be the sender's.
+    /// Send to `session.media[0]`'s connection, port and the payload type of its
+    /// offered format with the sender's encoding; channels and rate must be the sender's.
     [[nodiscard]] auto configure(sdp::Session const& session) -> Status;
     /// Stop sending.
     void clear() noexcept;

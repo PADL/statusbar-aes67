@@ -210,10 +210,11 @@ enum class RtpmapResult
     unsupported,
 };
 
-/// `<pt> <encoding>/<rate>[/<channels>]`, applied to `media` if the payload type
-/// is one its m= line offers and the encoding L16 or L24 (subtype names are
+/// `<pt> <encoding>/<rate>[/<channels>]`, read into `format` if the payload type is
+/// one the m= line offers and the encoding L16, L24, L32 or AM824 (subtype names are
 /// case-insensitive).
-auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered, Media& media) noexcept -> StatusValue<RtpmapResult>
+auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered, PayloadFormat& format) noexcept
+    -> StatusValue<RtpmapResult>
 {
     auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
     if (!payload_type) {
@@ -228,6 +229,8 @@ auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered,
         parsed = Encoding::l16;
     } else if (equal_ignoring_case(encoding, "L24")) {
         parsed = Encoding::l24;
+    } else if (equal_ignoring_case(encoding, "L32")) {
+        parsed = Encoding::l32;
     } else if (equal_ignoring_case(encoding, "AM824")) {
         parsed = Encoding::am824;
     } else {
@@ -238,10 +241,7 @@ auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered,
     if (!rate || !channels || *rate == 0 || *channels == 0) {
         return failure(SdpError::malformed_line);
     }
-    media.payload_type = *payload_type;
-    media.encoding = parsed;
-    media.sample_rate = *rate;
-    media.channels = *channels;
+    format = {.payload_type = *payload_type, .encoding = parsed, .sample_rate = *rate, .channels = *channels};
     return RtpmapResult::applied;
 }
 
@@ -362,20 +362,30 @@ class Parser
         skipping_ = false;
         media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = offered_.front()});
         rtpmap_ = RtpmapResult::other_payload_type;
+        formats_.clear();
         return success();
     }
 
-    /// Close the current audio media: kept if a payload type it offers has an L16
-    /// or L24 rtpmap, dropped if it offers only other encodings or only static
+    /// Close the current audio media: kept if a payload type it offers has an L16,
+    /// L24, L32 or AM824 rtpmap, dropped if it offers only other encodings or only static
     /// payload types (RFC 3551 section 6: 0-95, which need no rtpmap), an error if
     /// a dynamic payload type has no rtpmap.
     auto end_media() -> Status
     {
-        auto const* const closing = std::exchange(media_, nullptr);
+        auto* const closing = std::exchange(media_, nullptr);
         if (closing == nullptr) {
             return success();
         }
-        if (rtpmap_ == RtpmapResult::applied) {
+        if (!formats_.empty()) {
+            // RFC 8866 section 5.14: the m= line's order is the order of preference
+            auto const rank = [this](PayloadFormat const& f) {
+                return std::ranges::find(offered_, f.payload_type) - offered_.begin();
+            };
+            std::ranges::stable_sort(formats_, {}, rank);
+            closing->set_format(formats_.front());
+            for (auto const& f : std::span{formats_}.subspan(1)) {
+                (void)closing->add_alternative(f);  // beyond the capacity, ignored
+            }
             return success();
         }
         bool const all_static = std::ranges::all_of(offered_, [](uint8_t const pt) { return pt < 96; });
@@ -445,15 +455,17 @@ class Parser
             return success();
         }
         if (name == "rtpmap") {
-            // the first payload type with a usable rtpmap is the one kept
-            if (rtpmap_ == RtpmapResult::applied) {
-                return success();
-            }
-            auto const result = parse_rtpmap(rest, offered_, *media_);
+            // every offered payload type with a usable rtpmap is kept (the first map of each)
+            PayloadFormat format;
+            auto const result = parse_rtpmap(rest, offered_, format);
             if (!result) {
                 return std::unexpected(result.error());
             }
-            if (*result != RtpmapResult::other_payload_type) {
+            if (*result == RtpmapResult::applied) {
+                if (std::ranges::none_of(formats_, [&](PayloadFormat const& f) { return f.payload_type == format.payload_type; })) {
+                    formats_.push_back(format);
+                }
+            } else if (*result == RtpmapResult::unsupported) {
                 rtpmap_ = *result;
             }
             return success();
@@ -471,8 +483,9 @@ class Parser
 
     Session session_;
     Media* media_{nullptr};
-    std::vector<uint8_t> offered_;  ///< the current media's payload types, from its m= line
-    RtpmapResult rtpmap_{RtpmapResult::other_payload_type};
+    std::vector<uint8_t> offered_;                           ///< the current media's payload types, from its m= line
+    RtpmapResult rtpmap_{RtpmapResult::other_payload_type};  ///< unsupported once an offered map is unusable
+    std::vector<PayloadFormat> formats_;                     ///< the current media's usable maps
     bool seen_version_{false};
     bool seen_origin_{false};
     bool seen_name_{false};

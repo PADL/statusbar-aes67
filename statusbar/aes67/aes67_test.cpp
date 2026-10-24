@@ -34,6 +34,7 @@ constexpr uint32_t FPP = 48;
 Grandmaster const GRANDMASTER{.identity = *ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"), .domain = 0};
 
 constexpr StreamFormat STEREO_L24{.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP};
+constexpr StreamFormat STEREO_L32{.encoding = sdp::Encoding::l32, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP};
 
 /// Byte `b` of frame `index`: a pattern a receiver can check by index.
 auto pattern(uint64_t const index, size_t const b) -> uint8_t
@@ -227,6 +228,24 @@ void expect_pattern(Received const& block)
 }
 
 }  // namespace
+
+TEST(aes67_sender, announces_l32_that_an_l32_receiver_takes)
+{
+    LoopTransport transport;
+    PatternSource source{8};
+    Sender sender{STEREO_L32, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 98}));
+    sender.set_grandmaster(GRANDMASTER);
+    std::string const text = sdp::to_string(*sender.session());
+    EXPECT_TRUE(text.find("m=audio 5004 RTP/AVP 98\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=rtpmap:98 L32/48000/2\r\n") != std::string::npos);
+    auto const parsed = sdp::parse(text);
+    EXPECT_TRUE(parsed.has_value());
+    RecordingSink sink;
+    Receiver receiver{STEREO_L32, sink.handler(), transport};
+    EXPECT_TRUE(receiver.configure(*parsed));
+    EXPECT_EQ(STEREO_L32.bytes_per_frame(), uint32_t{8});
+}
 
 TEST(aes67_sender, parses_a_grandmaster)
 {
@@ -641,12 +660,47 @@ TEST(aes67_receiver, refuses_streams_it_cannot_take)
     EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::unsupported_format);
     session = stream_session(group);
     session.media[0].encoding = sdp::Encoding::am824;
-    EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::format_mismatch);
+    EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::encoding_mismatch);
     EXPECT_TRUE(receiver.configure(stream_session(group), 1).error() == Aes67Error::no_media);
     EXPECT_FALSE(receiver.configured());
     EXPECT_TRUE(receiver.configure(stream_session(group)));
     EXPECT_TRUE(receiver.configured());
     EXPECT_TRUE(receiver.state() == State::ready);
+}
+
+TEST(aes67_receiver, takes_the_offered_format_in_its_own_encoding)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L32, sink.handler(), transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+
+    // only L24 offered: refused for its sample width; an L24 receiver refuses L32 alike
+    auto session = stream_session(group);
+    EXPECT_TRUE(receiver.configure(session).error() == Aes67Error::encoding_mismatch);
+    session.media[0].encoding = sdp::Encoding::l32;
+    Receiver l24{STEREO_L24, sink.handler(), transport};
+    EXPECT_TRUE(l24.configure(session).error() == Aes67Error::encoding_mismatch);
+
+    // L24 first, L32 as payload type 96: the L32 receiver takes 96, not 97
+    session = stream_session(group);
+    EXPECT_TRUE(session.media[0].add_alternative(
+        {.payload_type = 96, .encoding = sdp::Encoding::l32, .sample_rate = 48000, .channels = 2}));
+    EXPECT_TRUE(receiver.configure(session));
+    uint64_t const index = (1ULL << 32U) + 96;
+    auto send = [&](uint8_t const pt, size_t const frame_bytes) {
+        std::vector<uint8_t> const payload(size_t{FPP} * frame_bytes, uint8_t{0x5A});
+        rtp::RtpHeader header{};
+        header.init(pt, 10, static_cast<uint32_t>(index), 0x1234);
+        std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
+        (void)rtp::serialize_rtp(header, payload, bytes);
+        transport.queue.push_back({group, std::move(bytes)});
+    };
+    send(97, 6);
+    send(96, 8);
+    receiver.drain(index + FPP);
+    EXPECT_EQ(sink.blocks.size(), size_t{1});
+    EXPECT_TRUE(sink.blocks.size() == 1 && sink.blocks[0].frames == FPP && sink.blocks[0].bytes.size() == size_t{FPP} * 8);
 }
 
 TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
@@ -1003,12 +1057,14 @@ void receive_datagrams(ReceivePort& port, size_t const count, std::vector<std::v
     }
 }
 
-/// The bridge's AES67 encodings (L16 and L24), at a few channel counts.
-constexpr std::array<StreamFormat, 4> RENDER_FORMATS{{
+/// The bridge's AES67 encodings (L16, L24 and L32), at a few channel counts.
+constexpr std::array<StreamFormat, 6> RENDER_FORMATS{{
     {.encoding = sdp::Encoding::l16, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP},
     {.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP},
     {.encoding = sdp::Encoding::l16, .channels = 8, .sample_rate = 48000, .frames_per_packet = FPP},
     {.encoding = sdp::Encoding::l24, .channels = 8, .sample_rate = 48000, .frames_per_packet = FPP},
+    {.encoding = sdp::Encoding::l32, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP},
+    {.encoding = sdp::Encoding::l32, .channels = 6, .sample_rate = 48000, .frames_per_packet = FPP},  // 8 would not fit
 }};
 
 }  // namespace

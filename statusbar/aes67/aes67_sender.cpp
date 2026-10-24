@@ -91,12 +91,16 @@ auto Sender::configure(sdp::Session const& session) -> Status
     if (session.media.empty()) {
         return failure(Aes67Error::no_media);
     }
-    auto const& media = session.media.front();
+    auto media = session.media.front();
+    (void)media.prefer(format_.encoding);  // else the primary, refused below
     auto const connection = session.effective_connection(media);
     if (!connection) {
         return failure(Aes67Error::no_connection);
     }
-    if (media.encoding != format_.encoding || media.channels != format_.channels || media.sample_rate != format_.sample_rate) {
+    if (media.encoding != format_.encoding) {
+        return failure(Aes67Error::encoding_mismatch);
+    }
+    if (media.channels != format_.channels || media.sample_rate != format_.sample_rate) {
         return failure(Aes67Error::format_mismatch);
     }
     return configure(Destination{

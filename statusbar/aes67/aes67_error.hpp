@@ -14,12 +14,13 @@ enum class Aes67Error
     no_media = 1,             ///< the session has no media at that index
     no_connection,            ///< the media has no connection address
     not_ptp_locked,           ///< no direct media clock: the stream's timestamps are not PTP time
-    format_mismatch,          ///< the stream's encoding, channels or rate is not the slot's
+    format_mismatch,          ///< the stream's channels or rate is not the slot's
     unsupported_format,       ///< a format or rate AES67 or the media clock cannot carry
     packet_too_large,         ///< a packet would not fit a 1500-byte frame
     unsupported_destination,  ///< a destination this transport cannot reach
     invalid_address,          ///< not a dotted IPv4 address
     interface_not_found,      ///< no such interface, or it has no IPv4 address
+    encoding_mismatch,        ///< no offered format has the slot's encoding (sample layout and width)
 };
 
 class Aes67ErrorCategory : public std::error_category

@@ -162,7 +162,7 @@ TEST(sdp, refuses_what_the_bridge_cannot_use)
     EXPECT_TRUE(parse("o=- 1 1 IN IP4 1.2.3.4\r\n").error() == SdpError::missing_field);  // no v=
     EXPECT_TRUE(changed("v=0", "v=1").error() == SdpError::unsupported_version);
     EXPECT_TRUE(changed("IN IP4 192", "IN IP6 192").error() == SdpError::unsupported_network);
-    EXPECT_TRUE(changed("L24/", "L32/").error() == SdpError::unsupported_encoding);
+    EXPECT_TRUE(changed("L24/", "L20/").error() == SdpError::unsupported_encoding);
     EXPECT_TRUE(changed("a=rtpmap:97", "a=rtpmap:98").error() == SdpError::missing_field);  // no rtpmap for 97
     EXPECT_TRUE(changed("c=IN IP4 239.69.161.58/32\r\n", "").error() == SdpError::missing_field);
     EXPECT_TRUE(changed("239.69.161.58", "239.69.161").error() == SdpError::malformed_line);
@@ -301,6 +301,60 @@ TEST(sdp, carries_ravenna_aes3_as_am824)
     EXPECT_TRUE(session->media.at(0).encoding == Encoding::am824);
     EXPECT_EQ(session->media.at(0).frame_bytes(), uint32_t{8});
     EXPECT_TRUE(to_string(*session).find("a=rtpmap:97 AM824/48000/2\r\n") != std::string::npos);
+}
+
+TEST(sdp, carries_32_bit_linear_pcm_as_l32)
+{
+    // RAVENNA's L32: 32-bit big-endian PCM, beside AES67's L16 and L24
+    std::string text{DANTE};
+    text.replace(text.find("a=rtpmap:97 L24/48000/2"), 23, "a=rtpmap:97 l32/48000/2");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.size(), size_t{1});
+    EXPECT_TRUE(session->media.at(0).encoding == Encoding::l32);
+    EXPECT_EQ(session->media.at(0).frame_bytes(), uint32_t{8});
+    EXPECT_EQ(bytes_per_sample(Encoding::l16), uint32_t{2});
+    EXPECT_EQ(bytes_per_sample(Encoding::l24), uint32_t{3});
+    EXPECT_EQ(bytes_per_sample(Encoding::l32), uint32_t{4});
+    auto const written = to_string(*session);
+    EXPECT_TRUE(written.find("a=rtpmap:97 L32/48000/2\r\n") != std::string::npos);
+    auto const again = parse(written);
+    EXPECT_TRUE(again.has_value() && *again == *session);
+}
+
+TEST(sdp, keeps_every_offered_linear_pcm_format_in_m_line_order)
+{
+    std::string text{DANTE};
+    text.replace(text.find("m=audio 5004 RTP/AVP 97"), 23, "m=audio 5004 RTP/AVP 98 97 99 96");
+    text.replace(
+        text.find("a=rtpmap:97 L24/48000/2"),
+        23,
+        "a=rtpmap:96 L16/48000/2\r\na=rtpmap:99 L20/48000/2\r\na=rtpmap:97 L24/48000/2\r\na=rtpmap:98 L32/48000/2");
+    auto session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto& media = session->media.at(0);
+    EXPECT_TRUE(
+        (media.format() == PayloadFormat{.payload_type = 98, .encoding = Encoding::l32, .sample_rate = 48000, .channels = 2}));
+    EXPECT_EQ(media.other_formats().size(), size_t{2});
+    EXPECT_TRUE(
+        media.other_formats().size() == 2 && media.other_formats()[0].encoding == Encoding::l24 &&
+        media.other_formats()[1].encoding == Encoding::l16);
+
+    // written back as offered, and read back the same
+    auto const written = to_string(*session);
+    EXPECT_TRUE(written.find("m=audio 5004 RTP/AVP 98 97 96\r\n") != std::string::npos);
+    EXPECT_TRUE(
+        written.find("a=rtpmap:98 L32/48000/2\r\na=rtpmap:97 L24/48000/2\r\na=rtpmap:96 L16/48000/2\r\n") != std::string::npos);
+    auto const again = parse(written);
+    EXPECT_TRUE(again.has_value() && *again == *session);
+
+    // a receiver picks the one in its encoding; one not offered changes nothing
+    EXPECT_TRUE(media.prefer(Encoding::l16));
+    EXPECT_EQ(media.payload_type, uint8_t{96});
+    EXPECT_TRUE(media.encoding == Encoding::l16);
+    EXPECT_TRUE(media.other_formats().size() == 2 && media.other_formats()[1].encoding == Encoding::l32);
+    EXPECT_FALSE(media.prefer(Encoding::am824));
+    EXPECT_TRUE(media.encoding == Encoding::l16);
 }
 
 TEST(sdp, requires_a_name_and_timing)

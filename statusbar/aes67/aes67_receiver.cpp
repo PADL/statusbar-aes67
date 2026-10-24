@@ -32,7 +32,8 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     if (media_index >= session.media.size()) {
         return failure(Aes67Error::no_media);
     }
-    auto const& media = session.media[media_index];
+    auto media = session.media[media_index];
+    (void)media.prefer(format_.encoding);  // else the primary, refused below
     auto const connection = session.effective_connection(media);
     if (!connection) {
         return failure(Aes67Error::no_connection);
@@ -44,7 +45,10 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     if (!mediaclock::PtpMediaClock::supports(media.sample_rate)) {
         return failure(Aes67Error::unsupported_format);
     }
-    if (media.encoding != format_.encoding || media.channels != format_.channels || media.sample_rate != format_.sample_rate) {
+    if (media.encoding != format_.encoding) {
+        return failure(Aes67Error::encoding_mismatch);
+    }
+    if (media.channels != format_.channels || media.sample_rate != format_.sample_rate) {
         return failure(Aes67Error::format_mismatch);
     }
 

@@ -7,8 +7,9 @@
 /// PTP sample index.
 ///
 /// configure() takes the stream from a session's media: group and port,
-/// payload type, encoding, channels and rate (which must be the receiver's
-/// format; the ptime need not match, any whole number of frames is taken),
+/// payload type, encoding, channels and rate (the offered format with the
+/// receiver's encoding, else the primary one; encoding, channels and rate must be
+/// the receiver's; the ptime need not match, any whole number of frames is taken),
 /// an RFC 4570 source filter if any, and the RFC 7273 direct media clock
 /// offset. A stream without a direct media clock is refused: its timestamps
 /// are not PTP time. drain() then, each tick, takes what the transport has

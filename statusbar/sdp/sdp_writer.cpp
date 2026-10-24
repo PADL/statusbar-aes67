@@ -119,9 +119,19 @@ void write_ptime(Out out, uint32_t const micros)
     std::format_to(out, "\r\n");
 }
 
+void write_rtpmap(Out out, PayloadFormat const& format)
+{
+    std::format_to(
+        out, "a=rtpmap:{} {}/{}/{}\r\n", format.payload_type, encoding_name(format.encoding), format.sample_rate, format.channels);
+}
+
 void write_media(Out out, Media const& media)
 {
-    out = std::format_to(out, "m=audio {} RTP/AVP {}\r\n", media.port, media.payload_type);
+    out = std::format_to(out, "m=audio {} RTP/AVP {}", media.port, media.payload_type);
+    for (auto const& alternative : media.other_formats()) {
+        out = std::format_to(out, " {}", alternative.payload_type);
+    }
+    out = std::format_to(out, "\r\n");
     if (!media.information.empty()) {
         out = std::format_to(out, "i={}\r\n", one_line(media.information));
     }
@@ -131,8 +141,10 @@ void write_media(Out out, Media const& media)
     if (media.direction) {
         out = std::format_to(out, "a={}\r\n", direction_name(*media.direction));
     }
-    out = std::format_to(
-        out, "a=rtpmap:{} {}/{}/{}\r\n", media.payload_type, encoding_name(media.encoding), media.sample_rate, media.channels);
+    write_rtpmap(out, media.format());
+    for (auto const& alternative : media.other_formats()) {
+        write_rtpmap(out, alternative);
+    }
     write_ptime(out, media.packet_time_us);
     if (media.clock) {
         write_clock(out, *media.clock);

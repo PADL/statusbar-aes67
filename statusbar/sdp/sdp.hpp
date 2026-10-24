@@ -7,7 +7,7 @@
 ///
 /// Parses and writes the subset AES67 uses: an origin, a session name, IPv4
 /// connection data (multicast TTL included), and audio media over RTP/AVP with
-/// L16/L24 rtpmaps, ptime, the RFC 7273 reference clock and media clock
+/// L16/L24/L32 rtpmaps, ptime, the RFC 7273 reference clock and media clock
 /// (`ts-refclk:ptp=...`, `mediaclk:direct=<offset>`), RAVENNA's
 /// `clock-domain:PTPv2 <n>`, and RFC 4570 source
 /// filters. A session may hold several audio media (ST 2022-7 sends the same
@@ -20,21 +20,27 @@
 #include "statusbar/sdp/sdp_error.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace statusbar::sdp {
 
-/// The encodings carried: AES67 linear PCM (RFC 3551 L16, RFC 3190 L24) and
-/// RAVENNA's AES3 transport, AM824 (IEC 61883-6 32-bit subframes, as ST 2110-31).
+/// The encodings carried: AES67 linear PCM (RFC 3551 L16, RFC 3190 L24), L32
+/// (32-bit big-endian PCM, a RAVENNA extension: AES67-2018 mandates only L16/L24)
+/// and RAVENNA's AES3 transport, AM824 (IEC 61883-6 32-bit subframes, as ST 2110-31).
 enum class Encoding : uint8_t
 {
     l16,
     l24,
     am824,
+    l32,
 };
 
 [[nodiscard]] constexpr auto bytes_per_sample(Encoding const encoding) noexcept -> uint32_t
@@ -45,6 +51,7 @@ enum class Encoding : uint8_t
         case Encoding::l24:
             return 3;
         case Encoding::am824:
+        case Encoding::l32:
             return 4;
     }
     return 0;
@@ -60,6 +67,8 @@ enum class Encoding : uint8_t
             return "L24";
         case Encoding::am824:
             return "AM824";
+        case Encoding::l32:
+            return "L32";
     }
     return "";
 }
@@ -120,14 +129,30 @@ enum class Direction : uint8_t
     inactive,
 };
 
-/// One `m=audio <port> RTP/AVP <pt>...` section
-struct Media
+/// One payload type's rtpmap: `a=rtpmap:<pt> <encoding>/<rate>/<channels>`
+struct PayloadFormat
 {
-    uint16_t port{0};
-    uint8_t payload_type{0};  ///< the first on the m= line with an L16 or L24 rtpmap
+    uint8_t payload_type{0};
     Encoding encoding{Encoding::l24};
     uint32_t sample_rate{48000};
     uint16_t channels{1};
+
+    auto operator==(PayloadFormat const&) const noexcept -> bool = default;
+};
+
+/// One `m=audio <port> RTP/AVP <pt>...` section
+struct Media
+{
+    /// Supported formats a media may offer beside its primary one.
+    static constexpr size_t MAX_ALTERNATIVES = 3;
+
+    uint16_t port{0};
+    uint8_t payload_type{0};  ///< the primary format: the first on the m= line with a supported rtpmap
+    Encoding encoding{Encoding::l24};
+    uint32_t sample_rate{48000};
+    uint16_t channels{1};
+    std::array<PayloadFormat, MAX_ALTERNATIVES> alternatives{};  ///< further offered formats, in m= line order
+    uint8_t alternative_count{0};
     uint32_t packet_time_us{1000};  ///< a=ptime; AES67's default is 1 ms
     std::string information;        ///< i=
     std::optional<Direction> direction;
@@ -136,6 +161,55 @@ struct Media
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
     std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see ClockDomain below)
+
+    /// The primary format.
+    [[nodiscard]] constexpr auto format() const noexcept -> PayloadFormat
+    {
+        return {.payload_type = payload_type, .encoding = encoding, .sample_rate = sample_rate, .channels = channels};
+    }
+
+    /// Make `f` the primary format (its alternatives are unchanged).
+    constexpr void set_format(PayloadFormat const& f) noexcept
+    {
+        payload_type = f.payload_type;
+        encoding = f.encoding;
+        sample_rate = f.sample_rate;
+        channels = f.channels;
+    }
+
+    /// The offered formats other than the primary one.
+    [[nodiscard]] constexpr auto other_formats() const noexcept -> std::span<PayloadFormat const>
+    {
+        return std::span{alternatives}.first(std::min<size_t>(alternative_count, MAX_ALTERNATIVES));
+    }
+
+    /// Add a format offered beside the primary one; false if there is no room.
+    [[nodiscard]] constexpr auto add_alternative(PayloadFormat const& f) noexcept -> bool
+    {
+        if (alternative_count >= MAX_ALTERNATIVES) {
+            return false;
+        }
+        alternatives[alternative_count++] = f;
+        return true;
+    }
+
+    /// Make the first offered format with `encoding` the primary one, swapping it
+    /// with the old primary; false, and unchanged, if none is offered.
+    [[nodiscard]] constexpr auto prefer(Encoding const wanted) noexcept -> bool
+    {
+        if (encoding == wanted) {
+            return true;
+        }
+        for (auto& alternative : std::span{alternatives}.first(other_formats().size())) {
+            if (alternative.encoding == wanted) {
+                auto const primary = format();
+                set_format(alternative);
+                alternative = primary;
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// Bytes in one frame: one sample of every channel.
     [[nodiscard]] constexpr auto frame_bytes() const noexcept -> uint32_t { return channels * bytes_per_sample(encoding); }
@@ -203,7 +277,8 @@ struct Session
 /// Parse a session description. Lines may end in CRLF or LF. Fails unless it
 /// has v=0, an IN IP4 origin, s= and t=, and every audio media kept has a
 /// connection at media or session level. An audio media is kept with the first
-/// payload type on its m= line that has an L16 or L24 rtpmap; one offering only
+/// payload type on its m= line that has an L16, L24, L32 or AM824 rtpmap as its
+/// primary format and the other supported ones as alternatives; one offering only
 /// other encodings, or only static payload types without an rtpmap, is skipped,
 /// and if that leaves none the error is unsupported_encoding. A dynamic payload
 /// type without an rtpmap is missing_field.

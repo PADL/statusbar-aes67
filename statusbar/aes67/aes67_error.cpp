@@ -26,6 +26,8 @@ auto Aes67ErrorCategory::message(int const ev) const -> std::string
             return "invalid IPv4 address";
         case Aes67Error::interface_not_found:
             return "interface not found or has no IPv4 address";
+        case Aes67Error::encoding_mismatch:
+            return "stream encoding (sample width) differs from the slot's";
     }
     return "unknown aes67 error";
 }
