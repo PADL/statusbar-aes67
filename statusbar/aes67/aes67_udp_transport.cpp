@@ -205,10 +205,9 @@ auto UdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std:
     if (::setsockopt(fd->get(), IPPROTO_IP, IP_PKTINFO, &one, sizeof(one)) != 0) {
         return failure(net::errno_code());
     }
-    // Bound to the destination address itself: a group's socket sees only that
-    // group, and a unicast receiver's specific bind wins its address:port over
-    // the group sockets sharing the port. IP_PKTINFO checks each datagram's
-    // destination as well, in receive().
+    // Bound to the destination address itself: a group's socket sees only that group, and a
+    // unicast receiver's specific bind wins its address:port over the group sockets on the port;
+    // receive() checks each datagram's destination with IP_PKTINFO as well.
     sockaddr_in const address = to_sockaddr(destination);
     if (::bind(fd->get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address)) != 0) {
         return failure(net::errno_code());

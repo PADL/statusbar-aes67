@@ -1,24 +1,11 @@
+#pragma once
+
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-// The PTP-locked media clock: sample index n is presented at PTP time n / fs.
-//
-// This is the AES67 media clock of RFC 7273 `a=mediaclk:direct=<offset>`: the
-// media clock is the PTP clock itself, so a sample's index is a pure function
-// of PTP time and every device on the same grandmaster agrees on it without
-// exchanging anything. An RTP timestamp is the low 32 bits of the index plus
-// the stream's direct offset (subtract it before unwrap()); an AVTP
-// presentation time is time_of(index) (mod 2^32 on the wire). A bridge maps a
-// sample from one wire to the other with this arithmetic alone -- no rate
-// estimation, no anchoring, no state.
-//
-// Exact integer arithmetic, no 128-bit types: a time is split into whole
-// seconds and nanoseconds, and only the sub-second part is scaled, so the
-// largest intermediate is 1e9 * fs (< 2^48 at 192 kHz). Only the 48 kHz family
-// is supported (fs a multiple of 24 kHz), which keeps every 125 µs tick a whole
-// number of samples.
-
-#pragma once
+/// The PTP-locked media clock of RFC 7273 §5.2 `mediaclk:direct`: sample index n is presented at
+/// PTP time n / fs, so every device on one grandmaster agrees on it. Exact integer arithmetic; the
+/// 48 kHz family only (fs a multiple of 24 kHz).
 
 #include <cstdint>
 #include <optional>
@@ -30,6 +17,7 @@ class PtpMediaClock
   public:
     static constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
+    /// True for a rate of the 48 kHz family (a multiple of 24 kHz): whole samples every 125 µs.
     [[nodiscard]] static constexpr auto supports(std::uint32_t sample_rate_hz) noexcept -> bool
     {
         return sample_rate_hz != 0 && sample_rate_hz % 24000 == 0;
@@ -77,7 +65,7 @@ class PtpMediaClock
     }
 
     /// The RTP timestamp of sample n in a stream whose media clock is
-    /// `direct=<offset>` (RFC 7273 section 5.2): the low 32 bits of n + offset.
+    /// `direct=<offset>` (RFC 7273 §5.2): the low 32 bits of n + offset.
     [[nodiscard]] static constexpr auto rtp_timestamp(std::uint64_t index, std::uint32_t offset) noexcept -> std::uint32_t
     {
         return static_cast<std::uint32_t>(index) + offset;

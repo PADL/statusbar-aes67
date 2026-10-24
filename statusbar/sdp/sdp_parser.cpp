@@ -83,7 +83,7 @@ auto parse_origin(std::string_view rest, Session& session) -> Status
     if (auto const network = parse_network(rest); !network) {
         return network;
     }
-    // RFC 8866 section 5.2: an IPv4 literal or a fully qualified domain name
+    // RFC 8866 §5.2: an IPv4 literal or a fully qualified domain name
     auto const address = take(rest, ' ');
     if (address.empty()) {
         return failure(SdpError::malformed_line);
@@ -347,7 +347,7 @@ class Parser
             skipping_ = true;
             return success();
         }
-        // RFC 8866 section 5.14: one or more payload types, in order of preference
+        // RFC 8866 §5.14: one or more payload types, in order of preference
         offered_.clear();
         while (!rest.empty()) {
             auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
@@ -366,10 +366,8 @@ class Parser
         return success();
     }
 
-    /// Close the current audio media: kept if a payload type it offers has an L16,
-    /// L24, L32 or AM824 rtpmap, dropped if it offers only other encodings or only static
-    /// payload types (RFC 3551 section 6: 0-95, which need no rtpmap), an error if
-    /// a dynamic payload type has no rtpmap.
+    /// Close the current audio media: kept with a supported rtpmap, dropped if it offers only other
+    /// encodings or only static payload types (RFC 3551 §6), an error for a dynamic one without rtpmap.
     auto end_media() -> Status
     {
         auto* const closing = std::exchange(media_, nullptr);
@@ -377,7 +375,7 @@ class Parser
             return success();
         }
         if (!formats_.empty()) {
-            // RFC 8866 section 5.14: the m= line's order is the order of preference
+            // RFC 8866 §5.14: the m= line's order is the order of preference
             auto const rank = [this](PayloadFormat const& f) {
                 return std::ranges::find(offered_, f.payload_type) - offered_.begin();
             };

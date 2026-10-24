@@ -3,30 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RFC 2974 SAP, the listening side: the sessions announced on a network, as
-/// a receiver that subscribes to a stream by its session name (s=) finds it.
-///
-/// SapDirectory is the session table, pure (the caller gives the time): each
-/// SAP packet updates it and may yield an event. A session is known by its
-/// SDP origin (o= username, session id, address: RFC 8866's globally unique
-/// identifier); an announcement of a new one, or of a known one whose session
-/// changed (a new o= version, say), is `announced`; an unchanged
-/// re-announcement only refreshes it. A deletion (whose payload may be just
-/// the o= line) is `deleted`; a session not re-announced within the timeout
-/// is `timed_out`. A deletion counts only from the SAP origin that announced
-/// the session, and not for an older version than the one announced (a
-/// sender that changes a session deletes the old one first: a late copy of
-/// that deletion must not remove the new); likewise a re-announcement counts
-/// only from that origin, and an older version only after a second (a
-/// device whose version counter restarted, not a late copy). Compressed and encrypted packets,
-/// payloads other than application/sdp, and SDP the parser refuses are
-/// ignored. Once MAX_SESSIONS are known, new ones are ignored until some
-/// time out.
-///
-/// SapReceiver is the socket: it joins the SAP groups on one interface, and
-/// as a net::Pollable on the caller's reactor (control) thread reads every
-/// packet that is ready into its directory, handing each event to a handler,
-/// and expires sessions on tick().
+/// RFC 2974 SAP, the listening side: SapDirectory, the table of announced sessions (pure: the
+/// caller gives the time), and SapReceiver, the net::Pollable that joins the SAP groups and feeds
+/// it, for receivers that subscribe to a session by its name (s=).
 
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -48,7 +27,7 @@
 namespace statusbar::sap {
 
 /// A session's identity: its SDP origin's username, session id and address
-/// (RFC 8866 section 5.2), which stay the same across versions.
+/// (RFC 8866 §5.2), which stay the same across versions.
 struct SessionKey
 {
     std::string username;
@@ -80,13 +59,9 @@ struct OriginLine
 class SapDirectory
 {
   public:
-    /// Ten announcement intervals of AES67 devices (30 s). RFC 2974 section
-    /// 3.1 says ten of the sender's intervals or an hour, whichever is more;
-    /// AES67 devices announce far more often than the RFC's 300 s minimum,
-    /// and a source that is gone should show as gone within minutes. A
-    /// session re-announced at longer intervals gets ten of those (the
-    /// longer of its last two gaps), up to MAX_TIMEOUT_NS; one heard only
-    /// once gets twice the timeout.
+    /// Ten AES67 announcement intervals (300 s), short of RFC 2974 §3.1's hour so a source that is
+    /// gone shows as gone within minutes; a slower announcer gets ten of its own intervals, up to
+    /// MAX_TIMEOUT_NS, and one heard only once twice the timeout.
     static constexpr int64_t DEFAULT_TIMEOUT_NS = 10 * SapAnnouncer::INTERVAL_NS;
     /// RFC 2974's hour: the most ten of a sender's intervals stretch the timeout to.
     static constexpr int64_t MAX_TIMEOUT_NS = 3'600'000'000'000;
@@ -144,7 +119,7 @@ class SapDirectory
 class SapReceiver final : public net::Pollable
 {
   public:
-    /// The SAP groups (RFC 2974 section 3): administratively scoped (AES67's,
+    /// The SAP groups (RFC 2974 §3): administratively scoped (AES67's,
     /// first), organisation-local scope, and global scope.
     static constexpr std::array<ip::IPv4Address, 3> GROUPS{{
         SapAnnouncer::GROUP,

@@ -24,7 +24,7 @@ constexpr uint8_t SAP_DELETION = 0x04;    // T
 constexpr uint8_t SAP_ENCRYPTED = 0x02;   // E
 constexpr uint8_t SAP_COMPRESSED = 0x01;  // C
 
-/// The "o=" line of an SDP text, which a deletion carries (RFC 2974 section 3).
+/// The "o=" line of an SDP text, which a deletion carries (RFC 2974 §3).
 auto origin_line(std::string_view const sdp) -> std::string_view
 {
     auto const end = sdp.find('\n');

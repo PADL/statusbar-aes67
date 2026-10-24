@@ -3,48 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// AES67 over AF_XDP: one XdpContext on one NIC queue serves every receiver and
-/// sender. The XDP program redirects to the socket the untagged IPv4 (IHL 5)
-/// UDP frames whose destination is exactly one of the joined groups (the rule
-/// matches the group's MAC and the address's first two octets, which together
-/// are the whole address), and passes everything else to the kernel.
-/// begin_tick() drains the RX ring once and hands each frame, parsed with
-/// rtp::parse_rtp_frame(), to the ports for its destination group and port;
-/// senders write whole frames into UMEM (headers with
-/// rtp::serialize_rtp_frame_headers(), then the payload, copied in by send()
-/// or rendered in place by send_rendered()), and end_tick() kicks the NIC.
-///
-/// Refused kicks are counted; TX_FAILING_AFTER in a row set send_error(),
-/// which every sender reports, until a kick goes through.
-///
-/// Group membership is still the kernel's: each receive port holds a plain UDP
-/// socket joined to its group, so IGMP reports go out and the NIC's multicast
-/// filter keeps the group.
-///
-/// Ports and threads (see aes67_transport.hpp for the contract): open_receive()
-/// and a receive port's destruction run on the control thread and only post
-/// to the real-time thread: a new port goes through a bounded queue, a closed
-/// one is marked closed. begin_tick() is the only place the port list and the
-/// installed rules change: it takes new ports, drops closed ones (handing
-/// their state back on a retire queue, freed on the control thread's next
-/// open_*() or port destruction, or by the transport's destructor), and
-/// reinstalls the rules when the set changed (a BPF map update: a syscall on
-/// the real-time thread, only when receivers come or go).
-///
-/// UMEM: senders keep TX_POOL frames back, topped up each tick before the
-/// fill ring is; those are simply never offered to the kernel. A send takes a
-/// frame from the pool, writes it and commits it to the TX ring; a frame that
-/// does not fit, or whose render is abandoned, goes back to the pool (never to
-/// the kernel), and one the full TX ring refuses is freed to the UMEM. The rest of
-/// the UMEM backs the fill ring (FILL_RING entries) and the frames in flight.
-///
-/// Limits: multicast destinations only, both ways (a unicast receiver would
-/// need a rule stealing the host's UDP, a unicast sender ARP); at most
-/// MAX_GROUPS distinct groups (the BPF program's TCAM holds 16 rules); a
-/// joined group's frames to ports no receiver here listens on do not reach the
-/// kernel (the rule cannot see the UDP port), so other listeners on the same
-/// group miss them; untagged frames only; one queue (queue 0), so the NIC must
-/// deliver the groups there (one combined channel, or a flow-steering rule).
+/// AES67 over AF_XDP: one XdpContext on NIC queue 0 serves every receiver and sender; the XDP
+/// program redirects the joined groups' untagged IPv4/UDP frames and passes the rest to the kernel.
+/// Multicast destinations only, at most MAX_GROUPS groups; ports and threads as aes67_transport.hpp.
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
@@ -136,11 +97,9 @@ class XdpTransport final : public Transport
         rtp::RtpHeader const& header,
         std::span<uint8_t const> payload) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>;
 
-    /// Write an RTP frame's headers into a pooled TX frame and have `render`
-    /// write its `payload_length`-byte payload in place after them: the slot
-    /// and the frame length, or nullopt (the pool was empty, and `render` was
-    /// not called; or the frame did not fit, or `render` returned false, and
-    /// the slot went back to the pool).
+    /// Write an RTP frame's headers into a pooled TX frame and have `render` write the payload
+    /// after them: the slot and the frame length, or nullopt (pool empty: `render` not called;
+    /// frame too long or `render` false: the slot back in the pool).
     [[nodiscard]] static auto render_frame(
         TxPool& pool,
         rtp::FrameAddressing const& addressing,

@@ -51,7 +51,7 @@ void write_connection(Out out, Connection const& connection)
 {
     out = std::format_to(out, "c=IN IP4 ");
     out = ip::format_to(out, connection.address);
-    // RFC 8866 section 5.7: a TTL only for, and always for, a multicast address
+    // RFC 8866 §5.7: a TTL only for, and always for, a multicast address
     if (connection.address.is_multicast()) {
         auto const ttl = connection.ttl != 0 ? connection.ttl : Connection::DEFAULT_MULTICAST_TTL;
         out = std::format_to(out, "/{}", ttl);
@@ -72,10 +72,8 @@ void write_source_filter(Out out, SourceFilter const& filter)
     std::format_to(out, "\r\n");
 }
 
-/// RFC 7273: the grandmaster as an EUI-64 in IEEE canonical form, upper case;
-/// the domain in the bare form AES67 devices write and read, 0 included (as
-/// Dante writes it). A reference with
-/// neither grandmaster nor traceable has no valid form, and is not written.
+/// RFC 7273: the grandmaster as an upper-case EUI-64 in IEEE canonical form, the domain bare (0
+/// included, as Dante writes it); a reference with neither grandmaster nor traceable is not written.
 void write_clock(Out out, PtpReference const& clock)
 {
     if (!clock.traceable && !clock.grandmaster) {
@@ -93,7 +91,7 @@ void write_clock(Out out, PtpReference const& clock)
     std::format_to(out, "\r\n");
 }
 
-/// RFC 7273 section 5: a direct clock with its offset; any other is written as
+/// RFC 7273 §5: a direct clock with its offset; any other is written as
 /// `sender`, the media clock that is asynchronous to the reference clock.
 void write_media_clock(Out out, MediaClock const& clock)
 {

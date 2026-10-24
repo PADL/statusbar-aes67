@@ -3,10 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// Socket plumbing the transports share: interface lookup and address
-/// conversion. Sockets, group joins and multicast send options are core's
-/// (statusbar/net/net_socket.hpp); dotted quads are ip::parse_ipv4() and
-/// ip::to_string().
+/// Socket plumbing the transports share: interface lookup and sockaddr conversion. Sockets and group
+/// joins are net_socket.hpp's; dotted quads are ip::parse_ipv4() and ip::to_string().
 
 #include "statusbar/aes67/aes67_transport.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"

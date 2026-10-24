@@ -3,11 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RTP - RFC 3550 section 5.1 fixed header, as carried by AES67 streams.
-///
-/// Transport-agnostic: everything here works on the UDP payload, so the same
-/// code serves a UDP socket (which hands over the payload) and a raw path such
-/// as AF_XDP (which peels the Ethernet, IPv4 and UDP headers first).
+/// RTP - the RFC 3550 §5.1 fixed header, as AES67 streams carry it, parsed from and written to
+/// a UDP payload, so a socket and a raw path (AF_XDP) share the code.
 
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -87,12 +84,9 @@ struct RtpPacket
     std::span<uint8_t const> payload;
 };
 
-/// Parse an RTP packet from a UDP payload. nullopt unless it is a well-formed
-/// version 2 packet: the CSRC list and any header extension must fit, and a
-/// padding count must be nonzero and fit in what follows them. The payload type
-/// is not judged: AES67 never multiplexes RTCP on the RTP port, so a marked
-/// packet of any payload type is RTP, and the caller matches the type to the
-/// stream's SDP.
+/// Parse an RTP packet from a UDP payload: nullopt unless it is a well-formed version 2 packet
+/// (the CSRC list, extension and a nonzero padding count fit). The payload type is not judged:
+/// AES67 does not multiplex RTCP on the RTP port, so the caller matches it to the stream's SDP.
 [[nodiscard]] auto parse_rtp(std::span<uint8_t const> datagram) noexcept -> std::optional<RtpPacket>;
 
 /// Write `header` and `payload` into `datagram` as a fixed-header-only packet:
@@ -101,10 +95,8 @@ struct RtpPacket
 [[nodiscard]] auto serialize_rtp(RtpHeader const& header, std::span<uint8_t const> payload, std::span<uint8_t> datagram) noexcept
     -> std::optional<size_t>;
 
-/// Write `header` as serialize_rtp() does, leaving room for a payload of
-/// `payload_length` bytes that the caller writes in place after it. Returns
-/// the payload's offset in `datagram` (RtpHeader::LENGTH), or nullopt if the
-/// header and payload together do not fit.
+/// Write `header` as serialize_rtp() does, leaving `payload_length` bytes for the caller to write
+/// after it: the payload's offset (RtpHeader::LENGTH), or nullopt if they do not fit.
 [[nodiscard]] auto serialize_rtp_header(RtpHeader const& header, size_t payload_length, std::span<uint8_t> datagram) noexcept
     -> std::optional<size_t>;
 

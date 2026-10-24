@@ -3,14 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RFC 2974 SAP: packets, and announcements of AES67 senders' sessions as
-/// Dante and other AES67 devices discover streams: each session is announced to
-/// 239.255.255.255:9875 (the administratively scoped SAP group) on the first
-/// tick and every 30 s after, and a deletion is sent when it is withdrawn.
-///
-/// A net::Pollable for the reactor thread; it only sends, so fd() is -1 and
-/// the work is in tick(). announce() and withdraw() are called on the same
-/// thread.
+/// RFC 2974 SAP: packets, and SapAnnouncer, announcing AES67 senders' sessions to
+/// 239.255.255.255:9875 every 30 s with a deletion on withdraw. A net::Pollable that only sends
+/// (fd() is -1, the work is in tick()); announce() and withdraw() run on the reactor thread.
 
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -30,7 +25,7 @@ namespace statusbar::sap {
 /// The SAP payload type field: SDP.
 inline constexpr std::string_view SAP_PAYLOAD_TYPE = "application/sdp";
 
-/// A SAP packet (RFC 2974 section 3): version 1, IPv4 origin, no
+/// A SAP packet (RFC 2974 §3): version 1, IPv4 origin, no
 /// authentication or encryption, `deletion` setting the message type, then
 /// the payload type and the SDP text.
 [[nodiscard]] auto make_sap_packet(bool deletion, uint16_t message_id_hash, ip::IPv4Address const& origin, std::string_view sdp)
@@ -52,7 +47,7 @@ class SapAnnouncer final : public net::Pollable
 {
   public:
     static constexpr int64_t INTERVAL_NS = 30'000'000'000;
-    /// The administratively scoped SAP group (RFC 2974 section 3)
+    /// The administratively scoped SAP group (RFC 2974 §3)
     static constexpr ip::IPv4Address GROUP{239, 255, 255, 255};
     static constexpr uint16_t PORT = 9875;
 
@@ -71,10 +66,8 @@ class SapAnnouncer final : public net::Pollable
     /// announced under it; the next tick sends it. A changed session gets a new
     /// message id hash, so listeners take it as new.
     void announce(std::string const& key, sdp::Session const& session);
-    /// Stop announcing `key`, sending its deletion now (not at the next
-    /// tick: a caller shutting down may withdraw and close straight away).
-    /// The deletion's send error, if it had one; success for a key not
-    /// announced.
+    /// Stop announcing `key`, sending its deletion now, not at the next tick (a caller shutting
+    /// down may close straight after): the send's error, or success (also for a key not announced).
     auto withdraw(std::string const& key) -> Status;
     /// withdraw() every announced key: how many deletions went out, or the
     /// first send error (every key is withdrawn either way).

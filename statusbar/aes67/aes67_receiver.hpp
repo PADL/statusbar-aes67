@@ -3,35 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// An AES67 receiver: one RTP stream described by SDP, its frames handed on by
-/// PTP sample index.
-///
-/// configure() takes the stream from a session's media: group and port,
-/// payload type, encoding, channels and rate (the offered format with the
-/// receiver's encoding, else the primary one; encoding, channels and rate must be
-/// the receiver's; the ptime need not match, any whole number of frames is taken),
-/// an RFC 4570 source filter if any, and the RFC 7273 direct media clock
-/// offset. A stream without a direct media clock is refused: its timestamps
-/// are not PTP time. drain() then, each tick, takes what the transport has
-/// received: packets of the stream's payload type are accepted, the first
-/// one's SSRC is learnt and other sources dropped (until the learnt one has
-/// been silent for a second), the sequence is tracked (rtp::RtpSequence; a new
-/// source's probation packets are handed on too, only an unconfirmed jump of a
-/// validated source is dropped), and the RTP timestamp
-/// becomes a sample index with PtpMediaClock::index_of_rtp() about the current
-/// index. The payload goes to the FrameHandler as is.
-///
-/// Over a queuing transport (UDP), drain() skips the port until a tick before
-/// the next packet can have been sent (after [i, i + n), index i + 2n), then
-/// asks every tick until one comes: about three ticks in eight at 1 ms.
-///
-/// Counters: packets and frames handed on; `lost`, frames in sequence gaps
-/// not (yet) filled; `late`, frames that arrived out of order (after a later
-/// packet), which are still handed on; `dropped`, packets refused (malformed,
-/// wrong payload type, source or size, duplicates, or too old to place).
-///
-/// Threading: configure() and clear() make and close sockets: call them off
-/// the real-time thread. drain() and the accessors are real-time safe.
+/// An AES67 receiver: one RTP stream described by SDP, with an RFC 7273 direct media clock, its
+/// payloads handed to a FrameHandler by PTP sample index. configure() and clear() make and close
+/// sockets, off the real-time thread; drain() and the accessors are real-time safe.
 
 #include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
@@ -63,7 +37,7 @@ class Receiver
     void clear() noexcept;
 
     /// Take what has arrived and hand it on, with indices about `now_index`
-    /// (the media clock's index at the current PTP time), gated as above.
+    /// (the media clock's index at the current PTP time), behind the due-tick gate.
     void drain(uint64_t now_index) noexcept;
     /// Port receive() calls made and ticks skipped by the due-tick gate.
     [[nodiscard]] auto polls() const noexcept -> uint64_t { return polls_; }

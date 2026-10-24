@@ -3,15 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// What an AES67 receiver or sender is: its stream format, where its frames
-/// go or come from, its destination, its counters and state.
-///
-/// Frames are addressed by PTP sample index (mediaclock::PtpMediaClock): a
-/// receiver hands every packet's frames to its FrameHandler with the index of
-/// the first; a sender asks its FrameProvider for the frames of each packet
-/// due. Both callbacks run on the real-time thread and are inplace_functions
-/// with 64 bytes of capture (the size every callback in the tree uses), so
-/// storing and calling them never allocates.
+/// What an AES67 receiver or sender is: its stream format, its FrameHandler or FrameProvider (by
+/// PTP sample index, on the real-time thread, never allocating), its destination, counters and state.
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"

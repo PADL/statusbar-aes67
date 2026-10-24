@@ -3,15 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// AES67 over UDP sockets: one socket per receiver, bound to its destination
-/// address and port (a group, joined on the configured interface, or one of
-/// this host's addresses; one unicast receiver per address and port), with
-/// IP_PKTINFO checking each datagram's destination, drained with recvmmsg(); one unconnected socket per sender (every message names the
-/// destination, so a unicast receiver's ICMP port-unreachable never fails a
-/// send), multicast out of the interface with the configured TTL and DSCP 46,
-/// a tick's packets sent with sendmmsg(). A sender's packets are written
-/// straight into the SEND_BATCH slots of its sendmmsg() batch (send_rendered()
-/// has the payload rendered there, after the RTP header).
+/// AES67 over UDP sockets: per receiver a socket bound to its destination, drained with recvmmsg();
+/// per sender an unconnected socket, DSCP 46, its packets rendered into a SEND_BATCH sendmmsg() batch.
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"

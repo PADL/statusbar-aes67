@@ -3,13 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RTP sequence number validation - RFC 3550 Appendix A.1, with the loss
-/// accounting of Appendix A.3.
-///
-/// Tracks one source's sequence numbers: a new source is on probation until
-/// MIN_SEQUENTIAL packets arrive in order; small gaps are losses; a large
-/// jump is ignored unless the next packet confirms it (the sender restarted);
-/// late and duplicate packets are accepted but do not move the high-water mark.
+/// RTP sequence number validation (RFC 3550 Appendix A.1) with the loss accounting of Appendix
+/// A.3: a new source on probation, gaps as losses, a large jump believed only when confirmed.
 
 #include <algorithm>
 #include <cstdint>
@@ -87,7 +82,7 @@ class RtpSequence
         return static_cast<int64_t>(expected()) - static_cast<int64_t>(received_);
     }
 
-    /// RFC 3550 section 6.4.1 reception figures, as a receiver report carries them.
+    /// RFC 3550 §6.4.1 reception figures, as a receiver report carries them.
     struct LossReport
     {
         uint8_t fraction_lost;    // over the interval since the last report, in 1/256ths

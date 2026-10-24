@@ -76,10 +76,8 @@ auto SapDirectory::handle(SapMessage const& message, int64_t const now_ns) -> st
         return std::nullopt;
     }
     if (message.deletion) {
-        // By the o= line it carries, from the origin that announced it, and
-        // not older than what was announced; a deletion without one names the
-        // announcement by its origin and message id hash (RFC 2974 section 5;
-        // a hash of 0 names nothing).
+        // By the o= line it carries, from the origin that announced it, and not older than what
+        // was announced; without one, by origin and message id hash (RFC 2974 §5; 0 names nothing).
         auto const line = origin_line_of(message.sdp);
         if (!line && (message.sdp.starts_with("o=") || message.sdp.find("\no=") != std::string_view::npos)) {
             return std::nullopt;  // an o= line that does not read names nothing
