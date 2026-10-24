@@ -86,7 +86,7 @@ enum class State : uint8_t
     idle,     ///< not configured
     ready,    ///< configured, nothing received or sent yet
     running,  ///< packets flowing
-    error,    ///< the transport refused the last configure()
+    error,    ///< the transport refused the last configure(), or (a sender) refuses to send: Transport::send_error()
 };
 
 struct Counters

@@ -171,6 +171,8 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .umem_frame_count = UMEM_FRAMES,
         .rx_drain_max = RECEIVE_BATCH,
         .bind_mode = options.bind_mode,
+        .attach_mode = options.attach_mode,
+        .pin_path = options.pin_path,
     };
 }
 
@@ -393,7 +395,8 @@ void XdpTransport::begin_tick() noexcept
 
 void XdpTransport::end_tick() noexcept
 {
-    (void)context_.tx_flush();
+    bool const ok = context_.tx_flush().has_value();
+    tx_health_.record(ok, ok ? 0 : context_.stats().tx_flush_errno);
 }
 
 }  // namespace statusbar::aes67

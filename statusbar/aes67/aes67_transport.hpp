@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <system_error>
 
 namespace statusbar::aes67 {
 
@@ -121,6 +122,13 @@ class Transport
     virtual void begin_tick() noexcept {}
     /// After the senders send, each tick.
     virtual void end_tick() noexcept {}
+    /// True when a port keeps datagrams only for the tick they arrived in
+    /// (XDP), so receivers must drain every tick; false when it queues (UDP).
+    [[nodiscard]] virtual auto drain_every_tick() const noexcept -> bool { return false; }
+    /// Why the transport is not getting packets onto the wire (an AF_XDP
+    /// kick the kernel keeps refusing), or none. Senders report it as their
+    /// error. Real-time safe; any thread.
+    [[nodiscard]] virtual auto send_error() const noexcept -> std::error_code { return {}; }
 };
 
 }  // namespace statusbar::aes67

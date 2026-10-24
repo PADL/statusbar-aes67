@@ -30,6 +30,45 @@ TEST(aes67_xdp, ships_a_umem_sized_for_the_rings_and_the_tx_pool)
     EXPECT_EQ(config.rx_drain_max, XdpTransport::RECEIVE_BATCH);
     EXPECT_TRUE(config.default_action == net::XdpAction::pass_kernel);
     EXPECT_TRUE(config.bind_mode == net::XdpBindMode::auto_);
+    EXPECT_TRUE(config.attach_mode == net::XdpAttachMode::native);
+    EXPECT_TRUE(config.pin_path.empty());
+}
+
+TEST(aes67_xdp, passes_the_attach_mode_and_pin_path_through)
+{
+    XdpTransport::Options const options{
+        .bind_mode = net::XdpBindMode::copy,
+        .attach_mode = net::XdpAttachMode::generic,
+        .pin_path = net::XdpProgram::pin_path_for("eth0"),
+    };
+    auto const config = XdpTransport::config_for("eth0", options);
+    EXPECT_TRUE(config.attach_mode == net::XdpAttachMode::generic);
+    EXPECT_TRUE(config.pin_path == "/sys/fs/bpf/statusbar/eth0");
+    EXPECT_TRUE(config.adopt);
+}
+
+TEST(aes67_xdp, refused_kicks_are_counted_and_fail_the_transport_after_a_millisecond)
+{
+    XdpTransport::TxHealth health;
+    EXPECT_EQ(health.failures(), uint64_t{0});
+    EXPECT_FALSE(health.error());
+    EXPECT_FALSE(health.failing());
+    for (uint32_t i = 1; i < XdpTransport::TX_FAILING_AFTER; ++i) {
+        health.record(false, EINVAL);
+        EXPECT_FALSE(health.failing());
+    }
+    health.record(true, 0);  // one kick through: the count in a row starts again
+    for (uint32_t i = 1; i < XdpTransport::TX_FAILING_AFTER; ++i) {
+        health.record(false, EINVAL);
+    }
+    EXPECT_FALSE(health.failing());
+    health.record(false, EINVAL);
+    EXPECT_TRUE(health.failing());
+    EXPECT_EQ(health.failures(), uint64_t{(2 * XdpTransport::TX_FAILING_AFTER) - 1});
+    EXPECT_TRUE(health.error() == std::errc::invalid_argument);
+    health.record(true, 0);
+    EXPECT_FALSE(health.failing());
+    EXPECT_TRUE(health.error() == std::errc::invalid_argument);  // the last refusal is kept for the log
 }
 
 TEST(aes67_xdp, passes_the_bind_mode_through)
@@ -190,11 +229,14 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     }
     EXPECT_FALSE((*transport)->zero_copy());  // copy was forced (and lo has no zero-copy)
     EXPECT_TRUE((*transport)->bind_mode() == net::XdpBindMode::copy);
+    EXPECT_TRUE((*transport)->drain_every_tick());
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};
     EXPECT_TRUE((*transport)->open_receive(unicast).error() == Aes67Error::unsupported_destination);
     EXPECT_TRUE((*transport)->open_send({.destination = unicast}).error() == Aes67Error::unsupported_destination);
     (*transport)->begin_tick();
     (*transport)->end_tick();
+    EXPECT_EQ((*transport)->tx_flush_failures(), uint64_t{0});
+    EXPECT_FALSE((*transport)->send_error());
 }
 
 TEST(aes67_xdp, joins_and_ticks_when_privileged)

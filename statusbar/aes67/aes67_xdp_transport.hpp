@@ -14,6 +14,9 @@
 /// rtp::serialize_rtp_frame_headers(), then the payload, copied in by send()
 /// or rendered in place by send_rendered()), and end_tick() kicks the NIC.
 ///
+/// Refused kicks are counted; TX_FAILING_AFTER in a row set send_error(),
+/// which every sender reports, until a kick goes through.
+///
 /// Group membership is still the kernel's: each receive port holds a plain UDP
 /// socket joined to its group, so IGMP reports go out and the NIC's multicast
 /// filter keeps the group.
@@ -55,6 +58,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -66,9 +70,13 @@ namespace statusbar::aes67 {
 /// can be a defaulted argument there).
 struct XdpTransportOptions
 {
-    /// Zero-copy or copy bind; auto_ lets the kernel pick (zero-copy when the
-    /// driver offers it).
+    /// Zero-copy or copy bind (net::XdpBindMode).
     net::XdpBindMode bind_mode{net::XdpBindMode::auto_};
+    /// How a fresh attach attaches the program (net::XdpConfig::attach_mode).
+    net::XdpAttachMode attach_mode{net::XdpAttachMode::native};
+    /// Where the program is pinned and adopted from (net::XdpConfig::pin_path):
+    /// empty for none, or net::XdpProgram::pin_path_for(interface).
+    std::string pin_path;
 };
 
 class XdpTransport final : public Transport
@@ -89,6 +97,8 @@ class XdpTransport final : public Transport
     static constexpr size_t MAX_GROUPS = 16;
     /// Receive ports at most (several may share a group).
     static constexpr size_t MAX_PORTS = 64;
+    /// Consecutive refused TX kicks that put the transport in error (1 ms of ticks).
+    static constexpr uint32_t TX_FAILING_AFTER = 8;
 
     /// Frames held back for senders (internal; public for tests).
     class TxPool
@@ -141,16 +151,16 @@ class XdpTransport final : public Transport
     using Options = XdpTransportOptions;
 
     /// The XdpConfig open() uses on `interface`: UMEM_FRAMES frames, a
-    /// FILL_RING fill ring, rx_drain_max RECEIVE_BATCH, queue 0, no rules yet,
-    /// and `options`' bind mode.
+    /// FILL_RING fill ring, queue 0, no rules yet, and `options` (its pin path
+    /// by view: `options` must outlive the config).
     [[nodiscard]] static auto config_for(std::string_view interface, Options const& options = {}) noexcept -> net::XdpConfig;
 
     /// The rule redirecting `group`'s frames to the socket.
     [[nodiscard]] static auto group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>;
 
-    /// Open AF_XDP on `interface`'s queue 0. Fails without a supported NIC,
-    /// libxdp, or the privileges (CAP_NET_ADMIN, CAP_BPF / root), and with
-    /// bind_mode zero_copy when the driver offers no zero-copy.
+    /// Open AF_XDP on `interface`'s queue 0, adopting or attaching (and
+    /// pinning) the program as net::XdpConfig says. Fails without a supported
+    /// NIC, libxdp or the privileges, or zero-copy when it was required.
     [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
         -> StatusValue<std::unique_ptr<XdpTransport>>;
 
@@ -165,10 +175,68 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
     /// The interface the socket is bound on.
     [[nodiscard]] auto interface_name() const noexcept -> std::string_view { return interface_.name; }
-    /// True when the socket got zero-copy (read back after the bind), false in copy mode.
+    /// True when the socket runs zero-copy: the program is native and the
+    /// bind read back zero-copy; false in copy mode.
     [[nodiscard]] auto zero_copy() const noexcept -> bool { return context_.zero_copy(); }
     /// The bind mode open() asked for.
     [[nodiscard]] auto bind_mode() const noexcept -> net::XdpBindMode { return context_.bind_mode(); }
+    /// The mode the program runs in.
+    [[nodiscard]] auto attach_mode() const noexcept -> net::XdpAttachMode { return context_.attach_mode(); }
+    /// True when open() adopted a pinned program (no attach, no adapter reset).
+    [[nodiscard]] auto adopted() const noexcept -> bool { return context_.adopted(); }
+    /// True when the program is pinned (adopted from, or pinned at, Options::pin_path).
+    [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
+    /// Refused TX kicks, the last errno, and whether the transport is failing
+    /// (internal; public for tests). record() on the real-time thread only.
+    class TxHealth
+    {
+      public:
+        /// One kick's result: refused with `error` (an errno) unless `ok`.
+        void record(bool const ok, int const error) noexcept
+        {
+            if (ok) {
+                in_a_row_ = 0;
+                if (failing_.load(std::memory_order_relaxed)) {
+                    failing_.store(false, std::memory_order_relaxed);
+                }
+                return;
+            }
+            errno_.store(error, std::memory_order_relaxed);
+            failures_.fetch_add(1, std::memory_order_relaxed);
+            if (++in_a_row_ >= TX_FAILING_AFTER && !failing_.load(std::memory_order_relaxed)) {
+                failing_.store(true, std::memory_order_relaxed);
+            }
+        }
+        [[nodiscard]] auto failures() const noexcept -> uint64_t { return failures_.load(std::memory_order_relaxed); }
+        /// The last refusal's errno as an error code (none before the first).
+        [[nodiscard]] auto error() const noexcept -> std::error_code
+        {
+            int const value = errno_.load(std::memory_order_relaxed);
+            return value != 0 ? std::error_code{value, std::system_category()} : std::error_code{};
+        }
+        /// TX_FAILING_AFTER refusals in a row, and none accepted since.
+        [[nodiscard]] auto failing() const noexcept -> bool { return failing_.load(std::memory_order_relaxed); }
+
+      private:
+        uint32_t in_a_row_{0};  ///< real-time thread
+        std::atomic<uint64_t> failures_{0};
+        std::atomic<int> errno_{0};
+        std::atomic<bool> failing_{false};
+    };
+
+    /// TX kicks the kernel refused since open(); any thread.
+    [[nodiscard]] auto tx_flush_failures() const noexcept -> uint64_t { return tx_health_.failures(); }
+    /// The last refused kick's errno, as an error code (none before the
+    /// first); any thread.
+    [[nodiscard]] auto tx_flush_error() const noexcept -> std::error_code { return tx_health_.error(); }
+    /// While TX_FAILING_AFTER kicks in a row have been refused (and until one
+    /// is not): tx_flush_error(); else none.
+    [[nodiscard]] auto send_error() const noexcept -> std::error_code override
+    {
+        return tx_health_.failing() ? tx_health_.error() : std::error_code{};
+    }
+    /// A port's datagrams last only the tick they arrived in.
+    [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return true; }
     /// Fails with too_many_filter_rules past MAX_GROUPS groups, and with
     /// resource_unavailable_try_again past MAX_PORTS ports or when the queue to
     /// the real-time thread is full.
@@ -218,6 +286,7 @@ class XdpTransport final : public Transport
     size_t held_count_{0};
     TxPool tx_pool_;
     std::array<net::CompiledRule<32>, MAX_GROUPS> rules_{};
+    TxHealth tx_health_;
 };
 
 }  // namespace statusbar::aes67
