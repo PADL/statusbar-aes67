@@ -3,12 +3,15 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
+/// AES67 errors: Aes67Error and its `statusbar.aes67` category, an `is_error_code_enum`.
+
 #include <string>
 #include <system_error>
 #include <type_traits>
 
 namespace statusbar::aes67 {
 
+/// Why a receiver, sender or transport refused a request.
 enum class Aes67Error
 {
     no_media = 1,             ///< the session has no media at that index

@@ -3,10 +3,11 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// SDP error codes and category
+/// SDP errors: SdpError and its `statusbar.sdp` category, an `is_error_code_enum`.
 
 #include <string>
 #include <system_error>
+#include <type_traits>
 
 namespace statusbar::sdp {
 
@@ -17,7 +18,7 @@ enum class SdpError
     unsupported_version,   ///< v= other than 0
     missing_field,         ///< a required line or attribute is absent
     unsupported_network,   ///< a network or address type other than IN IP4
-    unsupported_encoding,  ///< an rtpmap other than L16, L24 or AM824
+    unsupported_encoding,  ///< an rtpmap other than L16, L24, L32 or AM824
 };
 
 /// Error category for SDP errors
@@ -33,7 +34,6 @@ class SdpErrorCategory : public std::error_category
 [[nodiscard]] auto sdp_error_category() noexcept -> std::error_category const&;
 
 /// Create an error_code from an SdpError
-/// @param e The SDP error code to convert
 [[nodiscard]] auto make_error_code(SdpError e) noexcept -> std::error_code;
 
 }  // namespace statusbar::sdp
