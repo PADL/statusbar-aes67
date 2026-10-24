@@ -4,7 +4,8 @@
 
 AES67 streams: `Receiver` and `Sender`, each one RTP stream described by SDP with frames
 addressed by PTP sample index, over a `Transport`: `UdpTransport` (sockets, any host) or
-`XdpTransport` (AF_XDP raw frames on one NIC queue).
+`XdpTransport` (AF_XDP raw frames on one NIC queue); and `RtcpSession`, the RTCP beside a
+stream.
 
 ## Overview
 
@@ -19,6 +20,11 @@ Both run on one real-time thread that ticks every 125 µs, bracketed by the tran
 `begin_tick()` (before any receiver drains) and `end_tick()` (after every sender has
 sent). Configuration happens on a control thread.
 
+An `RtcpSession` runs on the reactor (the control thread in a daemon), beside a configured
+`Sender` or `Receiver`. The stream publishes what RTCP needs through a seqlock each tick
+(`SendState`, `ReceiveState`); the session reads it, forms its SR or RR from it and the PTP
+time it is given, sends it through an `RtcpPort`, and parses what arrives.
+
 ## Key types
 
 - `StreamFormat` — encoding, channels, rate and frames per packet (the ptime).
@@ -28,6 +34,9 @@ sent). Configuration happens on a control thread.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
+- `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`; `RtcpSessionOptions` (CNAME, SR interval, receiver DSCP, cadence), `RtcpStats`.
+- `RtcpCadence` — when the next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
+- `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
 
 ## Quick example
@@ -64,6 +73,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
 - `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `open_rtcp_socket()`.
+- `statusbar/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`.
 - `statusbar/aes67/aes67_error.hpp` — `Aes67Error`.
 
 ## Dependencies
@@ -186,6 +196,63 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   on; `dropped`, packets refused (malformed, wrong payload type, source or size,
   duplicates, or too old to place).
 
+### RTCP
+
+- Scope: RFC 3550 §6 as a dedicated device needs it. A sender's session sends,
+  every interval, one compound packet: an SR, then SDES with its CNAME (§6.1 wants the
+  CNAME in every compound packet). A receiver's sends an RR with one report block about
+  the stream, then SDES. Both send an empty RR, SDES and BYE on `close()` or destruction.
+  Out of scope: an RFC 3550 wall-clock NTP mode, APP, SDES items past CNAME, RTCP-XR,
+  timer reconsideration and member tables (§6.3.3–6.3.7), RTP/RTCP multiplexing (RFC
+  5761), and the IPMX schedule (an SR before every Nth media packet, TR-10-1 §8.10.1),
+  which a cadence of its own will provide.
+- One SR form: the time field is always the PTP truncated time (TR-10-1 §8.7: PTP
+  seconds mod 2³², then nanoseconds) and the SR always carries the IPMX Info Block with
+  the PCM Media Info Block, which tells any reader how to take the field. AES67-2018 §6.3
+  asks only for RFC 3550 §6 and prescribes no derivation of the field, and no AES67
+  receiver synchronises from it. The pair is exact: the field is the presentation time
+  of the latest sample at or before now, the RTP timestamp that sample's
+  (`mediaclk:direct=0`).
+- The Info Block's strings are the SDP's (`sdp::ts_refclk_value()`,
+  `media_clock_value()`); `measuredsamplerate` is the nominal rate (the stream is PTP
+  locked); the channel order is `Sender::set_channel_order()`, by default undefined
+  groups of at most 64 (ST 2110-30's U01–U64), `SMPTE2110.(U02)` or
+  `SMPTE2110.(U64,U64,U08)`; the 8-bit channel count is clamped at 255; its version is `Sender::info_block_version()`, one on with every
+  `configure()`, grandmaster and channel-order change. TR-10-3 allows sample sizes of
+  16 and 24; an L32 stream says 32.
+- DSCP (AES67-2018 §6.2): a sender's session marks its reports with its stream's DSCP; a
+  receiver's with `RtcpSessionOptions::dscp`, the DSCP it would send a similar stream with
+  (the media default).
+- Interval: a sender's minimum is `interval_ms` (1 s by default), between RFC 3550 §6.2's
+  5 s and the reduced minimum an active sender may use; a receiver keeps the 5 s fixed
+  minimum. `Rfc3550Interval` applies §6.3.1 with two members and one sender over 5 % of
+  the stream's bandwidth (the share never binds at AES67 rates), halves the first
+  interval, and randomises each. Receivers heard from are not counted into it.
+- Round trip: an RR echoes the middle bits of the SR's field, which for the PTP form are
+  not RFC 3550's 1/65536 s units, so the sender keeps the PTP time of its last
+  `SR_HISTORY` SRs and finds the one an RR's LSR names; the RTT is arrival − that time −
+  DLSR, resolved to DLSR's 15.26 µs.
+- Jitter (RFC 3550 §6.4.1, Appendix A.8) is computed in `Receiver::accept()` from the
+  drain's index as the arrival time, so it is quantised to one tick (125 µs, 6 samples at
+  48 kHz), and only the first packet of each drain counts: packets drained together share
+  an arrival time, and their timestamp gaps would read as jitter. A diagnostic, not a
+  measurement. Loss figures come from the receiver's
+  `RtpSequence`; the session forms the interval's fraction from the cumulative
+  `expected` and `received` it last reported, so nothing on the real-time thread resets.
+- A session hears its own reports when the group loops them back and skips its SSRC.
+  A receiver's session takes any SR on the stream's RTCP endpoint before the first media
+  packet, and only the stream's SSRC after. A sender's "remote" is whichever receiver
+  reported on its stream last.
+- The CNAME is the caller's: RFC 3550 §6.5.1's `user@host` shape, as
+  `<identity>@<address>`, at most 255 bytes.
+- `Receiver::rtcp_options()` takes the endpoint from the SDP: `a=rtcp:` when given,
+  else the media's address at port + 1. An `a=rtcp:` unicast address is where reports go
+  (RFC 3605), received here at the same port; otherwise, for a unicast stream, reports go
+  to the sender (the source filter's source, else the origin address) at the same port. `a=rtcp-mux`
+  leaves the stream with no RTCP (`rtcp_multiplexed`).
+- Times are PTP nanoseconds supplied by the caller (`on_ready()`, `tick()`); a report
+  scheduled far beyond the minimum (PTP stepped back) is re-armed.
+
 ### UdpTransport
 
 - A receiver's socket is bound to its destination address itself, so a group's socket
@@ -260,7 +327,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ## Further reading
 
-- AES67-2018 — interoperability requirements for audio over IP.
-- RFC 3550 — RTP; RFC 7273 — clock source signalling; RFC 4570 — source filters.
+- AES67-2018 — interoperability requirements for audio over IP (§6.2 DSCP, §6.3 transport and RTCP).
+- RFC 3550 — RTP and RTCP; RFC 3605 — the RTCP attribute; RFC 7273 — clock source signalling; RFC 4570 — source filters.
+- VSF TR-10-1:2024 §8.7 and TR-10-3:2024 §11 — the IPMX SR and Info Block.
 - [`mediaclock`](MEDIACLOCK_MODULE.md), [`rtp`](RTP_MODULE.md), [`sdp`](SDP_MODULE.md), [`sap`](SAP_MODULE.md).
 - statusbar-core `net` module — `XdpContext`, `CompiledRule`, sockets.

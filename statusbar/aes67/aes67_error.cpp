@@ -28,6 +28,12 @@ auto Aes67ErrorCategory::message(int const ev) const -> std::string
             return "interface not found or has no IPv4 address";
         case Aes67Error::encoding_mismatch:
             return "stream encoding (sample width) differs from the slot's";
+        case Aes67Error::rtcp_multiplexed:
+            return "RTCP multiplexed on the RTP port is not supported";
+        case Aes67Error::no_rtcp_peer:
+            return "the sender of a unicast stream is not known for RTCP";
+        case Aes67Error::not_configured:
+            return "no stream configured";
     }
     return "unknown aes67 error";
 }

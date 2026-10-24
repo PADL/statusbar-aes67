@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <format>
+#include <iterator>
 #include <random>
 #include <string>
 #include <utility>
@@ -81,6 +83,10 @@ auto Sender::configure(Destination const& destination) -> Status
         session_id_ = stable_session_id(key);
     }
     bump_session_version();
+    ++info_block_version_;
+    rtcp_packets_ = 0;
+    rtcp_octets_ = 0;
+    send_state_.store({});  // not ticked while configured, so tick() is not storing too
     started_ = false;
     state_ = State::ready;
     error_.clear();
@@ -126,6 +132,8 @@ void Sender::continue_from(Sender const& previous)
     name_ = previous.name_;
     session_id_ = previous.session_id_;
     session_version_ = previous.session_version_;
+    channel_order_ = previous.channel_order_;
+    info_block_version_ = previous.info_block_version_;
 }
 
 void Sender::bump_session_version()
@@ -154,6 +162,43 @@ void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
     }
     grandmaster_ = grandmaster;
     bump_session_version();  // the SDP changed: a receiver keying on o= sees a new version
+    ++info_block_version_;
+}
+
+void Sender::set_channel_order(std::string order)
+{
+    if (order == channel_order_) {
+        return;
+    }
+    channel_order_ = std::move(order);
+    ++info_block_version_;
+}
+
+auto Sender::channel_order() const -> std::string
+{
+    if (!channel_order_.empty()) {
+        return channel_order_;
+    }
+    std::string order = "SMPTE2110.(";
+    for (uint32_t left = format_.channels; left > 0;) {
+        uint32_t const group = std::min<uint32_t>(left, 64);  // U01 to U64
+        std::format_to(std::back_inserter(order), "{}U{:02}", order.back() == '(' ? "" : ",", group);
+        left -= group;
+    }
+    return order + ")";
+}
+
+auto Sender::rtcp_options() const noexcept -> std::optional<RtcpOptions>
+{
+    if (!port_) {
+        return std::nullopt;
+    }
+    return RtcpOptions{
+        .destination = rtcp_endpoint_of({.address = destination_.address, .port = destination_.port}),
+        .local = {},
+        .ttl = destination_.ttl,
+        .dscp = rtp::FrameAddressing::DSCP_MEDIA,
+    };
 }
 
 void Sender::tick(uint64_t const now_index) noexcept
@@ -223,6 +268,9 @@ void Sender::tick(uint64_t const now_index) noexcept
     size_t const refused = port_->flush();
     counters_.dropped += refused;
     counters_.packets += queued - refused;
+    rtcp_packets_ += static_cast<uint32_t>(queued - refused);
+    rtcp_octets_ += static_cast<uint32_t>((queued - refused) * payload_.size());
+    send_state_.store({.ssrc = ssrc_, .packets = rtcp_packets_, .octets = rtcp_octets_});
     counters_.frames += (queued - refused) * fpp;
     if (queued > refused && state_ != State::error) {
         state_ = State::running;

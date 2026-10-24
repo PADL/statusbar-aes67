@@ -9,6 +9,7 @@
 
 #include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -117,10 +118,24 @@ class Sender
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
 
-    /// Take `previous`'s read delay, grandmaster, name and SDP session id and version, so this
-    /// sender's next configure() announces the same session one version on. Call before
+    /// Take `previous`'s read delay, grandmaster, name, SDP session id and version, channel order
+    /// and Info Block version, so this sender's next configure() announces the same session one version on. Call before
     /// configure(), off the real-time thread.
     void continue_from(Sender const& previous);
+
+    /// The channel-order an IPMX Info Block names (ST 2110-30 Section 6.2.2), e.g. "SMPTE2110.(ST)";
+    /// empty, the default, gives undefined groups of up to 64: "SMPTE2110.(U64,U64,U08)". Off the real-time thread.
+    void set_channel_order(std::string order);
+    [[nodiscard]] auto channel_order() const -> std::string;
+    /// The IPMX Info Block's version (TR-10-1 Section 8.7): one on with each configure(), grandmaster
+    /// or channel-order change, mod 256.
+    [[nodiscard]] auto info_block_version() const noexcept -> uint8_t { return info_block_version_; }
+
+    /// Where this stream's RTCP goes and how it is marked (AES67-2018 Section 6.2: as the stream),
+    /// or nullopt when not configured.
+    [[nodiscard]] auto rtcp_options() const noexcept -> std::optional<RtcpOptions>;
+    /// The latest SendState, published by tick(). Any thread.
+    [[nodiscard]] auto send_state() const noexcept -> SendState { return send_state_.load(); }
 
     /// Send every packet due by `now_index` (the media clock's index at the
     /// current PTP time).
@@ -155,6 +170,11 @@ class Sender
 
     uint32_t ssrc_{0};
     uint16_t sequence_{0};
+    std::string channel_order_;
+    uint8_t info_block_version_{0};
+    uint32_t rtcp_packets_{0};  ///< since configure(): the SR's counts (real-time thread)
+    uint32_t rtcp_octets_{0};
+    itc::SeqlockValue<SendState> send_state_;  ///< real-time -> RTCP session
     uint64_t session_id_{0};
     uint64_t session_version_{0};
     std::optional<Grandmaster> grandmaster_;

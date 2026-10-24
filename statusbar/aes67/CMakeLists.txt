@@ -7,6 +7,7 @@ statusbar_add_module(
   SOURCES
   aes67_error.cpp
   aes67_receiver.cpp
+  aes67_rtcp.cpp
   aes67_sender.cpp
   aes67_socket.cpp
   aes67_udp_transport.cpp
@@ -21,5 +22,6 @@ statusbar_add_module(
   statusbar::sdp
   statusbar::status
   TESTS
+  aes67_rtcp_test.cpp
   aes67_test.cpp
   aes67_xdp_test.cpp)

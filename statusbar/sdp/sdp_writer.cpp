@@ -76,30 +76,16 @@ void write_source_filter(Out out, SourceFilter const& filter)
 /// included, as Dante writes it); a reference with neither grandmaster nor traceable is not written.
 void write_clock(Out out, PtpReference const& clock)
 {
-    if (!clock.traceable && !clock.grandmaster) {
-        return;
+    if (auto const value = ts_refclk_value(clock); !value.empty()) {
+        std::format_to(out, "a=ts-refclk:{}\r\n", value);
     }
-    out = std::format_to(out, "a=ts-refclk:ptp={}", one_line(clock.version));
-    if (clock.traceable) {
-        out = std::format_to(out, ":traceable");
-    } else if (clock.grandmaster) {
-        auto const g = clock.grandmaster->span();
-        out = std::format_to(
-            out, ":{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}", g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
-        out = std::format_to(out, ":{}", clock.domain);
-    }
-    std::format_to(out, "\r\n");
 }
 
 /// RFC 7273 §5: a direct clock with its offset; any other is written as
 /// `sender`, the media clock that is asynchronous to the reference clock.
 void write_media_clock(Out out, MediaClock const& clock)
 {
-    if (clock.direct_offset) {
-        std::format_to(out, "a=mediaclk:direct={}\r\n", *clock.direct_offset);
-    } else {
-        std::format_to(out, "a=mediaclk:sender\r\n");
-    }
+    std::format_to(out, "a=mediaclk:{}\r\n", media_clock_value(clock));
 }
 
 /// A packet time in milliseconds, with no trailing zeros: 1000 -> "1", 125 -> "0.125".
@@ -156,9 +142,48 @@ void write_media(Out out, Media const& media)
     if (media.source_filter) {
         write_source_filter(out, *media.source_filter);
     }
+    if (media.rtcp) {
+        out = std::format_to(out, "a=rtcp:{}", media.rtcp->port);
+        if (media.rtcp->address) {
+            out = std::format_to(out, " IN IP4 ");
+            out = ip::format_to(out, *media.rtcp->address);
+        }
+        std::format_to(out, "\r\n");
+    }
 }
 
 }  // namespace
+
+auto ts_refclk_value(PtpReference const& clock) -> std::string
+{
+    if (!clock.traceable && !clock.grandmaster) {
+        return {};
+    }
+    std::string value = std::format("ptp={}", one_line(clock.version));
+    if (clock.traceable) {
+        value += ":traceable";
+    } else {
+        auto const g = clock.grandmaster->span();
+        std::format_to(
+            std::back_inserter(value),
+            ":{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}:{}",
+            g[0],
+            g[1],
+            g[2],
+            g[3],
+            g[4],
+            g[5],
+            g[6],
+            g[7],
+            clock.domain);
+    }
+    return value;
+}
+
+auto media_clock_value(MediaClock const& clock) -> std::string
+{
+    return clock.direct_offset ? std::format("direct={}", *clock.direct_offset) : std::string{"sender"};
+}
 
 auto to_string(Session const& session) -> std::string
 {

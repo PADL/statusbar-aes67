@@ -10,8 +10,8 @@ RFC 8866 session descriptions for AES67 audio streams: `parse()` into a `Session
 The module reads and writes an origin, a session name, IPv4 connection data (multicast
 TTL included), and audio media over RTP/AVP with L16, L24, L32 and AM824 rtpmaps, ptime,
 the RFC 7273 reference clock and media clock (`ts-refclk:ptp=...`,
-`mediaclk:direct=<offset>`), RAVENNA's `clock-domain:PTPv2 <n>`, and RFC 4570 source
-filters. A session may hold several audio media (ST 2022-7 sends the same stream twice);
+`mediaclk:direct=<offset>`), RAVENNA's `clock-domain:PTPv2 <n>`, RFC 4570 source
+filters and the RFC 3605 RTCP port (`a=rtcp:`). A session may hold several audio media (ST 2022-7 sends the same stream twice);
 other media are skipped, and attributes nothing here uses are ignored. Connection, clock,
 media clock, source filter, clock domain and direction may be given at session or media
 level; the `Session::effective_*()` accessors resolve them (media level wins).
@@ -22,7 +22,8 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `Media` — one `m=audio` section: port, the primary format, up to `MAX_ALTERNATIVES` further offered formats, ptime and media-level attributes; `prefer(encoding)` promotes an offered format.
 - `PayloadFormat` — one rtpmap: payload type, `Encoding`, rate, channels.
 - `Encoding` — `l16`, `l24`, `l32`, `am824`; `bytes_per_sample()`, `encoding_name()`.
-- `Connection`, `PtpReference`, `MediaClock`, `SourceFilter`, `Direction` — the attributes above.
+- `Connection`, `PtpReference`, `MediaClock`, `SourceFilter`, `RtcpAttribute`, `Direction` — the attributes above.
+- `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings.
 - `SdpError` — `enum class`, category `statusbar.sdp`.
 
 ## Quick example
@@ -46,7 +47,7 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 
 ## Headers
 
-- `statusbar/sdp/sdp.hpp` — the session types, `parse()`, `parse_origin_line()`, `to_string()`.
+- `statusbar/sdp/sdp.hpp` — the session types, `parse()`, `parse_origin_line()`, `to_string()`, `ts_refclk_value()`, `media_clock_value()`.
 - `statusbar/sdp/sdp_error.hpp` — `SdpError`, `sdp_error_category()`, `make_error_code()`.
 
 ## Dependencies
@@ -88,11 +89,18 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   that is not one token as `0.0.0.0`. A unicast connection's TTL is dropped and a
   multicast one always gets one (`DEFAULT_MULTICAST_TTL` when 0), as RFC 8866 §5.7
   requires.
+- `a=rtcp:<port>[ IN IP4 <address>]` (RFC 3605) is read at media level into
+  `Media::rtcp` and written when set; a sender leaves it unset, since the default (the
+  media's address, port + 1) needs no line and IPMX writes none. A port of 0 or another
+  address type fails the parse. `a=rtcp-mux` (RFC 5761) only sets `Media::rtcp_mux`:
+  AES67 never multiplexes, and the `aes67` receiver then refuses RTCP for the stream
+  (`rtcp_multiplexed`) while receiving it. `b=` lines (`b=AS`, `b=RS`, `b=RR`) are
+  ignored and never written: the RTCP interval is not derived from them.
 - `Media::frames_per_packet()` rounds the ptime to whole frames, since a sender may write
   125 µs as `0.12`.
 
 ## Further reading
 
-- RFC 8866 — SDP; RFC 7273 — clock source signalling; RFC 4570 — source filters; RFC 3551, RFC 3190 — L16 and L24.
+- RFC 8866 — SDP; RFC 7273 — clock source signalling; RFC 4570 — source filters; RFC 3551, RFC 3190 — L16 and L24; RFC 3605 — the RTCP attribute.
 - AES67-2018 §8 — session description.
 - [`sap`](SAP_MODULE.md) — announcing and discovering these sessions.

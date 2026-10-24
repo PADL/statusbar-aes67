@@ -66,15 +66,64 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     if (filter && (!filter->destination || *filter->destination == connection->address)) {
         source_filter_ = filter->source;
     }
+    set_rtcp(session, media, *connection);
+    receive_state_.store({});  // not drained while configured, so drain() is not storing too
     state_ = State::ready;
     error_.clear();
     return success();
+}
+
+void Receiver::set_rtcp(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
+{
+    rtcp_.reset();
+    rtcp_error_.clear();
+    if (media.rtcp_mux) {
+        rtcp_error_ = make_error_code(Aes67Error::rtcp_multiplexed);
+        return;
+    }
+    Endpoint const endpoint = media.rtcp
+        ? Endpoint{.address = media.rtcp->address.value_or(connection.address), .port = media.rtcp->port}
+        : rtcp_endpoint_of({.address = connection.address, .port = media.port});
+    RtcpOptions options{
+        .destination = endpoint,
+        .local = {},
+        .ttl = connection.ttl != 0 ? connection.ttl : sdp::Connection::DEFAULT_MULTICAST_TTL,
+    };
+    bool const unicast_stream = !connection.address.is_multicast();
+    if (media.rtcp && media.rtcp->address && !endpoint.address.is_multicast()) {
+        // RFC 3605: the address is where reports go; they arrive here at the same port.
+        options.local = {.address = unicast_stream ? connection.address : ip::IPv4Address{}, .port = endpoint.port};
+    } else if (!endpoint.address.is_multicast()) {
+        // A unicast stream: reports arrive at this address and go to the sender, at the same port.
+        auto const peer = source_filter_ ? source_filter_ : ip::parse_ipv4(session.origin_address);
+        if (!peer) {
+            rtcp_error_ = make_error_code(Aes67Error::no_rtcp_peer);
+            return;
+        }
+        options.local = endpoint;
+        options.destination = {.address = *peer, .port = endpoint.port};
+    }
+    rtcp_ = options;
+}
+
+auto Receiver::rtcp_options(uint8_t const dscp) const -> StatusValue<RtcpOptions>
+{
+    if (!port_) {
+        return failure(Aes67Error::not_configured);
+    }
+    if (!rtcp_) {
+        return failure(rtcp_error_);
+    }
+    RtcpOptions options = *rtcp_;
+    options.dscp = dscp;
+    return options;
 }
 
 void Receiver::clear() noexcept
 {
     port_.reset();
     source_filter_.reset();
+    rtcp_.reset();
     reset_stream();
     state_ = State::idle;
 }
@@ -87,6 +136,8 @@ void Receiver::reset_stream() noexcept
     have_max_ = false;
     max_seq_ = 0;
     window_.reset();
+    jitter_x16_ = 0;
+    have_transit_ = false;
 }
 
 void Receiver::drain(uint64_t const now_index) noexcept
@@ -114,6 +165,18 @@ void Receiver::drain(uint64_t const now_index) noexcept
             backlog = false;
             break;
         }
+    }
+    if (newest_frames_ != 0 && ssrc_) {
+        receive_state_.store({
+            .ssrc = *ssrc_,
+            .valid = true,
+            .extended_max = sequence_.extended_max(),
+            .expected = sequence_.expected(),
+            .received = sequence_.received(),
+            .jitter_x16 = jitter_x16_,
+            .last_rtp_ts = last_rtp_ts_,
+            .last_now_index = now_index,
+        });
     }
     if (backlog) {
         next_poll_index_ = 0;  // the rest next tick
@@ -169,7 +232,23 @@ void Receiver::accept(Datagram const& datagram, uint64_t const now_index) noexce
         return;
     }
 
-    uint64_t const index = mediaclock::PtpMediaClock::index_of_rtp(packet->header.timestamp.get(), offset_, now_index);
+    // RFC 3550 Appendix A.8 on the first packet of each drain (its index is the arrival time,
+    // shared by the batch): transit = arrival - timestamp; J += (|D| - J) / 16, kept x16.
+    uint32_t const timestamp = packet->header.timestamp.get();
+    uint32_t const transit = static_cast<uint32_t>(now_index) - timestamp;
+    if (have_transit_ && now_index != last_arrival_index_) {
+        auto const d = static_cast<int32_t>(transit - last_transit_);
+        uint32_t const magnitude = d < 0 ? 0U - static_cast<uint32_t>(d) : static_cast<uint32_t>(d);
+        jitter_x16_ += magnitude - ((jitter_x16_ + 8) >> 4U);
+    }
+    if (!have_transit_ || now_index != last_arrival_index_) {
+        last_transit_ = transit;
+        last_arrival_index_ = now_index;
+        have_transit_ = true;
+    }
+    last_rtp_ts_ = timestamp;
+
+    uint64_t const index = mediaclock::PtpMediaClock::index_of_rtp(timestamp, offset_, now_index);
     if (index + frames > newest_end_) {
         newest_end_ = index + frames;
         newest_frames_ = frames;

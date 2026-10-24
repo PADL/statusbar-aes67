@@ -496,4 +496,50 @@ TEST(sdp, carries_the_ravenna_clock_domain)
     EXPECT_FALSE(parse(other)->media.at(0).clock_domain.has_value());
 }
 
+TEST(sdp, reads_and_writes_the_rtcp_port)
+{
+    std::string text{DANTE};
+    text += "a=rtcp:5007\r\n";
+    auto session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_TRUE(session->media[0].rtcp == (RtcpAttribute{.port = 5007, .address = std::nullopt}));
+    EXPECT_FALSE(session->media[0].rtcp_mux);
+
+    session->media[0].rtcp = RtcpAttribute{.port = 6001, .address = ip::IPv4Address{239, 1, 2, 4}};
+    auto const written = to_string(*session);
+    EXPECT_TRUE(written.find("a=rtcp:6001 IN IP4 239.1.2.4\r\n") != std::string::npos);
+    auto const again = parse(written);
+    EXPECT_TRUE(again.has_value());
+    EXPECT_TRUE(again->media[0].rtcp == session->media[0].rtcp);
+}
+
+TEST(sdp, a_malformed_rtcp_port_is_refused)
+{
+    for (std::string_view const line :
+         {"a=rtcp:0\r\n", "a=rtcp:x\r\n", "a=rtcp:5005 IN IP6 ::1\r\n", "a=rtcp:5005 IN IP4 nope\r\n"}) {
+        std::string text{DANTE};
+        text += line;
+        EXPECT_FALSE(parse(text).has_value());
+    }
+}
+
+TEST(sdp, rtcp_mux_is_read_and_bandwidth_lines_are_ignored)
+{
+    std::string text{DANTE};
+    text += "b=RS:0\r\nb=RR:2000\r\na=rtcp-mux\r\n";
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_TRUE(session->media[0].rtcp_mux);
+    EXPECT_TRUE(to_string(*session).find("rtcp-mux") == std::string::npos);
+}
+
+TEST(sdp, the_clock_values_are_the_attribute_text)
+{
+    PtpReference const clock{.grandmaster = *ieee::eui64_from_string("EC-46-70-FF-FE-10-FF-B0"), .domain = 127};
+    EXPECT_EQ(ts_refclk_value(clock), std::string{"ptp=IEEE1588-2008:EC-46-70-FF-FE-10-FF-B0:127"});
+    EXPECT_EQ(ts_refclk_value(PtpReference{}), std::string{});
+    EXPECT_EQ(media_clock_value(MediaClock{.direct_offset = 0}), std::string{"direct=0"});
+    EXPECT_EQ(media_clock_value(MediaClock{}), std::string{"sender"});
+}
+
 TEST_MAIN(statusbar_sdp, sdp_test)

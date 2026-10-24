@@ -9,6 +9,7 @@
 
 #include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/rtp/rtp_sequence.hpp"
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/status/status.hpp"
@@ -52,11 +53,20 @@ class Receiver
     /// The SSRC learnt from the stream's first packet.
     [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t> { return ssrc_; }
 
+    /// Where this stream's RTCP goes and arrives (the SDP's a=rtcp, else port + 1), marked `dscp`:
+    /// the DSCP this host would send a similar stream with (AES67-2018 Section 6.2). Fails
+    /// not_configured, rtcp_multiplexed or no_rtcp_peer. Off the real-time thread.
+    [[nodiscard]] auto rtcp_options(uint8_t dscp = rtp::FrameAddressing::DSCP_MEDIA) const -> StatusValue<RtcpOptions>;
+    /// The latest ReceiveState, published by drain(). Any thread.
+    [[nodiscard]] auto receive_state() const noexcept -> ReceiveState { return receive_state_.load(); }
+
   private:
     void accept(Datagram const& datagram, uint64_t now_index) noexcept;
     /// Account a validated packet's place in the sequence; false to drop it.
     auto place(uint16_t sequence, uint32_t frames) noexcept -> bool;
     void reset_stream() noexcept;
+    /// From configure(): the RTCP endpoints, or why there are none.
+    void set_rtcp(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection);
 
     StreamFormat format_;
     FrameHandler handler_;
@@ -66,6 +76,8 @@ class Receiver
     uint8_t payload_type_{0};
     uint32_t offset_{0};
     std::optional<ip::IPv4Address> source_filter_;
+    std::optional<RtcpOptions> rtcp_;  ///< from configure(), without the DSCP
+    std::error_code rtcp_error_;       ///< why there is none
 
     std::optional<uint32_t> ssrc_;
     uint64_t last_index_{0};  ///< now_index when the learnt source was last heard
@@ -86,6 +98,14 @@ class Receiver
     uint64_t skipped_polls_{0};
     uint64_t newest_end_{0};     ///< this drain: the newest packet's end index
     uint32_t newest_frames_{0};  ///< and its frames (0: none accepted)
+
+    // RFC 3550 Appendix A.8 interarrival jitter, and what drain() publishes.
+    uint32_t jitter_x16_{0};
+    uint32_t last_transit_{0};
+    uint64_t last_arrival_index_{0};
+    bool have_transit_{false};
+    uint32_t last_rtp_ts_{0};
+    itc::SeqlockValue<ReceiveState> receive_state_;  ///< real-time -> RTCP session
 };
 
 }  // namespace statusbar::aes67

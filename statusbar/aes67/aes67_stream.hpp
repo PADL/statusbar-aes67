@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// What an AES67 receiver or sender is: its stream format, its FrameHandler or FrameProvider (by
-/// PTP sample index, on the real-time thread, never allocating), its destination, counters and state.
+/// PTP sample index, on the real-time thread, never allocating), its destination, counters, state,
+/// and the figures it publishes for its RTCP session.
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -91,6 +92,32 @@ struct Counters
     uint64_t dropped{0};  ///< packets refused (receiver) or not sent (sender)
 
     auto operator==(Counters const&) const noexcept -> bool = default;
+};
+
+/// What a sender publishes for RTCP at the end of each tick (RFC 3550 Section 6.4.1 sender info).
+struct SendState
+{
+    uint32_t ssrc{0};     ///< 0 before the first tick after configure()
+    uint32_t packets{0};  ///< sent since configure(), mod 2^32
+    uint32_t octets{0};   ///< payload octets sent since configure(), mod 2^32
+
+    auto operator==(SendState const&) const noexcept -> bool = default;
+};
+
+/// What a receiver publishes for RTCP after each drain that accepted a packet (RFC 3550 Section
+/// 6.4.1 report block inputs, cumulative; the session takes interval differences).
+struct ReceiveState
+{
+    uint32_t ssrc{0};
+    bool valid{false};           ///< a source has been heard
+    uint32_t extended_max{0};    ///< rtp::RtpSequence::extended_max()
+    uint32_t expected{0};        ///< rtp::RtpSequence::expected()
+    uint32_t received{0};        ///< rtp::RtpSequence::received()
+    uint32_t jitter_x16{0};      ///< interarrival jitter, timestamp units x 16 (Appendix A.8)
+    uint32_t last_rtp_ts{0};     ///< the newest packet's RTP timestamp
+    uint64_t last_now_index{0};  ///< the drain's index when it arrived
+
+    auto operator==(ReceiveState const&) const noexcept -> bool = default;
 };
 
 }  // namespace statusbar::aes67

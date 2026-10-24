@@ -24,6 +24,9 @@ enum class Aes67Error
     invalid_address,          ///< not a dotted IPv4 address
     interface_not_found,      ///< no such interface, or it has no IPv4 address
     encoding_mismatch,        ///< no offered format has the slot's encoding (sample layout and width)
+    rtcp_multiplexed,         ///< the SDP asks for RTCP on the RTP port (a=rtcp-mux), which AES67 never does
+    no_rtcp_peer,             ///< a unicast stream whose sender's address the SDP does not give
+    not_configured,           ///< the receiver or sender has no stream
 };
 
 class Aes67ErrorCategory : public std::error_category

@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection,
-/// L16/L24/L32/AM824 audio media, ptime, RFC 7273 clocks, RAVENNA clock-domain and RFC 4570 source
-/// filters. Session- or media-level values resolve through the effective_*() accessors.
+/// L16/L24/L32/AM824 audio media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source
+/// filters and the RFC 3605 RTCP port. Session- or media-level values resolve through the effective_*() accessors.
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -116,6 +116,16 @@ enum class Direction : uint8_t
     inactive,
 };
 
+/// `a=rtcp:<port>[ IN IP4 <address>]` (RFC 3605), media level: where the stream's RTCP goes when
+/// not to the media's address at its port + 1.
+struct RtcpAttribute
+{
+    uint16_t port{0};
+    std::optional<ip::IPv4Address> address;  ///< nullopt: the media's connection address
+
+    auto operator==(RtcpAttribute const&) const noexcept -> bool = default;
+};
+
 /// One payload type's rtpmap: `a=rtpmap:<pt> <encoding>/<rate>/<channels>`
 struct PayloadFormat
 {
@@ -148,6 +158,8 @@ struct Media
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
     std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see ClockDomain below)
+    std::optional<RtcpAttribute> rtcp;    ///< a=rtcp
+    bool rtcp_mux{false};                 ///< a=rtcp-mux (RFC 5761) was given; read, never written
 
     /// The primary format.
     [[nodiscard]] constexpr auto format() const noexcept -> PayloadFormat
@@ -268,6 +280,13 @@ struct Session
 /// IP4 <address>") into `session`'s origin fields, as parse() does: for a SAP
 /// deletion, which may carry only that line. On failure `session` is unchanged.
 [[nodiscard]] auto parse_origin_line(std::string_view value, Session& session) -> Status;
+
+/// The text an `a=ts-refclk:` line carries for `clock` ("ptp=IEEE1588-2008:<EUI-64>:<domain>" or
+/// "ptp=<version>:traceable"), as to_string() writes it; empty when it would not be written.
+[[nodiscard]] auto ts_refclk_value(PtpReference const& clock) -> std::string;
+
+/// The text an `a=mediaclk:` line carries for `clock` ("direct=<offset>" or "sender").
+[[nodiscard]] auto media_clock_value(MediaClock const& clock) -> std::string;
 
 /// Write a session description, CRLF line endings, fields in RFC 8866 order, sanitised so the
 /// output always parses. A PtpReference with neither grandmaster nor traceable, and a unicast

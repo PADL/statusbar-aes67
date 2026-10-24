@@ -196,6 +196,26 @@ auto parse_source_filter(std::string_view rest) noexcept -> StatusValue<std::opt
     return std::optional{filter};
 }
 
+/// `<port>[ IN IP4 <address>]` (RFC 3605 Section 2.1).
+auto parse_rtcp(std::string_view rest) noexcept -> StatusValue<RtcpAttribute>
+{
+    auto const port = parse_number<uint16_t>(take(rest, ' '));
+    if (!port || *port == 0) {
+        return failure(SdpError::malformed_line);
+    }
+    RtcpAttribute rtcp{.port = *port, .address = std::nullopt};
+    if (!rest.empty()) {
+        if (auto network = parse_network(rest); !network) {
+            return std::unexpected(network.error());
+        }
+        rtcp.address = ip::parse_ipv4(take(rest, ' '));
+        if (!rtcp.address) {
+            return failure(SdpError::malformed_line);
+        }
+    }
+    return rtcp;
+}
+
 auto equal_ignoring_case(std::string_view const a, std::string_view const b) noexcept -> bool
 {
     return std::ranges::equal(a, b, [](char x, char y) {
@@ -466,6 +486,18 @@ class Parser
             } else if (*result == RtpmapResult::unsupported) {
                 rtpmap_ = *result;
             }
+            return success();
+        }
+        if (name == "rtcp") {
+            auto rtcp = parse_rtcp(rest);
+            if (!rtcp) {
+                return std::unexpected(rtcp.error());
+            }
+            media_->rtcp = *rtcp;
+            return success();
+        }
+        if (name == "rtcp-mux") {
+            media_->rtcp_mux = true;
             return success();
         }
         if (name == "ptime") {
