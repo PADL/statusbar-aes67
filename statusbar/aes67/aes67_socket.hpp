@@ -3,19 +3,21 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// Socket plumbing the transports share: interface lookup and sockaddr conversion. Sockets and group
-/// joins are net_socket.hpp's; dotted quads are ip::parse_ipv4() and ip::to_string().
+/// Socket plumbing the transports share: interface lookup, sockaddr conversion and the RTCP socket.
+/// Sockets and group joins are net_socket.hpp's; dotted quads are ip::parse_ipv4() and ip::to_string().
 
 #include "statusbar/aes67/aes67_transport.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #include <netinet/in.h>
+#include <sys/socket.h>
 
 namespace statusbar::aes67 {
 
@@ -32,5 +34,16 @@ struct InterfaceInfo
 
 [[nodiscard]] auto to_sockaddr(Endpoint const& endpoint) noexcept -> sockaddr_in;
 [[nodiscard]] auto from_sockaddr(sockaddr_in const& address) noexcept -> Endpoint;
+
+/// The ancillary space recvmsg() needs for IP_PKTINFO.
+inline constexpr size_t PKTINFO_SPACE = CMSG_SPACE(sizeof(in_pktinfo));
+
+/// Whether a received message's IP_PKTINFO names `address` as its destination; false without one.
+[[nodiscard]] auto destined_for(msghdr& header, ip::IPv4Address const& address) noexcept -> bool;
+
+/// An RTCP port on a kernel UDP socket: bound to the group (joined, sent to with `options.ttl` and
+/// loopback) or to RtcpOptions::local (by default `interface`'s address), marked with RtcpOptions::dscp.
+[[nodiscard]] auto open_rtcp_socket(InterfaceInfo const& interface, RtcpOptions const& options)
+    -> StatusValue<std::unique_ptr<RtcpPort>>;
 
 }  // namespace statusbar::aes67

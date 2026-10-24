@@ -33,7 +33,7 @@ auto header_checksum(std::span<uint8_t const> const header) noexcept -> uint16_t
 
 }  // namespace
 
-auto parse_rtp_frame(std::span<uint8_t const> const frame) noexcept -> std::optional<RtpFrame>
+auto parse_udp_frame(std::span<uint8_t const> const frame) noexcept -> std::optional<UdpFrame>
 {
     ieee::EthernetFrame ethernet{};
     BufferDeserializerBuilder reader{frame};
@@ -66,13 +66,7 @@ auto parse_rtp_frame(std::span<uint8_t const> const frame) noexcept -> std::opti
         return std::nullopt;
     }
 
-    auto const datagram = frame.subspan(reader.position(), udp.payload_length());
-    auto const packet = parse_rtp(datagram);
-    if (!packet) {
-        return std::nullopt;
-    }
-
-    RtpFrame result{};
+    UdpFrame result{};
     result.addressing.destination_mac = ethernet.dest_mac;
     result.addressing.source_mac = ethernet.src_mac;
     if (ethernet.vlan_tag.is_set()) {
@@ -84,9 +78,21 @@ auto parse_rtp_frame(std::span<uint8_t const> const frame) noexcept -> std::opti
     result.addressing.destination_port = udp.dst_port.get();
     result.addressing.ttl = ipv4.ttl.get();
     result.addressing.dscp = ipv4.dscp();
-    result.datagram = datagram;
-    result.packet = *packet;
+    result.datagram = frame.subspan(reader.position(), udp.payload_length());
     return result;
+}
+
+auto parse_rtp_frame(std::span<uint8_t const> const frame) noexcept -> std::optional<RtpFrame>
+{
+    auto const udp = parse_udp_frame(frame);
+    if (!udp) {
+        return std::nullopt;
+    }
+    auto const packet = parse_rtp(udp->datagram);
+    if (!packet) {
+        return std::nullopt;
+    }
+    return RtpFrame{.addressing = udp->addressing, .datagram = udp->datagram, .packet = *packet};
 }
 
 auto serialize_rtp_frame_headers(

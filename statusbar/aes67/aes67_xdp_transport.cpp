@@ -109,6 +109,76 @@ class XdpTransport::Sender final : public SendPort
     rtp::FrameAddressing addressing_;
 };
 
+/// An RTCP port: the kernel socket sends, and receives what the program passes; the pipe
+/// receives what it redirects. Reactor thread; the destructor on the control thread.
+class XdpRtcpPort final : public RtcpPort
+{
+  public:
+    /// Datagrams one receive() takes from the pipe at most.
+    static constexpr size_t BATCH = 8;
+
+    XdpRtcpPort(XdpTransport& transport, XdpTransport::RtcpPipe* pipe, std::unique_ptr<RtcpPort> socket) noexcept
+        : transport_{transport}
+        , pipe_{pipe}
+        , socket_{std::move(socket)}
+    {}
+
+    ~XdpRtcpPort() override { transport_.rtcp_closed(pipe_); }
+    XdpRtcpPort(XdpRtcpPort const&) = delete;
+    auto operator=(XdpRtcpPort const&) -> XdpRtcpPort& = delete;
+    XdpRtcpPort(XdpRtcpPort&&) = delete;
+    auto operator=(XdpRtcpPort&&) -> XdpRtcpPort& = delete;
+
+    /// Redirected datagrams wake no descriptor: the session polls.
+    [[nodiscard]] auto fd() const noexcept -> int override { return -1; }
+
+    auto receive(std::span<Datagram> const out) noexcept -> size_t override
+    {
+        size_t const n = pipe_->take(out.first(std::min(out.size(), BATCH)), frames_);
+        return n + socket_->receive(out.subspan(n));
+    }
+
+    auto send(std::span<uint8_t const> const packet) noexcept -> Status override { return socket_->send(packet); }
+
+    [[nodiscard]] auto dropped() const noexcept -> uint64_t override { return pipe_->dropped() + socket_->dropped(); }
+
+  private:
+    XdpTransport& transport_;
+    XdpTransport::RtcpPipe* pipe_;
+    std::unique_ptr<RtcpPort> socket_;
+    std::array<XdpTransport::RtcpPipe::Frame, BATCH> frames_{};
+};
+
+auto XdpTransport::RtcpPipe::offer(Datagram const& datagram) noexcept -> bool
+{
+    if (datagram.payload.size() > MAX_DATAGRAM || !queue_.can_publish()) {
+        dropped_.store(dropped_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        return false;
+    }
+    Frame frame;  // NOLINT(cppcoreguidelines-pro-type-member-init): only `length` bytes are copied
+    std::ranges::copy(datagram.payload, frame.bytes.begin());
+    frame.length = static_cast<uint16_t>(datagram.payload.size());
+    frame.source = datagram.source;
+    queue_.publish(frame);
+    return true;
+}
+
+auto XdpTransport::RtcpPipe::take(std::span<Datagram> const out, std::span<Frame> const storage) noexcept -> size_t
+{
+    size_t const want = std::min(out.size(), storage.size());
+    size_t n = 0;
+    while (n < want) {
+        auto frame = queue_.try_consume();
+        if (!frame) {
+            break;
+        }
+        storage[n] = *frame;
+        out[n] = {.payload = std::span<uint8_t const>{storage[n].bytes}.first(storage[n].length), .source = storage[n].source};
+        ++n;
+    }
+    return n;
+}
+
 auto XdpTransport::write_frame(
     TxPool& pool,
     rtp::FrameAddressing const& addressing,
@@ -147,12 +217,19 @@ XdpTransport::XdpTransport(InterfaceInfo interface) noexcept
 XdpTransport::~XdpTransport()
 {
     assert(live_ports_ == 0 && "every receive port must be destroyed before its transport");
+    assert(live_rtcp_ == 0 && "every RTCP port must be destroyed before its transport");
     release_held();
     for (size_t i = 0; i < port_count_; ++i) {
         delete ports_[i];
     }
     while (auto state = added_.try_consume()) {
         delete *state;
+    }
+    for (size_t i = 0; i < rtcp_count_; ++i) {
+        delete rtcp_pipes_[i];
+    }
+    while (auto pipe = rtcp_added_.try_consume()) {
+        delete *pipe;
     }
     collect_retired();
     while (auto slot = tx_pool_.take()) {
@@ -272,6 +349,53 @@ void XdpTransport::collect_retired() noexcept
     while (auto state = retired_.try_consume()) {
         delete *state;
     }
+    while (auto pipe = rtcp_retired_.try_consume()) {
+        delete *pipe;
+    }
+}
+
+auto XdpTransport::open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>>
+{
+    collect_retired();
+    if (!options.destination.address.is_multicast()) {
+        return failure(Aes67Error::unsupported_destination);
+    }
+    if (live_rtcp_ == MAX_RTCP_PORTS || !rtcp_added_.can_publish()) {
+        return failure(std::errc::resource_unavailable_try_again);
+    }
+    auto socket = open_rtcp_socket(interface_, options);
+    if (!socket) {
+        return failure(socket.error());
+    }
+    auto* const pipe = new RtcpPipe{options.destination};
+    rtcp_added_.publish(pipe);
+    ++live_rtcp_;
+    return std::make_unique<XdpRtcpPort>(*this, pipe, std::move(*socket));
+}
+
+void XdpTransport::rtcp_closed(RtcpPipe* const pipe) noexcept
+{
+    pipe->closed.store(true, std::memory_order_release);
+    --live_rtcp_;
+    collect_retired();
+}
+
+void XdpTransport::update_rtcp_pipes() noexcept
+{
+    while (rtcp_count_ < MAX_RTCP_PORTS) {
+        auto pipe = rtcp_added_.try_consume();
+        if (!pipe) {
+            break;
+        }
+        rtcp_pipes_[rtcp_count_++] = *pipe;
+    }
+    for (size_t i = 0; i < rtcp_count_;) {
+        if (rtcp_pipes_[i]->closed.load(std::memory_order_acquire) && rtcp_retired_.try_publish(rtcp_pipes_[i])) {
+            rtcp_pipes_[i] = rtcp_pipes_[--rtcp_count_];
+        } else {
+            ++i;
+        }
+    }
 }
 
 auto XdpTransport::open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>>
@@ -364,6 +488,7 @@ void XdpTransport::begin_tick() noexcept
     if (changed) {
         install_rules();
     }
+    update_rtcp_pipes();
 
     // Reap TX completions, hold back the senders' frames, then offer the
     // kernel the rest.
@@ -378,14 +503,27 @@ void XdpTransport::begin_tick() noexcept
         }
         auto const& rx = **slot;
         bool kept = false;
-        if (auto const frame = rtp::parse_rtp_frame(rx.buffer)) {
+        if (auto const frame = rtp::parse_udp_frame(rx.buffer)) {
             Endpoint const destination{frame->addressing.destination_address, frame->addressing.destination_port};
             Datagram const datagram{
                 .payload = frame->datagram, .source = {frame->addressing.source_address, frame->addressing.source_port}};
+            std::optional<bool> rtp;  // parsed only for a receive port's destination
             for (size_t i = 0; i < port_count_; ++i) {
                 auto& port = *ports_[i];
-                if (port.destination == destination && !port.closed.load(std::memory_order_relaxed) && port.offer(datagram)) {
+                if (port.destination != destination || port.closed.load(std::memory_order_relaxed)) {
+                    continue;
+                }
+                if (!rtp) {
+                    rtp = rtp::parse_rtp(frame->datagram).has_value();
+                }
+                if (*rtp && port.offer(datagram)) {
                     kept = true;  // several receivers of one stream share the frame
+                }
+            }
+            for (size_t i = 0; i < rtcp_count_; ++i) {
+                auto& pipe = *rtcp_pipes_[i];
+                if (pipe.destination() == destination && !pipe.closed.load(std::memory_order_relaxed)) {
+                    (void)pipe.offer(datagram);  // copied: the frame need not be held
                 }
             }
         }

@@ -20,9 +20,11 @@
 #include <print>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <net/if.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 using namespace statusbar;
@@ -1101,6 +1103,77 @@ constexpr std::array<StreamFormat, 6> RENDER_FORMATS{{
 }};
 
 }  // namespace
+
+namespace {
+
+/// Wait for a datagram on `port`; its payload copied, or empty after 200 ms.
+auto receive_rtcp(RtcpPort& port) -> std::pair<std::vector<uint8_t>, Endpoint>
+{
+    std::array<Datagram, 4> batch{};
+    for (int tries = 0; tries < 200; ++tries) {
+        if (port.receive(batch) > 0) {
+            return {{batch[0].payload.begin(), batch[0].payload.end()}, batch[0].source};
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    return {};
+}
+
+}  // namespace
+
+TEST(aes67_udp, an_rtcp_port_sends_to_and_receives_from_its_group)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    RtcpOptions const options{.destination = {.address = own_group(), .port = 45101}, .ttl = 1, .dscp = 34};
+    auto a = (*transport)->open_rtcp(options);
+    auto b = (*transport)->open_rtcp(options);
+    if (!a || !b) {
+        std::println("  skipped: cannot join a group on lo");
+        return;
+    }
+    EXPECT_TRUE((*a)->fd() >= 0);
+    int tos = 0;
+    socklen_t length = sizeof(tos);
+    EXPECT_EQ(::getsockopt((*a)->fd(), IPPROTO_IP, IP_TOS, &tos, &length), 0);
+    EXPECT_EQ(tos, 34 << 2);  // AES67-2018 Section 6.2: the stream's DSCP
+
+    std::array<uint8_t, 8> const packet{0x80, 0xC9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x07};
+    EXPECT_TRUE((*a)->send(packet).has_value());
+    auto const [bytes, source] = receive_rtcp(**b);
+    if (bytes.empty()) {
+        std::println("  skipped: the host does not route multicast on lo");
+        return;
+    }
+    EXPECT_EQ(bytes, (std::vector<uint8_t>{packet.begin(), packet.end()}));
+    EXPECT_EQ(source.port, uint16_t{45101});
+    EXPECT_EQ((*b)->dropped(), uint64_t{0});
+}
+
+TEST(aes67_udp, a_unicast_rtcp_port_reaches_its_peer)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    IPv4Address const x = own_loopback();
+    IPv4Address const y{127, static_cast<uint8_t>(x.octet(1) + 64), x.octet(2), x.octet(3)};
+    uint16_t const port = 45111;
+    auto a = (*transport)->open_rtcp({.destination = {.address = y, .port = port}, .local = {.address = x, .port = port}});
+    auto b = (*transport)->open_rtcp({.destination = {.address = x, .port = port}, .local = {.address = y, .port = port}});
+    EXPECT_TRUE(a.has_value());
+    EXPECT_TRUE(b.has_value());
+    // A unicast address and port is one port's: a second is refused rather than splitting its reports.
+    auto again = (*transport)->open_rtcp({.destination = {.address = y, .port = port}, .local = {.address = x, .port = port}});
+    EXPECT_TRUE(again.error() == std::errc::address_in_use);
+    std::array<uint8_t, 8> const packet{0x80, 0xC9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x09};
+    EXPECT_TRUE((*a)->send(packet).has_value());
+    auto const [to_b, from_a] = receive_rtcp(**b);
+    EXPECT_EQ(to_b.size(), packet.size());
+    EXPECT_TRUE(from_a == (Endpoint{.address = x, .port = port}));
+    EXPECT_TRUE((*b)->send(packet).has_value());
+    auto const [to_a, from_b] = receive_rtcp(**a);
+    EXPECT_EQ(to_a.size(), packet.size());
+    EXPECT_TRUE(from_b == (Endpoint{.address = y, .port = port}));
+}
 
 TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
 {

@@ -45,6 +45,13 @@ struct RtpFrame
     RtpPacket packet;
 };
 
+/// A received frame's addressing and its UDP payload, a view into the frame.
+struct UdpFrame
+{
+    FrameAddressing addressing;
+    std::span<uint8_t const> datagram;
+};
+
 /// Bytes the headers take before the RTP packet: 42 untagged, 46 tagged.
 [[nodiscard]] constexpr auto rtp_frame_overhead(bool const tagged) noexcept -> size_t
 {
@@ -58,9 +65,12 @@ struct RtpFrame
     return ieee::Eui48{0x01, 0x00, 0x5E, static_cast<uint8_t>(group.octet(1) & 0x7FU), group.octet(2), group.octet(3)};
 }
 
-/// Parse an Ethernet frame carrying RTP over UDP over IPv4: nullopt unless it is unfragmented
-/// IPv4 (IHL >= 5, a valid checksum) and UDP, with lengths agreeing with each other and the
-/// frame, and parse_rtp() accepts the payload. Addresses, ports and payload type are not judged.
+/// Parse an Ethernet frame carrying UDP over IPv4: nullopt unless it is unfragmented IPv4 (IHL
+/// >= 5, a valid checksum) and UDP, with lengths agreeing with each other and the frame.
+/// Addresses and ports are not judged; the payload is not looked at (RTCP takes this path).
+[[nodiscard]] auto parse_udp_frame(std::span<uint8_t const> frame) noexcept -> std::optional<UdpFrame>;
+
+/// parse_udp_frame(), and parse_rtp() accepts the payload. The payload type is not judged.
 [[nodiscard]] auto parse_rtp_frame(std::span<uint8_t const> frame) noexcept -> std::optional<RtpFrame>;
 
 /// Write an Ethernet frame carrying `header` and `payload` to `addressing`: the frame length, or

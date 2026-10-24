@@ -31,7 +31,7 @@ nanoseconds and injects the random generator.
 - `RtpPacket` — a parsed header and a view of its payload (CSRCs, extension and padding removed).
 - `RtpSequence` — one source's sequence state (RFC 3550 Appendix A.1) and loss figures (Appendix A.3, §6.4.1 `report()`).
 - `FrameAddressing` — the MACs, optional VLAN tag, IPv4 addresses, UDP ports, TTL and DSCP around a packet in a frame.
-- `RtpFrame` — a parsed frame: its addressing, its UDP payload and the RTP packet.
+- `RtpFrame` — a parsed frame: its addressing, its UDP payload and the RTP packet; `UdpFrame` — the same without the RTP parse (`parse_udp_frame()`, for RTCP).
 - `multicast_mac()` — an IPv4 group's Ethernet address (RFC 1112 §6.4); `rtp_frame_overhead()` — 42 or 46 bytes.
 - `RtcpHeader`, `SenderInfo`, `ReportBlock` — the RFC 3550 §6.4.1 wire structs.
 - `RtcpCompound` — what `parse_rtcp()` found: the first SR, RR, SDES chunk and BYE, as views (`RtcpSenderReport`, `RtcpReceiverReport`, `RtcpSdes`, `RtcpBye`).
@@ -67,7 +67,7 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 
 - `statusbar/rtp/rtp_header.hpp` — `RtpHeader`, `RtpPacket`, `parse_rtp()`, `serialize_rtp()`, `serialize_rtp_header()`.
 - `statusbar/rtp/rtp_sequence.hpp` — `RtpSequence` (header-only).
-- `statusbar/rtp/rtp_frame.hpp` — `FrameAddressing`, `RtpFrame`, `parse_rtp_frame()`, `serialize_rtp_frame()`, `serialize_rtp_frame_headers()`, `multicast_mac()`.
+- `statusbar/rtp/rtp_frame.hpp` — `FrameAddressing`, `RtpFrame`, `UdpFrame`, `parse_udp_frame()`, `parse_rtp_frame()`, `serialize_rtp_frame()`, `serialize_rtp_frame_headers()`, `multicast_mac()`.
 - `statusbar/rtp/rtcp_packet.hpp` — the RTCP wire structs, `parse_rtcp()`, `RtcpWriter`, `padded_to_word()`.
 - `statusbar/rtp/rtp_error.hpp` — `RtpError` (`statusbar.rtp`), what `RtcpWriter::status()` reports.
 - `statusbar/rtp/rtcp_ipmx.hpp` — `IpmxInfoBlock`, `serialize_ipmx_info_block()`, `parse_ipmx_info_block()`.

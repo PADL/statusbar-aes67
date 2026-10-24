@@ -5,7 +5,7 @@
 
 /// AES67 over UDP sockets: per receiver a socket bound to its destination, drained with recvmmsg();
 /// per sender an unconnected socket marked with SendOptions::dscp, its packets rendered into a
-/// SEND_BATCH sendmmsg() batch.
+/// SEND_BATCH sendmmsg() batch; per RTCP session one socket at the RTCP endpoint for both directions.
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
@@ -42,6 +42,9 @@ class UdpTransport final : public Transport
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
     [[nodiscard]] auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override;
     [[nodiscard]] auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override;
+    /// A socket bound to the group (joined) or to RtcpOptions::local, marked
+    /// with RtcpOptions::dscp; multicast loops back, so a session sees its own reports.
+    [[nodiscard]] auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>> override;
 
     /// A receive port closing (its destructor, on the control thread).
     void release(Endpoint const& destination) noexcept;

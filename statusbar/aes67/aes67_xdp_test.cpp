@@ -202,6 +202,44 @@ TEST(aes67_xdp, an_abandoned_render_returns_the_frame_to_the_pool)
     EXPECT_EQ(back->handle, uint64_t{2});
 }
 
+TEST(aes67_xdp, the_rtcp_pipe_copies_datagrams_and_drops_past_its_depth)
+{
+    XdpTransport::RtcpPipe pipe{Endpoint{.address = IPv4Address{239, 69, 1, 2}, .port = 5005}};
+    std::array<uint8_t, 8> bytes{0x80, 0xC9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00};
+    Endpoint const source{.address = IPv4Address{10, 0, 0, 9}, .port = 5005};
+    for (size_t i = 0; i < XdpTransport::RtcpPipe::DEPTH; ++i) {
+        bytes[7] = static_cast<uint8_t>(i);
+        EXPECT_TRUE(pipe.offer({.payload = bytes, .source = source}));
+    }
+    EXPECT_FALSE(pipe.offer({.payload = bytes, .source = source}));
+    EXPECT_EQ(pipe.dropped(), uint64_t{1});
+    bytes.fill(0);  // the pipe holds copies
+
+    std::array<Datagram, 4> out{};
+    std::array<XdpTransport::RtcpPipe::Frame, 4> storage{};
+    size_t taken = 0;
+    for (size_t n = pipe.take(out, storage); n > 0; n = pipe.take(out, storage)) {
+        for (size_t i = 0; i < n; ++i) {
+            EXPECT_EQ(out[i].payload.size(), size_t{8});
+            EXPECT_EQ(out[i].payload[7], static_cast<uint8_t>(taken + i));
+            EXPECT_TRUE(out[i].source == source);
+        }
+        taken += n;
+    }
+    EXPECT_EQ(taken, XdpTransport::RtcpPipe::DEPTH);
+}
+
+TEST(aes67_xdp, the_rtcp_pipe_drops_datagrams_longer_than_it_keeps)
+{
+    XdpTransport::RtcpPipe pipe{Endpoint{.address = IPv4Address{239, 69, 1, 2}, .port = 5005}};
+    std::vector<uint8_t> const long_one(XdpTransport::RtcpPipe::MAX_DATAGRAM + 4, 0x80);
+    EXPECT_FALSE(pipe.offer({.payload = long_one, .source = {}}));
+    EXPECT_EQ(pipe.dropped(), uint64_t{1});
+    std::array<Datagram, 1> out{};
+    std::array<XdpTransport::RtcpPipe::Frame, 1> storage{};
+    EXPECT_EQ(pipe.take(out, storage), size_t{0});
+}
+
 TEST(aes67_xdp, group_rules_pin_the_whole_address)
 {
     auto const rule = XdpTransport::group_rule(IPv4Address{239, 69, 1, 2});

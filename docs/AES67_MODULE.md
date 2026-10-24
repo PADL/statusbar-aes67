@@ -27,6 +27,7 @@ sent). Configuration happens on a control thread.
 - `Sender` — `configure(destination | session)`, `tick(now_index)`, `session()`, read delay, packet phase, session id, grandmaster, name, `continue_from()`.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it.
+- `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
 
 ## Quick example
@@ -59,10 +60,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `statusbar/aes67/aes67_stream.hpp` — `StreamFormat`, callbacks, `Destination`, `Grandmaster`, `State`, `Counters`.
 - `statusbar/aes67/aes67_receiver.hpp` — `Receiver`.
 - `statusbar/aes67/aes67_sender.hpp` — `Sender`, `parse_grandmaster()`.
-- `statusbar/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `Endpoint`, `Datagram`, `SendOptions`.
+- `statusbar/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
 - `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
-- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion.
+- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `open_rtcp_socket()`.
 - `statusbar/aes67/aes67_error.hpp` — `Aes67Error`.
 
 ## Dependencies
@@ -91,6 +92,16 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   counted, a UMEM frame goes back to the pool, or, refused by the ring, is freed. A
   transport calls `render` at most once per packet, because the sender pulls its frames
   from the provider inside it.
+- `open_rtcp()` and every `RtcpPort` call belong to the control or reactor thread, never
+  the real-time one: RTCP is not real-time traffic. A port whose `fd()` is -1 has no
+  descriptor that wakes for all its datagrams, and its owner calls `receive()` each
+  reactor cycle. The base `Transport` refuses `open_rtcp()` (`operation_not_supported`),
+  so test transports need not implement it.
+- RTCP DSCP (AES67-2018 §6.2): "Senders should mark outgoing RTCP packets with the same
+  DSCP value as the respective RTP stream packets. Receivers should mark outgoing RTCP
+  packets with the same DSCP value they would use on RTP packets if transmitting a
+  similar stream." `RtcpOptions::dscp` is that value; the caller passes the stream's (or
+  would-be stream's) `SendOptions::dscp`, not the RTCP class of its own.
 
 ### Sender
 
@@ -186,6 +197,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, by default
   `rtp::FrameAddressing::DSCP_MEDIA`, 46). A tick's packets are written straight
   into the `SEND_BATCH` slots of the sender's `sendmmsg()` batch.
+- An RTCP port is one socket for both directions. For a group it is bound to the group at
+  the RTCP port, joined, and sends there with loopback on, so a session hears its own
+  reports and must skip its own SSRC; for a unicast peer it is bound to `RtcpOptions::local`
+  (by default this address at the destination port), without `SO_REUSEADDR`, and sends to
+  the peer: a second port on the same unicast address and port is refused
+  (`address_in_use`) rather than splitting the reports between the two.
 
 ### XdpTransport
 
@@ -228,6 +245,16 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `net::set_rss_indirection_all`, `CAP_NET_ADMIN`) and `rss_status()` says whether it could.
   A NIC without RSS reports `operation_not_supported` and needs one combined channel or a
   flow-steering rule instead. The table is left steered at close.
+- RTCP: the program steals every frame to a redirected group, whatever its port, so an
+  RTCP port's kernel socket would miss reports to a group a receiver here has joined.
+  `begin_tick()` therefore parses each frame as UDP (`rtp::parse_udp_frame()`; the RTP
+  parse is only for receive ports) and copies one for an open RTCP port's group and port
+  into that port's `RtcpPipe` (`DEPTH` datagrams of at most `MAX_DATAGRAM`, 1500, bytes,
+  as a kernel socket keeps; the rest are dropped and counted in `RtcpPort::dropped()`),
+  and the frame is not held. `receive()`
+  drains the pipe and the kernel socket, which gets the group's reports while no rule
+  redirects it and sends every report (the program steals RX only). RTCP ports do not
+  add rules. `fd()` is -1.
 - AF_XDP zero-copy, attach and pinning behaviour is hardware-dependent and verified on the
   bench box, not in unit tests; `aes67_xdp_test` covers the frame, pool and health logic.
 

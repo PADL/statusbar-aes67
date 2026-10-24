@@ -107,6 +107,22 @@ TEST(rtp_frame, writes_the_headers_for_a_payload_written_in_place)
     EXPECT_FALSE(serialize_rtp_header(parsed->packet.header, 5, datagram).has_value());
 }
 
+TEST(rtp_frame, a_udp_frame_carrying_rtcp_parses_as_udp_only)
+{
+    // FRAME's headers around an 8-byte RR to port 5005: too short to be RTP.
+    std::vector<uint8_t> frame{FRAME.begin(), FRAME.begin() + 42};
+    frame.insert(frame.end(), {0x80, 0xC9, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04});
+    frame[IP + 3] = 36;         // IPv4 total length
+    frame[IP + 20 + 3] = 0x8D;  // destination port 5005
+    frame[IP + 20 + 5] = 16;    // UDP length
+    fix_checksum(frame, IP);
+    EXPECT_FALSE(parse_rtp_frame(frame).has_value());
+    auto const udp = parse_udp_frame(frame);
+    EXPECT_TRUE(udp.has_value());
+    EXPECT_EQ(udp->addressing.destination_port, uint16_t{5005});
+    EXPECT_EQ(bytes(udp->datagram), bytes(std::span{frame}.subspan(42)));
+}
+
 TEST(rtp_frame, maps_a_group_to_its_mac)
 {
     EXPECT_TRUE(multicast_mac(ip::IPv4Address{239, 69, 1, 1}) == (ieee::Eui48{0x01, 0x00, 0x5E, 0x45, 0x01, 0x01}));

@@ -57,7 +57,7 @@ class UdpReceivePort final : public ReceivePort
         }
         size_t written = 0;
         for (size_t i = 0; i < static_cast<size_t>(got); ++i) {
-            if ((messages_[i].msg_hdr.msg_flags & MSG_TRUNC) != 0 || !for_us(messages_[i].msg_hdr)) {
+            if ((messages_[i].msg_hdr.msg_flags & MSG_TRUNC) != 0 || !destined_for(messages_[i].msg_hdr, destination_.address)) {
                 continue;  // larger than any AES67 packet, or sent to another address on this port
             }
             out[written++] = {
@@ -69,28 +69,13 @@ class UdpReceivePort final : public ReceivePort
     }
 
   private:
-    /// Whether IP_PKTINFO names this port's destination as the datagram's.
-    [[nodiscard]] auto for_us(msghdr& header) const noexcept -> bool
-    {
-        for (cmsghdr* cmsg = CMSG_FIRSTHDR(&header); cmsg != nullptr; cmsg = CMSG_NXTHDR(&header, cmsg)) {
-            if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
-                in_pktinfo info{};
-                std::memcpy(&info, CMSG_DATA(cmsg), sizeof(info));
-                return ntohl(info.ipi_addr.s_addr) == destination_.address.to_uint32();
-            }
-        }
-        return false;
-    }
-
-    static constexpr size_t CONTROL = CMSG_SPACE(sizeof(in_pktinfo));
-
     UdpTransport& transport_;
     net::FileDescriptor fd_;
     Endpoint destination_;
     std::array<std::array<uint8_t, UdpTransport::MAX_DATAGRAM>, UdpTransport::RECEIVE_BATCH> buffers_{};
     std::array<sockaddr_in, UdpTransport::RECEIVE_BATCH> sources_{};
     std::array<iovec, UdpTransport::RECEIVE_BATCH> iov_{};
-    alignas(cmsghdr) std::array<std::array<uint8_t, CONTROL>, UdpTransport::RECEIVE_BATCH> controls_{};
+    alignas(cmsghdr) std::array<std::array<uint8_t, PKTINFO_SPACE>, UdpTransport::RECEIVE_BATCH> controls_{};
     std::array<mmsghdr, UdpTransport::RECEIVE_BATCH> messages_{};
 };
 
@@ -250,6 +235,11 @@ auto UdpTransport::open_send(SendOptions const& options) -> StatusValue<std::uni
     // Not connected: a connected UDP socket reports a unicast destination's
     // ICMP port-unreachable as ECONNREFUSED on the next send.
     return std::make_unique<UdpSendPort>(std::move(*fd), to_sockaddr(options.destination));
+}
+
+auto UdpTransport::open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>>
+{
+    return open_rtcp_socket(interface_, options);
 }
 
 }  // namespace statusbar::aes67

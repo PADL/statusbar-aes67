@@ -3,9 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// How AES67 receivers and senders reach the network: a Transport opens a ReceivePort per receiver
-/// and a SendPort per sender. The control thread opens and destroys ports, safely while the
-/// real-time thread ticks; the real-time thread brackets each tick with begin_tick() / end_tick().
+/// How AES67 receivers and senders reach the network: a Transport opens a ReceivePort per receiver,
+/// a SendPort per sender and an RtcpPort per RTCP session. The control thread opens and destroys
+/// ports, safely while the real-time thread ticks; it brackets each tick with begin_tick() / end_tick().
 
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
@@ -29,6 +29,12 @@ struct Endpoint
 
     auto operator==(Endpoint const&) const noexcept -> bool = default;
 };
+
+/// The RTCP endpoint beside a stream's: the same address, the next port (RFC 3550 Section 11).
+[[nodiscard]] constexpr auto rtcp_endpoint_of(Endpoint const& media) noexcept -> Endpoint
+{
+    return {.address = media.address, .port = static_cast<uint16_t>(media.port + 1)};
+}
 
 /// A received UDP payload. `payload` is valid until the next receive() on the
 /// same port or the next begin_tick(), whichever is first.
@@ -76,8 +82,39 @@ class SendPort
 struct SendOptions
 {
     Endpoint destination;
-    uint8_t ttl{32};   ///< multicast TTL (unicast uses the host default)
+    uint8_t ttl{32};                                 ///< multicast TTL (unicast uses the host default)
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};  ///< the IPv4 DSCP; 46 (EF) by default
+};
+
+/// Where an RtcpPort's reports go and arrive, and how they are marked.
+struct RtcpOptions
+{
+    /// Where reports go: a group (also where they arrive), or the unicast peer.
+    Endpoint destination;
+    /// Where reports arrive for a unicast destination: an address of this host (unspecified: the
+    /// transport's) and port (0: destination.port). A group is its own local endpoint.
+    Endpoint local{};
+    uint8_t ttl{32};  ///< multicast TTL
+    /// AES67-2018 Section 6.2: a sender's stream DSCP; a receiver's, the DSCP it would send a similar stream with.
+    uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};
+};
+
+/// One RTCP session's datagrams. Control or reactor thread only, never the real-time thread;
+/// sends do not block, and both directions may make system calls.
+class RtcpPort
+{
+  public:
+    virtual ~RtcpPort() = default;
+    /// A descriptor that polls readable when receive() has datagrams, or -1: call receive() each
+    /// reactor cycle instead.
+    [[nodiscard]] virtual auto fd() const noexcept -> int = 0;
+    /// Up to `out.size()` datagrams that arrived since the last call; each payload is valid until
+    /// the next call. Never blocks.
+    [[nodiscard]] virtual auto receive(std::span<Datagram> out) noexcept -> size_t = 0;
+    /// Send one compound packet to RtcpOptions::destination.
+    [[nodiscard]] virtual auto send(std::span<uint8_t const> packet) noexcept -> Status = 0;
+    /// Datagrams discarded before receive() (too long, or a full queue); any thread.
+    [[nodiscard]] virtual auto dropped() const noexcept -> uint64_t { return 0; }
 };
 
 class Transport
@@ -90,6 +127,12 @@ class Transport
     [[nodiscard]] virtual auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> = 0;
     /// Send to `options.destination`.
     [[nodiscard]] virtual auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> = 0;
+    /// RTCP to and from `options.destination`, joining it if it is a group. Not supported by default.
+    [[nodiscard]] virtual auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>>
+    {
+        (void)options;
+        return failure(std::errc::operation_not_supported);
+    }
     /// Before the receivers drain, each tick.
     virtual void begin_tick() noexcept {}
     /// After the senders send, each tick.
