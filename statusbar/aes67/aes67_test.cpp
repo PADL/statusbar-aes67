@@ -388,6 +388,19 @@ TEST(aes67_sender, refuses_what_aes67_cannot_carry)
     EXPECT_TRUE(big.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}).error() == Aes67Error::packet_too_large);
 }
 
+TEST(aes67_sender, payloads_are_at_most_1440_octets)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    // AES67-2018 Section 6.3: 60 x L24 x 8 frames is 1440 octets, 2 x L16 x 361 is 1444.
+    StreamFormat format{.encoding = sdp::Encoding::l24, .channels = 60, .sample_rate = 48000, .frames_per_packet = 8};
+    Sender fits{format, source.provider(), transport, "Test"};
+    EXPECT_TRUE(fits.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}).has_value());
+    format = {.encoding = sdp::Encoding::l16, .channels = 2, .sample_rate = 48000, .frames_per_packet = 361};
+    Sender over{format, source.provider(), transport, "Test"};
+    EXPECT_TRUE(over.configure(Destination{.address = IPv4Address{239, 69, 1, 3}}).error() == Aes67Error::packet_too_large);
+}
+
 TEST(aes67_sender, sends_packets_on_the_grid_when_due)
 {
     LoopTransport transport;
