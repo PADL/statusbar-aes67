@@ -183,7 +183,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   well. One unicast receiver per address and port.
 - A sender's socket is unconnected and every message names the destination, so a unicast
   receiver's ICMP port-unreachable never fails a send. Multicast goes out of the
-  interface with the configured TTL and DSCP 46. A tick's packets are written straight
+  interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, by default
+  `rtp::FrameAddressing::DSCP_MEDIA`, 46). A tick's packets are written straight
   into the `SEND_BATCH` slots of the sender's `sendmmsg()` batch.
 
 ### XdpTransport

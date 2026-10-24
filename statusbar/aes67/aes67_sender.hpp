@@ -34,7 +34,8 @@ class Sender
   public:
     /// Packets one tick sends at most; further behind, the sender skips ahead.
     static constexpr uint32_t MAX_BURST = 8;
-    /// The largest payload sent: a 1500-byte MTU less IPv4, UDP and RTP headers.
+    /// The largest payload sent, 1460 octets: a 1500-octet MTU less the 20-octet IPv4, 8-octet UDP
+    /// and 12-octet RTP headers.
     static constexpr uint32_t MAX_PAYLOAD = 1500 - 20 - 8 - 12;
     /// Session ids and versions are kept to 63 bits: positive in any signed reading.
     static constexpr uint64_t SESSION_ID_MASK = 0x7FFF'FFFF'FFFF'FFFFULL;

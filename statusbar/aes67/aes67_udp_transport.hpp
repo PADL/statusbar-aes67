@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// AES67 over UDP sockets: per receiver a socket bound to its destination, drained with recvmmsg();
-/// per sender an unconnected socket, DSCP 46, its packets rendered into a SEND_BATCH sendmmsg() batch.
+/// per sender an unconnected socket marked with SendOptions::dscp, its packets rendered into a
+/// SEND_BATCH sendmmsg() batch.
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"

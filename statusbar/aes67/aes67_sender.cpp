@@ -60,7 +60,8 @@ auto Sender::configure(Destination const& destination) -> Status
         return failure(Aes67Error::packet_too_large);
     }
     clear();
-    auto port = transport_.open_send({.destination = {destination.address, destination.port}, .ttl = destination.ttl, .dscp = 46});
+    auto port = transport_.open_send(
+        {.destination = {destination.address, destination.port}, .ttl = destination.ttl, .dscp = rtp::FrameAddressing::DSCP_MEDIA});
     if (!port) {
         state_ = State::error;
         error_ = port.error();

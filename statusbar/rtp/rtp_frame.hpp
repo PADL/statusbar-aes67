@@ -21,7 +21,8 @@ namespace statusbar::rtp {
 /// writes and parse_rtp_frame() reports.
 struct FrameAddressing
 {
-    /// Expedited Forwarding: the DSCP AES67 recommends for media (AES67 §6.1)
+    /// The DSCP media is marked with by default: 46 (EF). AES67-2018 Section 6.2 recommends
+    /// AF41 (34) for media and EF for PTP; a sender may mark with another (dscp below).
     static constexpr uint8_t DSCP_MEDIA = 46;
 
     ieee::Eui48 destination_mac{};

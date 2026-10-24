@@ -8,6 +8,7 @@
 /// real-time thread ticks; the real-time thread brackets each tick with begin_tick() / end_tick().
 
 #include "statusbar/ip/ip_ipv4_address.hpp"
+#include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/rtp/rtp_header.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
@@ -76,7 +77,7 @@ struct SendOptions
 {
     Endpoint destination;
     uint8_t ttl{32};   ///< multicast TTL (unicast uses the host default)
-    uint8_t dscp{46};  ///< Expedited Forwarding, AES67 §6.1
+    uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};  ///< the IPv4 DSCP; 46 (EF) by default
 };
 
 class Transport
