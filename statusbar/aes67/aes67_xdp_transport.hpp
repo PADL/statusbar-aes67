@@ -158,15 +158,9 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
     /// The queue the socket is bound to.
     [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return QUEUE; }
-    /// open()'s RSS steering: success when every bucket goes to queue_id(); not_supported when
-    /// Options::steer_rss was false; else why not (operation_not_supported: the NIC has no RSS).
-    [[nodiscard]] auto rss_status() const noexcept -> Status
-    {
-        if (rss_error_) {
-            return failure(rss_error_);
-        }
-        return success();
-    }
+    /// open()'s RSS steering: nullopt when Options::steer_rss was false; success when every bucket
+    /// goes to queue_id(); else why not (operation_not_supported: the NIC has no RSS).
+    [[nodiscard]] auto rss_status() const noexcept -> std::optional<Status> { return rss_status_; }
     /// Refused TX kicks, the last errno, and whether the transport is failing
     /// (internal; public for tests). record() on the real-time thread only.
     class TxHealth
@@ -255,7 +249,7 @@ class XdpTransport final : public Transport
 
     InterfaceInfo interface_;
     net::XdpContext context_;
-    std::error_code rss_error_{std::make_error_code(std::errc::not_supported)};
+    std::optional<Status> rss_status_;
 
     // Control thread only.
     std::vector<std::pair<ip::IPv4Address, size_t>> groups_;  ///< groups of the open ports, with counts

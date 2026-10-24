@@ -210,8 +210,8 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(opened.error());
     }
     if (options.steer_rss) {
-        auto const steered = net::set_rss_indirection_all(transport->interface_.name, QUEUE);
-        transport->rss_error_ = steered ? std::error_code{} : steered.error();
+        transport->rss_status_ =
+            net::set_rss_indirection_all(transport->interface_.name, QUEUE).transform([](net::RssIndirection const&) {});
     }
     return transport;
 }

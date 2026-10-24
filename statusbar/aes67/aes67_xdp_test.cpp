@@ -238,7 +238,8 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     EXPECT_FALSE((*transport)->zero_copy());  // copy was forced (and lo has no zero-copy)
     EXPECT_TRUE((*transport)->bind_mode() == net::XdpBindMode::copy);
     EXPECT_TRUE((*transport)->drain_every_tick());
-    EXPECT_TRUE((*transport)->rss_status().error() == std::errc::operation_not_supported);  // lo has no RSS
+    auto const rss = (*transport)->rss_status();
+    EXPECT_TRUE(rss && !*rss && rss->error() == std::errc::operation_not_supported);  // lo has no RSS
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};
     EXPECT_TRUE((*transport)->open_receive(unicast).error() == Aes67Error::unsupported_destination);
     EXPECT_TRUE((*transport)->open_send({.destination = unicast}).error() == Aes67Error::unsupported_destination);
@@ -263,11 +264,12 @@ TEST(aes67_xdp, joins_and_ticks_when_privileged)
         std::println("  skipped: not root");
         return;
     }
-    auto transport = XdpTransport::open("lo");
+    auto transport = XdpTransport::open("lo", {.steer_rss = false});
     if (!transport) {
         std::println("  skipped: AF_XDP unavailable ({})", transport.error().message());
         return;
     }
+    EXPECT_FALSE((*transport)->rss_status().has_value());  // not asked for
     Endpoint const group{.address = IPv4Address{239, 69, 250, 2}, .port = 5004};
     auto port = (*transport)->open_receive(group);
     if (!port) {
