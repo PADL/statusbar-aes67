@@ -216,8 +216,13 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups
   (the BPF program's TCAM holds 16 rules); a joined group's frames to ports no receiver
   here listens on do not reach the kernel (the rule cannot see the UDP port), so other
-  listeners on the same group miss them; untagged frames only; one queue (queue 0), so the
-  NIC must deliver the groups there (one combined channel, or a flow-steering rule).
+  listeners on the same group miss them; untagged frames only; one queue (`QUEUE`, 0), so the
+  NIC must deliver the groups there.
+- RSS: a NIC with several RX queues hashes UDP flows over all of them, so `open()` steers
+  every RSS bucket to `QUEUE` (`XdpTransportOptions::steer_rss`, on by default;
+  `net::set_rss_indirection_all`, `CAP_NET_ADMIN`) and `rss_status()` says whether it could.
+  A NIC without RSS reports `operation_not_supported` and needs one combined channel or a
+  flow-steering rule instead. The table is left steered at close.
 - AF_XDP zero-copy, attach and pinning behaviour is hardware-dependent and verified on the
   bench box, not in unit tests; `aes67_xdp_test` covers the frame, pool and health logic.
 

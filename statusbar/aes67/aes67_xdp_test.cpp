@@ -71,6 +71,12 @@ TEST(aes67_xdp, refused_kicks_are_counted_and_fail_the_transport_after_a_millise
     EXPECT_TRUE(health.error() == std::errc::invalid_argument);  // the last refusal is kept for the log
 }
 
+TEST(aes67_xdp, steers_rss_to_the_socket_queue_by_default)
+{
+    EXPECT_TRUE(XdpTransport::Options{}.steer_rss);
+    EXPECT_EQ(XdpTransport::config_for("eth0").queue_id, XdpTransport::QUEUE);
+}
+
 TEST(aes67_xdp, passes_the_bind_mode_through)
 {
     auto const copy = XdpTransport::config_for("eth0", {.bind_mode = net::XdpBindMode::copy});
@@ -230,6 +236,7 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     EXPECT_FALSE((*transport)->zero_copy());  // copy was forced (and lo has no zero-copy)
     EXPECT_TRUE((*transport)->bind_mode() == net::XdpBindMode::copy);
     EXPECT_TRUE((*transport)->drain_every_tick());
+    EXPECT_TRUE((*transport)->rss_status().error() == std::errc::operation_not_supported);  // lo has no RSS
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};
     EXPECT_TRUE((*transport)->open_receive(unicast).error() == Aes67Error::unsupported_destination);
     EXPECT_TRUE((*transport)->open_send({.destination = unicast}).error() == Aes67Error::unsupported_destination);

@@ -13,6 +13,7 @@
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/net/net_compiled_rule.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/net/net_rss.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 
 #include <array>
@@ -38,11 +39,16 @@ struct XdpTransportOptions
     /// Where the program is pinned and adopted from (net::XdpConfig::pin_path):
     /// empty for none, or net::XdpProgram::pin_path_for(interface).
     std::string pin_path;
+    /// Steer every RSS bucket to the socket's queue at open (net::set_rss_indirection_all): with
+    /// RSS spreading received UDP over the NIC's queues, most groups would miss the socket.
+    bool steer_rss{true};
 };
 
 class XdpTransport final : public Transport
 {
   public:
+    /// The NIC queue the socket binds.
+    static constexpr uint32_t QUEUE = 0;
     /// Frames begin_tick() takes from the RX ring at most (XdpConfig::rx_drain_max).
     static constexpr size_t RECEIVE_BATCH = 64;
     /// Frames one port may hold for receive() between ticks.
@@ -118,8 +124,8 @@ class XdpTransport final : public Transport
     [[nodiscard]] static auto group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>;
 
     /// Open AF_XDP on `interface`'s queue 0, adopting or attaching (and
-    /// pinning) the program as net::XdpConfig says. Fails without a supported
-    /// NIC, libxdp or the privileges, or zero-copy when it was required.
+    /// pinning) the program as net::XdpConfig says, then steer RSS (Options::steer_rss).
+    /// Fails without a supported NIC, libxdp or the privileges, or zero-copy when it was required.
     [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
         -> StatusValue<std::unique_ptr<XdpTransport>>;
 
@@ -145,6 +151,17 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto adopted() const noexcept -> bool { return context_.adopted(); }
     /// True when the program is pinned (adopted from, or pinned at, Options::pin_path).
     [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
+    /// The queue the socket is bound to.
+    [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return QUEUE; }
+    /// open()'s RSS steering: success when every bucket goes to queue_id(); not_supported when
+    /// Options::steer_rss was false; else why not (operation_not_supported: the NIC has no RSS).
+    [[nodiscard]] auto rss_status() const noexcept -> Status
+    {
+        if (rss_error_) {
+            return failure(rss_error_);
+        }
+        return success();
+    }
     /// Refused TX kicks, the last errno, and whether the transport is failing
     /// (internal; public for tests). record() on the real-time thread only.
     class TxHealth
@@ -228,6 +245,7 @@ class XdpTransport final : public Transport
 
     InterfaceInfo interface_;
     net::XdpContext context_;
+    std::error_code rss_error_{std::make_error_code(std::errc::not_supported)};
 
     // Control thread only.
     std::vector<std::pair<ip::IPv4Address, size_t>> groups_;  ///< groups of the open ports, with counts

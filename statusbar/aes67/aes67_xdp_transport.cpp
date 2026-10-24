@@ -166,7 +166,7 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .interface_name = interface,
         .filter_rules = {},
         .default_action = net::XdpAction::pass_kernel,
-        .queue_id = 0,
+        .queue_id = QUEUE,
         .fill_ring_size = FILL_RING,
         .umem_frame_count = UMEM_FRAMES,
         .rx_drain_max = RECEIVE_BATCH,
@@ -208,6 +208,10 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
     if (auto opened = transport->context_.open(config_for(transport->interface_.name, options)); !opened) {
         return failure(opened.error());
+    }
+    if (options.steer_rss) {
+        auto const steered = net::set_rss_indirection_all(transport->interface_.name, QUEUE);
+        transport->rss_error_ = steered ? std::error_code{} : steered.error();
     }
     return transport;
 }
