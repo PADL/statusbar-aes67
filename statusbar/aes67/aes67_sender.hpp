@@ -14,7 +14,12 @@
 /// Its RTP timestamp is
 /// PtpMediaClock::rtp_timestamp(first index, 0), so the SDP says
 /// `mediaclk:direct=0` and receivers on the same grandmaster place every
-/// sample exactly. The SSRC is random per configure(), the sequence starts at a
+/// sample exactly.
+///
+/// set_packet_phase() shifts the grid by a few frames: senders with different
+/// phases send on different ticks, with no added latency and the same timestamps.
+///
+/// The SSRC is random per configure(), the sequence starts at a
 /// random value and counts up, the marker is never set. Frames the provider
 /// does not have are sent as silence (zero bytes) and counted lost; with no
 /// provider (Supply::none) silence is sent and nothing counted; more than
@@ -118,6 +123,25 @@ class Sender
         return format.frames_per_packet + (format.sample_rate / 4000);
     }
 
+    /// Where the packet grid starts, in frames (taken modulo frames_per_packet):
+    /// packets carry [k * fpp + phase, (k + 1) * fpp + phase). Call before
+    /// configure(), off the real-time thread.
+    void set_packet_phase(uint32_t const frames) noexcept
+    {
+        phase_ = format_.frames_per_packet != 0 ? frames % format_.frames_per_packet : 0;
+    }
+    [[nodiscard]] auto packet_phase() const noexcept -> uint32_t { return phase_; }
+    /// The phase that staggers the `k`th sender: (k mod 8) 125 us ticks modulo
+    /// the packet (0, 6, ... 42 frames for 1 ms at 48 kHz).
+    [[nodiscard]] static constexpr auto stagger_phase(StreamFormat const& format, uint32_t const k) noexcept -> uint32_t
+    {
+        if (format.frames_per_packet == 0) {
+            return 0;
+        }
+        uint32_t const tick = (format.sample_rate + 7999) / 8000;
+        return ((k % 8) * tick) % format.frames_per_packet;
+    }
+
     /// The SDP session id (o=), stable for the same stream across restarts
     /// (RFC 4566: a receiver, Dante Controller say, keys a session on it and
     /// the origin, so a new id each start leaves stale sessions behind). 0
@@ -169,7 +193,8 @@ class Sender
     [[nodiscard]] auto format() const noexcept -> StreamFormat const& { return format_; }
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
-    /// Why the transport refused the last configure(), for State::error.
+    /// Why the transport refused the last configure(), or why it cannot send
+    /// (Transport::send_error(), seen by the last tick), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return ssrc_; }
@@ -195,6 +220,7 @@ class Sender
     uint64_t session_version_{0};
     std::optional<Grandmaster> grandmaster_;
     std::atomic<uint32_t> read_delay_;
+    uint32_t phase_{0};
     bool started_{false};
     uint64_t next_index_{0};  ///< first frame of the next packet to send
     Counters counters_;

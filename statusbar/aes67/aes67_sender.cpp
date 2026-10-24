@@ -156,13 +156,23 @@ void Sender::tick(uint64_t const now_index) noexcept
     if (!port_) {
         return;
     }
+    // A transport that cannot get packets out puts the sender in error until it can.
+    if (auto const send_error = transport_.send_error()) {
+        state_ = State::error;
+        error_ = send_error;
+    } else if (state_ == State::error) {
+        state_ = State::ready;
+        error_.clear();
+    }
     uint64_t const fpp = format_.frames_per_packet;
     uint64_t const read_delay = read_delay_.load(std::memory_order_relaxed);
-    if (now_index + 1 < read_delay + fpp) {
+    uint64_t const phase = phase_;
+    if (now_index + 1 < read_delay + fpp + phase) {
         return;  // no packet due yet (only near the epoch)
     }
-    // The newest packet whose last frame is read_delay or more behind now.
-    uint64_t const newest = (((now_index + 1 - read_delay) / fpp) - 1) * fpp;
+    // The newest packet (on the grid shifted by the phase) whose last frame
+    // is read_delay or more behind now.
+    uint64_t const newest = ((((now_index + 1 - read_delay - phase) / fpp) - 1) * fpp) + phase;
     if (!started_) {
         next_index_ = newest;
         started_ = true;
@@ -209,7 +219,7 @@ void Sender::tick(uint64_t const now_index) noexcept
     counters_.dropped += refused;
     counters_.packets += queued - refused;
     counters_.frames += (queued - refused) * fpp;
-    if (queued > refused) {
+    if (queued > refused && state_ != State::error) {
         state_ = State::running;
     }
 }

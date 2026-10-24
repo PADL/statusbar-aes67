@@ -77,6 +77,7 @@ void Receiver::clear() noexcept
 
 void Receiver::reset_stream() noexcept
 {
+    next_poll_index_ = 0;
     ssrc_.reset();
     sequence_ = rtp::RtpSequence{};
     have_max_ = false;
@@ -89,16 +90,39 @@ void Receiver::drain(uint64_t const now_index) noexcept
     if (!port_) {
         return;
     }
+    // The due-tick gate (UDP): skip until a packet can be there, unless the
+    // clock stepped back past the gate's horizon.
+    if (next_poll_index_ != 0 && now_index < next_poll_index_ && now_index >= gate_set_at_ && !transport_.drain_every_tick()) {
+        ++skipped_polls_;
+        return;
+    }
+    newest_end_ = 0;
+    newest_frames_ = 0;
     std::array<Datagram, BATCH> batch{};
+    bool backlog = true;  // every batch came back full: more may be waiting
     for (size_t round = 0; round < MAX_BATCHES; ++round) {
         size_t const n = port_->receive(batch);
+        ++polls_;
         for (size_t i = 0; i < n; ++i) {
             accept(batch[i], now_index);
         }
         if (n < batch.size()) {
+            backlog = false;
             break;
         }
     }
+    if (backlog) {
+        next_poll_index_ = 0;  // the rest next tick
+    } else if (newest_frames_ != 0) {
+        // The next packet, [end, end + n), is sent no earlier than end + n:
+        // ask again a tick before that, but never later than a packet time
+        // and a tick from now.
+        uint64_t const tick = (format_.sample_rate + 7999) / 8000;
+        uint64_t const due = newest_end_ + newest_frames_ - std::min<uint64_t>(tick, newest_end_ + newest_frames_);
+        next_poll_index_ = std::min(due, now_index + newest_frames_ + tick);
+        gate_set_at_ = now_index;
+    }
+    // (Nothing came: the gate stays open, every tick until a packet does.)
 }
 
 void Receiver::accept(Datagram const& datagram, uint64_t const now_index) noexcept
@@ -142,6 +166,10 @@ void Receiver::accept(Datagram const& datagram, uint64_t const now_index) noexce
     }
 
     uint64_t const index = mediaclock::PtpMediaClock::index_of_rtp(packet->header.timestamp.get(), offset_, now_index);
+    if (index + frames > newest_end_) {
+        newest_end_ = index + frames;
+        newest_frames_ = frames;
+    }
     if (handler_) {
         handler_(index, frames, packet->payload);
     }

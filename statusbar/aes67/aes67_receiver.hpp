@@ -20,6 +20,10 @@
 /// becomes a sample index with PtpMediaClock::index_of_rtp() about the current
 /// index. The payload goes to the FrameHandler as is.
 ///
+/// Over a queuing transport (UDP), drain() skips the port until a tick before
+/// the next packet can have been sent (after [i, i + n), index i + 2n), then
+/// asks every tick until one comes: about three ticks in eight at 1 ms.
+///
 /// Counters: packets and frames handed on; `lost`, frames in sequence gaps
 /// not (yet) filled; `late`, frames that arrived out of order (after a later
 /// packet), which are still handed on; `dropped`, packets refused (malformed,
@@ -58,8 +62,11 @@ class Receiver
     void clear() noexcept;
 
     /// Take what has arrived and hand it on, with indices about `now_index`
-    /// (the media clock's index at the current PTP time).
+    /// (the media clock's index at the current PTP time), gated as above.
     void drain(uint64_t now_index) noexcept;
+    /// Port receive() calls made and ticks skipped by the due-tick gate.
+    [[nodiscard]] auto polls() const noexcept -> uint64_t { return polls_; }
+    [[nodiscard]] auto skipped_polls() const noexcept -> uint64_t { return skipped_polls_; }
 
     [[nodiscard]] auto format() const noexcept -> StreamFormat const& { return format_; }
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
@@ -95,6 +102,15 @@ class Receiver
     Counters counters_;
     State state_{State::idle};
     std::error_code error_;
+
+    /// The due-tick gate: the port is not asked before next_poll_index_ (0:
+    /// every tick), unless the clock went back past gate_set_at_.
+    uint64_t next_poll_index_{0};
+    uint64_t gate_set_at_{0};
+    uint64_t polls_{0};
+    uint64_t skipped_polls_{0};
+    uint64_t newest_end_{0};     ///< this drain: the newest packet's end index
+    uint32_t newest_frames_{0};  ///< and its frames (0: none accepted)
 };
 
 }  // namespace statusbar::aes67

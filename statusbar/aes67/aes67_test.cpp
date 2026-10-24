@@ -115,6 +115,7 @@ class LoopTransport final : public Transport
         {}
         auto receive(std::span<Datagram> const out) noexcept -> size_t override
         {
+            ++transport.receives;
             held.clear();
             size_t n = 0;
             while (n < out.size() && !transport.queue.empty()) {
@@ -176,9 +177,15 @@ class LoopTransport final : public Transport
         return std::make_unique<Tx>(*this, options.destination);
     }
 
+    [[nodiscard]] auto send_error() const noexcept -> std::error_code override { return failing; }
+    [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return every_tick; }
+
     std::deque<Packet> queue;
     Endpoint source{.address = IPv4Address{192, 168, 1, 10}, .port = 5004};
-    bool refuse{false};  ///< every send_rendered() finds no TX buffer
+    bool refuse{false};       ///< every send_rendered() finds no TX buffer
+    std::error_code failing;  ///< send_error()
+    bool every_tick{false};   ///< drain_every_tick()
+    size_t receives{0};       ///< receive() calls
 };
 
 auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
@@ -542,6 +549,82 @@ TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_take)
     EXPECT_EQ(sender.counters().packets, uint64_t{1});
 }
 
+TEST(aes67_sender, a_packet_phase_moves_the_send_tick_not_the_timestamps)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);
+    sender.set_packet_phase(18);
+    EXPECT_EQ(sender.packet_phase(), uint32_t{18});
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+
+    uint64_t const base = 48'000ULL * 1'000'000;  // a multiple of 48
+    sender.tick(base + 16);                       // starts with [base - 78, base - 30)
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    sender.tick(base + 16);  // [base - 30, base + 18) completes at base + 17
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    sender.tick(base + 17);
+    EXPECT_EQ(transport.queue.size(), size_t{2});
+    sender.tick(base + 17 + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{2});
+    sender.tick(base + 17 + 48);  // [base + 18, base + 66)
+    EXPECT_EQ(transport.queue.size(), size_t{3});
+    for (size_t i = 0; i < transport.queue.size(); ++i) {
+        auto const packet = rtp::parse_rtp(transport.queue[i].bytes);
+        uint64_t const first = base - 78 + (i * 48);
+        // The timestamp is still the first frame's index: receivers place the samples exactly.
+        EXPECT_EQ(packet->header.timestamp.get(), static_cast<uint32_t>(first));
+        EXPECT_EQ(packet->payload[0], pattern(first, 0));
+        EXPECT_EQ(packet->payload[(47 * 6) + 5], pattern(first + 47, 5));
+    }
+    // The phase is taken modulo the packet.
+    sender.set_packet_phase(48 + 6);
+    EXPECT_EQ(sender.packet_phase(), uint32_t{6});
+}
+
+TEST(aes67_sender, stagger_phases_spread_eight_senders_over_eight_ticks)
+{
+    // 1 ms at 48 kHz: 0, 6, ... 42, then again.
+    for (uint32_t k = 0; k < 16; ++k) {
+        EXPECT_EQ(Sender::stagger_phase(STEREO_L24, k), (k % 8) * 6);
+    }
+    // 96 kHz: a tick is 12 frames.
+    StreamFormat const hi{.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 96000, .frames_per_packet = 96};
+    EXPECT_EQ(Sender::stagger_phase(hi, 3), uint32_t{36});
+    // A packet of one tick: every sender sends every tick anyway.
+    StreamFormat const short_packets{.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = 6};
+    EXPECT_EQ(Sender::stagger_phase(short_packets, 5), uint32_t{0});
+    // 250 us: two ticks.
+    StreamFormat const quarter{.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = 12};
+    EXPECT_EQ(Sender::stagger_phase(quarter, 1), uint32_t{6});
+    EXPECT_EQ(Sender::stagger_phase(quarter, 2), uint32_t{0});
+}
+
+TEST(aes67_sender, reports_the_transports_send_error)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    uint64_t const base = 4800 * 48;
+    sender.tick(base - 1);
+    EXPECT_TRUE(sender.state() == State::running);
+    transport.failing = std::error_code{EINVAL, std::system_category()};
+    sender.tick(base + 47);
+    EXPECT_TRUE(sender.state() == State::error);
+    EXPECT_TRUE(sender.error() == std::errc::invalid_argument);
+    sender.tick(base + 47);  // nothing due: still in error
+    EXPECT_TRUE(sender.state() == State::error);
+    transport.failing.clear();
+    sender.tick(base + 47);  // nothing due, but the transport sends again
+    EXPECT_TRUE(sender.state() == State::ready);
+    EXPECT_FALSE(sender.error());
+    sender.tick(base + 95);
+    EXPECT_TRUE(sender.state() == State::running);
+}
+
 TEST(aes67_receiver, refuses_streams_it_cannot_take)
 {
     LoopTransport transport;
@@ -646,14 +729,68 @@ TEST(aes67_receiver, takes_late_packets_as_far_back_as_rtp_sequence_does)
     }
     auto const lost = receiver.counters().lost;
     EXPECT_EQ(lost, uint64_t{3 * FPP});
-    send(136);  // 64 behind
-    send(101);  // 99 behind: RtpSequence's last late packet
-    send(100);  // 100 behind: RtpSequence takes it for a jump
-    receiver.drain(base + (201 * FPP));
+    send(136);                           // 64 behind
+    send(101);                           // 99 behind: RtpSequence's last late packet
+    send(100);                           // 100 behind: RtpSequence takes it for a jump
+    receiver.drain(base + (202 * FPP));  // a packet time on: past the due-tick gate
     EXPECT_EQ(receiver.counters().late, uint64_t{2 * FPP});
     EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});
     EXPECT_EQ(receiver.counters().dropped, uint64_t{1});
     EXPECT_EQ(sink.blocks.back().first_index, base + (101 * FPP));
+}
+
+TEST(aes67_receiver, polls_a_queuing_port_only_when_a_packet_can_be_due)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    uint64_t const base = 48'000ULL * 3000;  // a multiple of 48
+    auto send = [&](uint16_t const n) {
+        transport.queue.push_back({group, rtp_packet(n, static_cast<uint32_t>(base + (uint64_t{n} * FPP)))});
+    };
+    // Before the first packet: every tick.
+    for (uint64_t t = 0; t < 4; ++t) {
+        receiver.drain(base + (t * 6));
+    }
+    EXPECT_EQ(transport.receives, size_t{4});
+    // Packet n, [base + 48n, base + 48(n + 1)), arrives a tick after its last frame.
+    size_t polls_at_start = 0;
+    for (uint16_t n = 0; n < 10; ++n) {
+        if (n == 2) {
+            polls_at_start = transport.receives;
+        }
+        uint64_t const arrival = base + (uint64_t{n + 1U} * FPP) + 6;
+        for (uint64_t now = arrival - 48; now < arrival; now += 6) {
+            receiver.drain(now);
+        }
+        send(n);
+        receiver.drain(arrival);
+    }
+    EXPECT_EQ(receiver.counters().packets, uint64_t{10});
+    // In steady state: from a tick before the next packet can be sent to the
+    // tick it arrives, three polls per eight ticks.
+    EXPECT_EQ(transport.receives - polls_at_start, size_t{8 * 3});
+    EXPECT_TRUE(receiver.skipped_polls() > 0);
+
+    // A lost packet: polled every tick past due until the next one.
+    size_t const before = transport.receives;
+    uint64_t const due = base + (11 * FPP) - 6;
+    for (uint64_t now = due; now < due + 96; now += 6) {
+        receiver.drain(now);
+    }
+    EXPECT_EQ(transport.receives - before, size_t{16});
+
+    // A transport whose ports keep a tick's datagrams only: every tick.
+    transport.every_tick = true;
+    send(12);
+    receiver.drain(base + (13 * FPP));
+    size_t const xdp_before = transport.receives;
+    for (uint64_t t = 1; t <= 8; ++t) {
+        receiver.drain(base + (13 * FPP) + (t * 6));
+    }
+    EXPECT_EQ(transport.receives - xdp_before, size_t{8});
 }
 
 TEST(aes67_udp, two_receivers_share_a_port)
