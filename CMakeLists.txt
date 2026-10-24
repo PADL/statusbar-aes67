@@ -19,6 +19,9 @@ find_package(statusbar-core REQUIRED)
 
 add_subdirectory(statusbar)
 
+# fuzz-smoke and fuzz-all over the *_fuzzer targets (no-op unless ENABLE_FUZZING).
+statusbar_register_fuzz_targets()
+
 # Export each module target under the short statusbar::<name> form, so dependent
 # packages find_package() them as statusbar::<module>.
 set_target_properties(statusbar-mediaclock PROPERTIES EXPORT_NAME mediaclock)

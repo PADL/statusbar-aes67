@@ -2,6 +2,29 @@
 # (statusbar_package_module_init in cmake/module.cmake).
 statusbar_package_module_init()
 
+# Helper: build a libFuzzer harness (Linux) or standalone driver (macOS) for the
+# package's parsers. Mirrors avb's add_avb_fuzzer.
+function(add_aes67_fuzzer source_file)
+  if(NOT ENABLE_FUZZING)
+    return()
+  endif()
+  get_filename_component(FUZZ_NAME ${source_file} NAME_WE)
+  add_executable(${FUZZ_NAME} ${source_file})
+  target_link_libraries(${FUZZ_NAME} PRIVATE statusbar)
+  if(APPLE)
+    target_compile_options(${FUZZ_NAME} PRIVATE -fsanitize=address,undefined
+                                                -fno-omit-frame-pointer)
+    target_link_options(${FUZZ_NAME} PRIVATE -fsanitize=address,undefined)
+  else()
+    target_compile_options(
+      ${FUZZ_NAME} PRIVATE -fsanitize=fuzzer,address,undefined
+                           -fno-omit-frame-pointer)
+    target_link_options(
+      ${FUZZ_NAME} PRIVATE -fsanitize=fuzzer,address,undefined
+      ${FUZZER_EXTRA_LINK_OPTIONS})
+  endif()
+endfunction()
+
 # Module subdirectories — dependency order.
 add_subdirectory(mediaclock)
 add_subdirectory(rtp)
