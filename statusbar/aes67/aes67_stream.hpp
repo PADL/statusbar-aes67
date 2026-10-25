@@ -7,11 +7,13 @@
 /// PTP sample index, on the real-time thread, never allocating), its destination, counters, state,
 /// and the figures it publishes for its RTCP session.
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -37,6 +39,27 @@ struct StreamFormat
 
     auto operator==(StreamFormat const&) const noexcept -> bool = default;
 };
+
+/// One silent sample of `encoding` as a big-endian word: zero for linear PCM; for AM824 the
+/// MBLA label 0x40 with a zero sample (IEC 61883-6 Clause 6.2), as a zero word is IEC 60958 data.
+[[nodiscard]] constexpr auto silence_word(sdp::Encoding const encoding) noexcept -> uint32_t
+{
+    return encoding == sdp::Encoding::am824 ? 0x4000'0000U : 0U;
+}
+
+/// Fill `out` (whole samples of `encoding`) with silence: zero bytes, or the AM824 word repeated.
+inline auto fill_silence(sdp::Encoding const encoding, std::span<uint8_t> const out) noexcept -> void
+{
+    uint32_t const word = silence_word(encoding);
+    if (word == 0 || out.size() < sizeof(word)) {
+        span_zero(out);
+        return;
+    }
+    span_store(out, ieee::quadlet_t{word});
+    for (size_t filled = sizeof(word); filled < out.size(); filled *= 2) {
+        span_copy(out.subspan(filled), out.first(filled));
+    }
+}
 
 /// A receiver's frames: `frames` frames from sample index `first_index`, the
 /// stream's wire bytes. `bytes` is valid only during the call.

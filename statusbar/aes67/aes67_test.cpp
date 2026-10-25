@@ -540,6 +540,88 @@ TEST(aes67_sender, sends_uncounted_silence_with_no_provider)
     EXPECT_EQ(sender.counters().packets, uint64_t{1});
 }
 
+namespace {
+
+/// Whether every big-endian word of `bytes` is `word`.
+auto all_words_are(std::span<uint8_t const> const bytes, uint32_t const word) -> bool
+{
+    if (bytes.size() % 4 != 0) {
+        return false;
+    }
+    for (size_t at = 0; at < bytes.size(); at += 4) {
+        ieee::quadlet_t got{};
+        span_load(got, bytes.subspan(at, 4));
+        if (got.get() != word) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+TEST(aes67_stream, silence_is_zero_for_linear_pcm_and_the_mbla_word_for_am824)
+{
+    EXPECT_EQ(silence_word(sdp::Encoding::l16), uint32_t{0});
+    EXPECT_EQ(silence_word(sdp::Encoding::l24), uint32_t{0});
+    EXPECT_EQ(silence_word(sdp::Encoding::l32), uint32_t{0});
+    EXPECT_EQ(silence_word(sdp::Encoding::am824), uint32_t{0x4000'0000});
+
+    for (size_t const size : {size_t{4}, size_t{8}, size_t{12}, size_t{60}, size_t{1440}}) {
+        std::vector<uint8_t> bytes(size, 0x55);
+        fill_silence(sdp::Encoding::am824, bytes);
+        EXPECT_TRUE(all_words_are(bytes, 0x4000'0000));
+        std::ranges::fill(bytes, uint8_t{0x55});
+        fill_silence(sdp::Encoding::l24, bytes);
+        EXPECT_TRUE(std::ranges::all_of(bytes, [](uint8_t b) { return b == 0; }));
+    }
+}
+
+TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
+{
+    constexpr StreamFormat AM824{.encoding = sdp::Encoding::am824, .channels = 3, .sample_rate = 48000, .frames_per_packet = FPP};
+    uint64_t const base = 48'000ULL * 1000;
+
+    // No provider: uncounted silence, every channel's sample the MBLA word.
+    LoopTransport transport;
+    Sender idle{AM824, FrameProvider{}, transport, "Test"};
+    idle.set_read_delay(0);
+    EXPECT_TRUE(idle.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
+    idle.tick(base + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    auto const silent = rtp::parse_rtp(transport.queue[0].bytes);
+    EXPECT_EQ(silent->payload.size(), size_t{AM824.bytes_per_packet()});
+    EXPECT_TRUE(all_words_are(silent->payload, 0x4000'0000));
+    EXPECT_EQ(idle.counters().lost, uint64_t{0});
+
+    // A provider that wrote part of the packet and reports it missing: all silence, counted lost.
+    transport.queue.clear();
+    FrameProvider partial = [](uint64_t, uint32_t, std::span<uint8_t> const out) {
+        std::ranges::fill(out.first(out.size() / 2), uint8_t{0x55});
+        return Supply::missing;
+    };
+    Sender sender{AM824, std::move(partial), transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 3}}));
+    sender.tick(base + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    EXPECT_TRUE(all_words_are(rtp::parse_rtp(transport.queue[0].bytes)->payload, 0x4000'0000));
+    EXPECT_EQ(sender.counters().lost, uint64_t{FPP});
+
+    // The same provider on L24: zero bytes, as before.
+    transport.queue.clear();
+    FrameProvider partial_l24 = [](uint64_t, uint32_t, std::span<uint8_t> const out) {
+        std::ranges::fill(out.first(out.size() / 2), uint8_t{0x55});
+        return Supply::missing;
+    };
+    Sender l24{STEREO_L24, std::move(partial_l24), transport, "Test"};
+    l24.set_read_delay(0);
+    EXPECT_TRUE(l24.configure(Destination{.address = IPv4Address{239, 69, 1, 4}}));
+    l24.tick(base + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    EXPECT_TRUE(std::ranges::all_of(rtp::parse_rtp(transport.queue[0].bytes)->payload, [](uint8_t b) { return b == 0; }));
+}
+
 TEST(aes67_sender, waits_out_a_small_backward_step)
 {
     LoopTransport transport;

@@ -282,7 +282,7 @@ auto Sender::render_payload(uint64_t const first_index, std::span<uint8_t> const
 {
     Supply const supply = provider_ ? provider_(first_index, format_.frames_per_packet, payload) : Supply::none;
     if (supply != Supply::frames) {
-        std::ranges::fill(payload, uint8_t{0});
+        fill_silence(format_.encoding, payload);
     }
     return supply;
 }

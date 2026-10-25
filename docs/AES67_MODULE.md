@@ -139,7 +139,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - The SSRC is random per `configure()`, the sequence starts at a random value and counts
   up, and the marker is never set.
 - Frames the provider does not have (`Supply::missing`) are sent as silence and counted
-  lost; with no provider (`Supply::none`) silence is sent and nothing is counted. More
+  lost; with no provider (`Supply::none`) silence is sent and nothing is counted. Silence
+  is the encoding's (`fill_silence()`): zero bytes for L16/L24/L32, and for AM824 the
+  word 0x40000000 per sample (MBLA label, zero sample), since a zero word is IEC 60958
+  data. A packet that is not all `Supply::frames` is silence throughout. More
   than `MAX_BURST` packets behind, the sender skips ahead and counts the skipped frames
   lost. After a backward step of the clock it sends nothing until now catches up with
   what it has sent, so no index goes out twice, unless the step exceeds `MAX_BURST`
