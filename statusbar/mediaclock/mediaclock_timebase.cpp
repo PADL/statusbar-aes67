@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 namespace statusbar::mediaclock {
 
@@ -78,6 +79,16 @@ auto TimebaseFit::reset_window() noexcept -> void
     }
 }
 
+auto TimebaseFit::source_discontinuity() noexcept -> void
+{
+    reset_window();
+    if (params_.absolute && state_ != State::unlocked) {
+        state_ = State::unlocked;  // the last line is no longer the source's time
+        published_.running = false;
+        stop_pending_ = true;
+    }
+}
+
 auto TimebaseFit::fitted_source_ns(std::int64_t t_phc) const noexcept -> std::int64_t
 {
     return anchor_source_ns_ + std::llround(intercept_ + (slope_ * static_cast<double>(t_phc - anchor_reference_ns_)));
@@ -96,7 +107,7 @@ auto TimebaseFit::feed(ClockSample const& sample) noexcept -> void
     }
     if (have_source_ && (sample.epoch != source_epoch_ || sample.rate_hz != source_rate_hz_)) {
         outliers_ += static_cast<std::uint32_t>(held_count_);
-        reset_window();
+        source_discontinuity();
     }
     have_source_ = true;
     source_epoch_ = sample.epoch;
@@ -119,7 +130,7 @@ auto TimebaseFit::feed(ClockSample const& sample) noexcept -> void
                 last_step_ns_ = held_[0].reference_ns;
             }
             std::size_t const n = held_count_;
-            reset_window();
+            source_discontinuity();
             for (std::size_t i = 0; i < n; ++i) {
                 push(held_[i]);
             }
@@ -196,6 +207,7 @@ auto TimebaseFit::line() const noexcept -> Timebase
 
 auto TimebaseFit::update(std::int64_t now_ns) noexcept -> bool
 {
+    bool const stopped = std::exchange(stop_pending_, false);
     bool const refitted = pending_ != 0;
     if (refitted) {
         refit();
@@ -208,8 +220,9 @@ auto TimebaseFit::update(std::int64_t now_ns) noexcept -> bool
     if (reference_present_ && meets_lock()) {
         bool const joined = state_ != State::locked;
         if (joined) {
-            // Join the new line to the one in use at now_ns: only the slope changes.
-            domain_constant_ns_ = published_.to_domain(now_ns) - fitted_source_ns(now_ns);
+            // Join the new line to the one in use at now_ns (only the slope changes), or take the
+            // source's own time when absolute.
+            domain_constant_ns_ = params_.absolute ? 0 : published_.to_domain(now_ns) - fitted_source_ns(now_ns);
             ++published_.epoch;
             state_ = State::locked;
         }
@@ -229,7 +242,7 @@ auto TimebaseFit::update(std::int64_t now_ns) noexcept -> bool
         published_.running = false;
         return true;
     }
-    return false;
+    return stopped;
 }
 
 auto TimebaseFit::status() const noexcept -> TimebaseFitStatus

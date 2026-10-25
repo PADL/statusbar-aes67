@@ -27,7 +27,10 @@ timebase. `TimebaseFit` estimates the map by least squares over a window of pair
 source supplies (AVTP presentation time and frame count, an RTCP sender report's NTP/RTP
 pair converted to PTP time, a CRF timestamp), detects steps and source restarts, and keeps
 domain time continuous across them: each lock joins the new line to the one in use at that
-instant, so only the slope changes.
+instant, so only the slope changes. With `absolute` set (a followed PTP instance, whose time
+the domain's outputs announce as `mediaclk:direct`) domain time is the source's own time
+instead: a step or new epoch of the source stops the domain (`running` false) until it
+re-locks on the source's new time. Gate a `direct` announcement on `running`.
 
 ## Key types
 
@@ -42,7 +45,7 @@ instant, so only the slope changes.
   - `to_domain(t_phc)` / `from_domain(t_d)` — exact within a nanosecond over a day either side of the anchor.
   - `identity()` — domain time is PTP time, not running: the map before a first lock.
 - `ClockSample` — one pair: `reference_ns` (PTP), `count` (frames since the epoch), `rate_hz`, `epoch`.
-- `TimebaseFitParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`.
+- `TimebaseFitParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `phc_pairs()`; `absolute` makes domain time the source's own.
 - `TimebaseFit` — `feed(sample)` per pair, `update(now_ns)` per pass (true: publish `timebase()`), `status()`.
 - `TimebaseFitStatus` — `locked`, `holdover`, `reference_present`, `rate_offset_ppm`, `residual_ns`, `last_step_ns`, `steps`, `outliers`, `pairs`.
 
@@ -123,14 +126,18 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   across a publish, at most one per reactor pass.
 - Presets (`TimebaseFitParams`), starting values to be tuned against real sources:
 
-  | Preset | Window | Lock after | Step | Reference timeout |
-  |---|---|---|---|---|
-  | `avb_stream()` | 2048 pairs | 256 pairs spanning 250 ms | 3 residuals over 20 µs | 100 ms |
-  | `rtcp_sender_reports()` | 16 | 4 | 2 over 20 µs | 3 s |
-  | `crf()` | 128 | 32 | 3 over 20 µs | 100 ms |
+  | Preset | Pairs/s | Window | Lock after | Step | Reference timeout | Absolute |
+  |---|---|---|---|---|---|---|
+  | `avb_stream()` | 1000 | 2048 pairs (2 s) | 256 pairs spanning 250 ms | 3 residuals over 20 µs | 100 ms | no |
+  | `rtcp_sender_reports()` | ~1 | 16 | 4 | 2 over 20 µs | 3 s | no |
+  | `crf()` | 500 | 1024 (2 s) | 128 spanning 250 ms | 3 over 20 µs | 100 ms | no |
+  | `phc_pairs()` | 16 | 64 (4 s) | 16 spanning 900 ms | 3 over 2 µs | 500 ms | yes |
 
-  All lock while the RMS residual is under 2 µs and |r| under 500 ppm, and hold over for
-  5 s after the last good fit.
+  All lock while the RMS residual is under 2 µs (`phc_pairs()`: 1 µs, half its step
+  threshold, which keeps every residual in the window) and |r| under 500 ppm, and hold over for
+  5 s after the last good fit. `crf()` assumes Milan's 48 kHz CRF with `timestamp_interval`
+  96; `phc_pairs()` takes PHC-to-PHC cross-timestamps with `count` the followed PTP time in
+  ns at `rate_hz` 1e9.
 - A residual over the step threshold is held; fewer than `step_pairs` in a row are dropped
   as outliers, `step_pairs` in a row are a step and restart the window from them. A new
   `epoch` or `rate_hz` restarts it without counting a step. Either way the domain runs on
@@ -140,9 +147,13 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   window without being counted (only a fit of `lock_pairs` or more counts steps).
 - No pair for `reference_timeout_ns` resets the window: the line after a silence is
   fitted from fresh pairs, under the same lock criteria.
-- Before the first lock the map is the identity and the first lock joins it, so a fresh
-  domain's index starts near PTP's. When holdover expires `running` goes false but the
-  line is kept, so a later lock still joins it without a jump.
+- An `absolute` fit never joins: each lock sets the line to the source's own fitted time
+  (the epoch's constant is zero), so its first lock, a step, a new epoch or any re-lock
+  moves domain time to the source's, bumping `epoch`. A step or new epoch skips holdover:
+  `update()` returns true with `running` false. A silence still holds over.
+- Before the first lock the map is the identity and, unless `absolute`, the first lock
+  joins it, so a fresh domain's index starts near PTP's. When holdover expires `running` goes false but the
+  line is kept, so a later lock still joins it without a jump (unless `absolute`).
 - A pair whose PTP time is not after the newest one is ignored: a step backwards by more
   than the pair interval loses the pairs until they pass it.
 

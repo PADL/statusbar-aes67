@@ -50,6 +50,22 @@ class Source
         }
     }
 
+    /// Source time at PTP time t in integer ns, for a 1 GHz source started at `count`: exact at
+    /// today's epoch, where a double is not.
+    [[nodiscard]] auto absolute_ns_at(std::int64_t t) const noexcept -> std::int64_t
+    {
+        std::int64_t const dt = t - base_ptp_;
+        return static_cast<std::int64_t>(base_count_) + dt + std::llround(rate_offset_ * static_cast<double>(dt));
+    }
+
+    /// Start the count at `count` (a 1 GHz source's own time, ns) instead of zero.
+    auto start_at(std::uint64_t count) noexcept -> void
+    {
+        rebase();
+        base_count_ = count;
+        next_ = count;
+    }
+
     /// Skip pairs up to PTP time t: the source falls silent.
     auto skip_until(std::int64_t now) noexcept -> void
     {
@@ -340,16 +356,93 @@ TEST(mediaclock_timebase, sparse_pairs_lock_after_four_reports)
     EXPECT_TRUE(std::fabs(status.rate_offset_ppm - 100.0) < 0.1);
 }
 
-TEST(mediaclock_timebase, a_crf_like_stream_locks_after_thirty_two_pairs)
+TEST(mediaclock_timebase, crf_pairs_lock_in_a_quarter_second)
 {
     TimebaseFit fit{TimebaseFitParams::crf()};
-    Source source{48000, 960, -40e-6, 1'000};  // 50 timestamps a second
+    Source source{48000, 96, -40e-6, 1'000};  // 500 timestamps a second
     std::int64_t now = NOW_NS;
     std::int64_t const locked_at = time_to_lock(fit, source, now, 3'000 * MS);
-    EXPECT_TRUE(locked_at >= 620 * MS && locked_at <= 630 * MS);
+    // 128 pairs spanning 254 ms, seen at the next 10 ms pass.
+    EXPECT_TRUE(locked_at >= 250 * MS && locked_at <= 260 * MS);
     run_for(fit, source, now, 5'000 * MS);
+    auto const status = fit.status();
+    EXPECT_TRUE(status.locked);
+    EXPECT_EQ(status.pairs, std::uint32_t{1024});
+    EXPECT_TRUE(std::fabs(status.rate_offset_ppm + 40.0) < 0.1);
+}
+
+TEST(mediaclock_timebase, phc_pairs_lock_within_a_second)
+{
+    TimebaseFit fit{TimebaseFitParams::phc_pairs()};
+    Source source{1'000'000'000, 62'500'000, 25e-6, 200};  // 16 cross-timestamps a second
+    std::int64_t now = NOW_NS;
+    std::int64_t const locked_at = time_to_lock(fit, source, now, 5'000 * MS);
+    // 16 pairs spanning 937.5 ms, seen at the next 10 ms pass.
+    EXPECT_TRUE(locked_at >= 930 * MS && locked_at <= 950 * MS);
+    run_for(fit, source, now, 10'000 * MS);
+    auto const status = fit.status();
+    EXPECT_TRUE(status.locked);
+    EXPECT_EQ(status.pairs, std::uint32_t{64});
+    EXPECT_TRUE(std::fabs(status.rate_offset_ppm - 25.0) < 0.1);
+}
+
+TEST(mediaclock_timebase, an_absolute_fit_reports_the_source_time_itself)
+{
+    TimebaseFit fit{TimebaseFitParams::phc_pairs()};
+    Source source{1'000'000'000, 62'500'000, -37e-6, 100};
+    source.start_at(static_cast<std::uint64_t>(NOW_NS + 37'000'000'123LL));  // another grandmaster's time
+    std::int64_t now = NOW_NS;
+    EXPECT_TRUE(time_to_lock(fit, source, now, 5'000 * MS) != 0);
+    EXPECT_EQ(fit.timebase().epoch, std::uint32_t{1});
+    std::int64_t worst = 0;
+    run_for(fit, source, now, 30'000 * MS, [&](Timebase const&, bool) {
+        std::int64_t const ahead = now + PASS_NS;
+        worst = std::max(worst, std::abs(fit.timebase().to_domain(ahead) - source.absolute_ns_at(ahead)));
+    });
     EXPECT_TRUE(fit.status().locked);
-    EXPECT_TRUE(std::fabs(fit.status().rate_offset_ppm + 40.0) < 0.3);
+    EXPECT_TRUE(std::fabs(fit.status().rate_offset_ppm + 37.0) < 0.1);
+    EXPECT_TRUE(worst < 50);
+}
+
+TEST(mediaclock_timebase, an_absolute_fit_jumps_with_its_source)
+{
+    TimebaseFit fit{TimebaseFitParams::phc_pairs()};
+    Source source{1'000'000'000, 62'500'000, 10e-6, 100};
+    source.start_at(static_cast<std::uint64_t>(NOW_NS - 5'000'000'000LL));
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 10'000 * MS);
+    EXPECT_TRUE(fit.status().locked);
+
+    // A new grandmaster 37 s ahead, at another rate: the domain stops, then re-anchors on it.
+    constexpr std::int64_t JUMP_NS = 37'000'000'000LL;
+    std::int64_t const step_at = now;
+    source.step(JUMP_NS);
+    source.set_rate_offset(-20e-6);
+    std::int64_t stopped_at = 0;
+    std::int64_t relocked_at = 0;
+    std::int64_t max_publish_jump = 0;
+    run_for(fit, source, now, 5'000 * MS, [&](Timebase const& before, bool changed) {
+        Timebase const after = fit.timebase();
+        max_publish_jump = std::max(max_publish_jump, std::abs(after.to_domain(now) - before.to_domain(now)));
+        if (stopped_at == 0 && !after.running) {
+            stopped_at = now - step_at;
+            EXPECT_TRUE(changed);
+            EXPECT_FALSE(fit.status().holdover);
+        }
+        if (relocked_at == 0 && stopped_at != 0 && after.running) {
+            relocked_at = now - step_at;
+        }
+    });
+    auto const status = fit.status();
+    // Stopped at the third held pair; the window restarts from them and locks 16 pairs on.
+    EXPECT_TRUE(stopped_at > 0 && stopped_at <= 200 * MS);
+    EXPECT_TRUE(relocked_at > 930 * MS && relocked_at <= 1'010 * MS);
+    EXPECT_TRUE(status.locked);
+    EXPECT_EQ(status.steps, std::uint32_t{1});
+    EXPECT_EQ(fit.timebase().epoch, std::uint32_t{2});
+    EXPECT_TRUE(std::fabs(status.rate_offset_ppm + 20.0) < 0.1);
+    EXPECT_TRUE(max_publish_jump > JUMP_NS - MS && max_publish_jump < JUMP_NS + MS);
+    EXPECT_TRUE(std::abs(fit.timebase().to_domain(now + PASS_NS) - source.absolute_ns_at(now + PASS_NS)) < 50);
 }
 
 TEST(mediaclock_timebase, a_new_epoch_keeps_domain_time_continuous)

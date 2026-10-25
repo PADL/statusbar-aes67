@@ -22,7 +22,7 @@ struct Timebase
     std::int64_t reference_ns{0};  ///< PTP time of the anchor, ns
     std::int64_t domain_ns{0};     ///< domain time at the anchor, ns
     double rate_offset{0.0};       ///< r: domain ns per PTP ns, minus one (1e-6 is 1 ppm)
-    std::uint32_t epoch{0};        ///< bumped each time the line is (re)joined after a lock
+    std::uint32_t epoch{0};        ///< bumped at each lock: a join (continuous), or for an absolute fit a re-anchor (may jump)
     bool running{false};           ///< locked or in holdover: outputs in the domain send
 
     /// The provisional map before a first lock: domain time is PTP time; not running.
@@ -73,6 +73,7 @@ struct TimebaseFitParams
     std::uint32_t step_pairs{3};                     ///< this many held in a row is a step (at most 8)
     std::int64_t reference_timeout_ns{100'000'000};  ///< no pair for this long: reference absent, ns
     std::int64_t holdover_ns{5'000'000'000};         ///< run on the last line this long after the last good fit, ns
+    bool absolute{false};                            ///< domain time is the source's own time: each lock re-anchors, not joins
 
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseFitParams { return TimebaseFitParams{}; }
@@ -89,13 +90,27 @@ struct TimebaseFitParams
         return p;
     }
 
-    /// A CRF stream (Milan v1.2 Section 7.3), 50 timestamps a second.
+    /// A CRF stream (Milan v1.2 Section 7.3), 500 timestamps a second (48 kHz, timestamp_interval 96).
     [[nodiscard]] static constexpr auto crf() noexcept -> TimebaseFitParams
     {
         TimebaseFitParams p{};
-        p.window_pairs = 128;
-        p.lock_pairs = 32;
-        p.lock_span_ns = 0;
+        p.window_pairs = 1024;
+        p.lock_pairs = 128;
+        return p;
+    }
+
+    /// PHC-to-PHC cross-timestamps against a followed PTP instance, 16 a second; count is that
+    /// PTP's time in ns at rate_hz 1e9, and domain time is that PTP's time (absolute).
+    [[nodiscard]] static constexpr auto phc_pairs() noexcept -> TimebaseFitParams
+    {
+        TimebaseFitParams p{};
+        p.window_pairs = 64;
+        p.lock_pairs = 16;
+        p.lock_span_ns = 900'000'000;
+        p.lock_rms_ns = 1'000;
+        p.step_threshold_ns = 2'000;
+        p.reference_timeout_ns = 500'000'000;
+        p.absolute = true;
         return p;
     }
 };
@@ -116,7 +131,8 @@ struct TimebaseFitStatus
 
 /// Least-squares fit of a domain's time against PTP time over a window of pairs. Control-thread
 /// only, no allocation: feed() each pair, then update() once per pass and publish timebase()
-/// when it returns true. Domain time never jumps: each lock joins the new line to the old.
+/// when it returns true. Domain time never jumps: each lock joins the new line to the old. An
+/// absolute fit instead re-anchors on the source's time at each lock and stops running on a step.
 class TimebaseFit
 {
   public:
@@ -163,6 +179,7 @@ class TimebaseFit
 
     auto push(Pair const& p) noexcept -> void;
     auto reset_window() noexcept -> void;
+    auto source_discontinuity() noexcept -> void;
     auto refit() noexcept -> void;
     [[nodiscard]] auto pair_at(std::size_t i) const noexcept -> Pair const&;
     [[nodiscard]] auto newest() const noexcept -> Pair const& { return pair_at(size_ - 1); }
@@ -198,9 +215,10 @@ class TimebaseFit
     double rms_ns_{0.0};
 
     State state_{State::unlocked};
-    std::int64_t domain_constant_ns_{0};  // the epoch's constant: domain_ns = source_ns + this
+    std::int64_t domain_constant_ns_{0};  // the epoch's constant: domain_ns = source_ns + this; 0 when absolute
     std::int64_t last_good_ns_{0};
     bool reference_present_{false};
+    bool stop_pending_{false};  // an absolute fit stopped running since the last update()
     Timebase published_{Timebase::identity()};
     std::int64_t last_step_ns_{0};
     std::uint32_t steps_{0};
