@@ -4,7 +4,7 @@
 
 `PtpMediaClock`: the PTP-locked media clock of RFC 7273 `a=mediaclk:direct`, mapping a
 sample index to PTP time and back, and to the 32-bit RTP and AVTP timestamps on the wire.
-`Timebase` and `TimebaseFit`: a media clock that is not PTP-locked, as an affine map from
+`Timebase` and `TimebaseEstimator`: a media clock that is not PTP-locked, as an affine map from
 PTP time fitted from its source's (PTP time, sample count) pairs.
 
 ## Overview
@@ -23,7 +23,7 @@ A source on its own oscillator (an AVB talker on internal clock, an RTP sender a
 `mediaclk:sender`, a CRF stream) defines a clock domain whose time is
 `t_d = domain_ns + (t - reference_ns) * (1 + r)` for PTP time `t`: a `Timebase`. Its index
 at rate `fs` is `PtpMediaClock{fs}.index_at(t_d)`, so every rate in a domain shares one
-timebase. `TimebaseFit` estimates the map by least squares over a window of pairs the
+timebase. `TimebaseEstimator` estimates the map by least squares over a window of pairs the
 source supplies (AVTP presentation time and frame count, an RTCP sender report's NTP/RTP
 pair converted to PTP time, a CRF timestamp), detects steps and source restarts, and keeps
 domain time continuous across them: each lock joins the new line to the one in use at that
@@ -45,9 +45,9 @@ re-locks on the source's new time. Gate a `direct` announcement on `running`.
   - `to_domain(t_phc)` / `from_domain(t_d)` — exact within a nanosecond over a day either side of the anchor.
   - `identity()` — domain time is PTP time, not running: the map before a first lock.
 - `ClockSample` — one pair: `reference_ns` (PTP), `count` (frames since the epoch), `rate_hz`, `epoch`.
-- `TimebaseFitParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `phc_pairs()`; `absolute` makes domain time the source's own.
-- `TimebaseFit` — `feed(sample)` per pair, `update(now_ns)` per pass (true: publish `timebase()`), `status()`.
-- `TimebaseFitStatus` — `locked`, `holdover`, `reference_present`, `rate_offset_ppm`, `residual_ns`, `last_step_ns`, `steps`, `outliers`, `pairs`.
+- `TimebaseEstimatorParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `phc_pairs()`; `absolute` makes domain time the source's own.
+- `TimebaseEstimator` — `feed(sample)` per pair, `update(now_ns)` per pass (true: publish `timebase()`), `status()`.
+- `TimebaseEstimatorStatus` — `locked`, `holdover`, `reference_present`, `rate_offset_ppm`, `residual_ns`, `last_step_ns`, `steps`, `outliers`, `pairs`.
 
 ## Quick example
 
@@ -78,7 +78,7 @@ A foreign domain: the fit on the control thread, the tick reading the published 
 using namespace statusbar::mediaclock;
 
 statusbar::itc::SeqlockValue<Timebase> published{Timebase::identity()};
-TimebaseFit fit{TimebaseFitParams::avb_stream()};
+TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
 
 auto on_pass(std::span<ClockSample const> pairs, std::int64_t ptp_now_ns) -> void  // control thread
 {
@@ -100,7 +100,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 ## Headers
 
 - `statusbar/mediaclock/mediaclock_ptp_clock.hpp` — `PtpMediaClock`.
-- `statusbar/mediaclock/mediaclock_timebase.hpp` — `Timebase`, `ClockSample`, `TimebaseFitParams`, `TimebaseFit`.
+- `statusbar/mediaclock/mediaclock_timebase.hpp` — `Timebase`, `ClockSample`, `TimebaseEstimatorParams`, `TimebaseEstimator`.
 
 ## Dependencies
 
@@ -119,12 +119,12 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 - `unwrap()` is unambiguous within ±2^31 samples of the reference, about 12 hours at
   48 kHz.
 - Subtract the stream's direct offset before unwrapping (`index_of_rtp()` does).
-- `TimebaseFit` runs on a control thread: `update()` refits the whole window (2048 pairs,
+- `TimebaseEstimator` runs on a control thread: `update()` refits the whole window (2048 pairs,
   a few microseconds) once per pass in which pairs arrived. It never allocates; the
   window is a fixed array of `MAX_WINDOW_PAIRS`, so the object is about 33 KB.
 - The reader side is one seqlock load and one `to_domain()` per tick; a load retries only
   across a publish, at most one per reactor pass.
-- Presets (`TimebaseFitParams`), starting values to be tuned against real sources:
+- Presets (`TimebaseEstimatorParams`), starting values to be tuned against real sources:
 
   | Preset | Pairs/s | Window | Lock after | Step | Reference timeout | Absolute |
   |---|---|---|---|---|---|---|

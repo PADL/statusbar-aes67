@@ -62,9 +62,9 @@ struct ClockSample
 static_assert(sizeof(ClockSample) == 24);
 
 /// Starting values for one kind of source (window, lock, step, holdover); tuned on the bench.
-struct TimebaseFitParams
+struct TimebaseEstimatorParams
 {
-    std::uint32_t window_pairs{2048};                ///< pairs fitted, at most TimebaseFit::MAX_WINDOW_PAIRS
+    std::uint32_t window_pairs{2048};                ///< pairs fitted, at most TimebaseEstimator::MAX_WINDOW_PAIRS
     std::uint32_t lock_pairs{256};                   ///< pairs needed before the fit may lock
     std::int64_t lock_span_ns{250'000'000};          ///< PTP time those pairs must span, ns
     std::int64_t lock_rms_ns{2'000};                 ///< locked while the RMS residual is under this, ns
@@ -76,12 +76,12 @@ struct TimebaseFitParams
     bool absolute{false};                            ///< domain time is the source's own time: each lock re-anchors, not joins
 
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
-    [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseFitParams { return TimebaseFitParams{}; }
+    [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
     /// RTCP sender reports (RFC 3550 Section 6.4.1), about one a second.
-    [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseFitParams
+    [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
-        TimebaseFitParams p{};
+        TimebaseEstimatorParams p{};
         p.window_pairs = 16;
         p.lock_pairs = 4;
         p.lock_span_ns = 0;
@@ -91,9 +91,9 @@ struct TimebaseFitParams
     }
 
     /// A CRF stream (Milan v1.2 Section 7.3), 500 timestamps a second (48 kHz, timestamp_interval 96).
-    [[nodiscard]] static constexpr auto crf() noexcept -> TimebaseFitParams
+    [[nodiscard]] static constexpr auto crf() noexcept -> TimebaseEstimatorParams
     {
-        TimebaseFitParams p{};
+        TimebaseEstimatorParams p{};
         p.window_pairs = 1024;
         p.lock_pairs = 128;
         return p;
@@ -101,9 +101,9 @@ struct TimebaseFitParams
 
     /// PHC-to-PHC cross-timestamps against a followed PTP instance, 16 a second; count is that
     /// PTP's time in ns at rate_hz 1e9, and domain time is that PTP's time (absolute).
-    [[nodiscard]] static constexpr auto phc_pairs() noexcept -> TimebaseFitParams
+    [[nodiscard]] static constexpr auto phc_pairs() noexcept -> TimebaseEstimatorParams
     {
-        TimebaseFitParams p{};
+        TimebaseEstimatorParams p{};
         p.window_pairs = 64;
         p.lock_pairs = 16;
         p.lock_span_ns = 900'000'000;
@@ -116,7 +116,7 @@ struct TimebaseFitParams
 };
 
 /// A domain's fit state, for reporting.
-struct TimebaseFitStatus
+struct TimebaseEstimatorStatus
 {
     bool locked{false};             ///< the window meets the lock criteria and the reference is present
     bool holdover{false};           ///< running on the last line after losing lock
@@ -133,7 +133,7 @@ struct TimebaseFitStatus
 /// only, no allocation: feed() each pair, then update() once per pass and publish timebase()
 /// when it returns true. Domain time never jumps: each lock joins the new line to the old. An
 /// absolute fit instead re-anchors on the source's time at each lock and stops running on a step.
-class TimebaseFit
+class TimebaseEstimator
 {
   public:
     /// The largest window_pairs a preset may ask for (the window is a fixed array).
@@ -143,7 +143,7 @@ class TimebaseFit
 
     /// A fit with the given preset: window_pairs clamped to [2, MAX_WINDOW_PAIRS], step_pairs to
     /// [1, MAX_STEP_PAIRS], lock_pairs to [2, window_pairs].
-    explicit TimebaseFit(TimebaseFitParams const& params) noexcept;
+    explicit TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept;
 
     /// Take one pair: a new epoch or rate resets the window; once a fit spans lock_pairs / 8 (at
     /// least 3), a residual over the step threshold is held and step_pairs in a row restart the
@@ -158,10 +158,10 @@ class TimebaseFit
     [[nodiscard]] auto timebase() const noexcept -> Timebase { return published_; }
 
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
-    [[nodiscard]] auto status() const noexcept -> TimebaseFitStatus;
+    [[nodiscard]] auto status() const noexcept -> TimebaseEstimatorStatus;
 
     /// The preset in use, after clamping.
-    [[nodiscard]] auto params() const noexcept -> TimebaseFitParams const& { return params_; }
+    [[nodiscard]] auto params() const noexcept -> TimebaseEstimatorParams const& { return params_; }
 
   private:
     struct Pair
@@ -191,7 +191,7 @@ class TimebaseFit
     [[nodiscard]] auto meets_lock() const noexcept -> bool;
     [[nodiscard]] auto line() const noexcept -> Timebase;
 
-    TimebaseFitParams params_;
+    TimebaseEstimatorParams params_;
     std::array<Pair, MAX_WINDOW_PAIRS> window_{};
     std::size_t head_{0};  // index of the oldest pair
     std::size_t size_{0};

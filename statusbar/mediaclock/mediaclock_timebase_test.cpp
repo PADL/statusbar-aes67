@@ -40,7 +40,7 @@ class Source
         return (static_cast<double>(base_count_) * 1e9 / rate_hz_) + (static_cast<double>(t - base_ptp_) * (1.0 + rate_offset_));
     }
 
-    auto feed_until(TimebaseFit& fit, std::int64_t now) noexcept -> void
+    auto feed_until(TimebaseEstimator& fit, std::int64_t now) noexcept -> void
     {
         while (next_reference() <= now) {
             fit.feed(ClockSample{static_cast<std::uint64_t>(next_reference()), next_, rate_hz_, epoch_});
@@ -169,7 +169,7 @@ struct Continuity
 
 /// Run reactor passes for `duration_ns` of PTP time, calling on_pass(before, changed) after each.
 template <class F>
-auto run_for(TimebaseFit& fit, Source& source, std::int64_t& now, std::int64_t duration_ns, F const& on_pass) -> void
+auto run_for(TimebaseEstimator& fit, Source& source, std::int64_t& now, std::int64_t duration_ns, F const& on_pass) -> void
 {
     std::int64_t const end = now + duration_ns;
     while (now < end) {
@@ -181,13 +181,13 @@ auto run_for(TimebaseFit& fit, Source& source, std::int64_t& now, std::int64_t d
     }
 }
 
-auto run_for(TimebaseFit& fit, Source& source, std::int64_t& now, std::int64_t duration_ns) -> void
+auto run_for(TimebaseEstimator& fit, Source& source, std::int64_t& now, std::int64_t duration_ns) -> void
 {
     run_for(fit, source, now, duration_ns, [](Timebase const&, bool) {});
 }
 
 /// PTP time of the first pass in which the fit reports locked, run from now; 0 if none.
-auto time_to_lock(TimebaseFit& fit, Source& source, std::int64_t& now, std::int64_t limit_ns) -> std::int64_t
+auto time_to_lock(TimebaseEstimator& fit, Source& source, std::int64_t& now, std::int64_t limit_ns) -> std::int64_t
 {
     std::int64_t const start = now;
     std::int64_t locked_at = 0;
@@ -223,7 +223,7 @@ TEST(mediaclock_timebase, timebase_round_trips_within_a_nanosecond_over_a_day)
 
 TEST(mediaclock_timebase, a_100_ppm_source_locks_within_its_window)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     EXPECT_FALSE(fit.timebase().running);
@@ -244,7 +244,7 @@ TEST(mediaclock_timebase, a_100_ppm_source_locks_within_its_window)
 
 TEST(mediaclock_timebase, a_locked_fit_predicts_the_index_within_a_tenth_of_a_sample)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     EXPECT_TRUE(time_to_lock(fit, source, now, 1'000 * MS) != 0);
@@ -270,7 +270,7 @@ TEST(mediaclock_timebase, a_locked_fit_predicts_the_index_within_a_tenth_of_a_sa
 
 TEST(mediaclock_timebase, a_phase_step_resets_and_relocks_without_a_jump_in_domain_time)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     Continuity continuity;
@@ -307,7 +307,7 @@ TEST(mediaclock_timebase, a_phase_step_resets_and_relocks_without_a_jump_in_doma
 
 TEST(mediaclock_timebase, a_single_outlier_is_dropped_not_a_step)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     run_for(fit, source, now, 1'000 * MS);
@@ -330,7 +330,7 @@ TEST(mediaclock_timebase, a_single_outlier_is_dropped_not_a_step)
 
 TEST(mediaclock_timebase, an_outlier_while_the_window_fills_does_not_delay_the_lock)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     run_for(fit, source, now, 100 * MS);
@@ -343,7 +343,7 @@ TEST(mediaclock_timebase, an_outlier_while_the_window_fills_does_not_delay_the_l
 
 TEST(mediaclock_timebase, sparse_pairs_lock_after_four_reports)
 {
-    TimebaseFit fit{TimebaseFitParams::rtcp_sender_reports()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::rtcp_sender_reports()};
     Source source{48000, 48000, 100e-6, 1'000};  // one sender report a second
     std::int64_t now = NOW_NS;
     std::int64_t const locked_at = time_to_lock(fit, source, now, 10'000 * MS);
@@ -358,7 +358,7 @@ TEST(mediaclock_timebase, sparse_pairs_lock_after_four_reports)
 
 TEST(mediaclock_timebase, crf_pairs_lock_in_a_quarter_second)
 {
-    TimebaseFit fit{TimebaseFitParams::crf()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf()};
     Source source{48000, 96, -40e-6, 1'000};  // 500 timestamps a second
     std::int64_t now = NOW_NS;
     std::int64_t const locked_at = time_to_lock(fit, source, now, 3'000 * MS);
@@ -373,7 +373,7 @@ TEST(mediaclock_timebase, crf_pairs_lock_in_a_quarter_second)
 
 TEST(mediaclock_timebase, phc_pairs_lock_within_a_second)
 {
-    TimebaseFit fit{TimebaseFitParams::phc_pairs()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::phc_pairs()};
     Source source{1'000'000'000, 62'500'000, 25e-6, 200};  // 16 cross-timestamps a second
     std::int64_t now = NOW_NS;
     std::int64_t const locked_at = time_to_lock(fit, source, now, 5'000 * MS);
@@ -388,7 +388,7 @@ TEST(mediaclock_timebase, phc_pairs_lock_within_a_second)
 
 TEST(mediaclock_timebase, an_absolute_fit_reports_the_source_time_itself)
 {
-    TimebaseFit fit{TimebaseFitParams::phc_pairs()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::phc_pairs()};
     Source source{1'000'000'000, 62'500'000, -37e-6, 100};
     source.start_at(static_cast<std::uint64_t>(NOW_NS + 37'000'000'123LL));  // another grandmaster's time
     std::int64_t now = NOW_NS;
@@ -406,7 +406,7 @@ TEST(mediaclock_timebase, an_absolute_fit_reports_the_source_time_itself)
 
 TEST(mediaclock_timebase, an_absolute_fit_jumps_with_its_source)
 {
-    TimebaseFit fit{TimebaseFitParams::phc_pairs()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::phc_pairs()};
     Source source{1'000'000'000, 62'500'000, 10e-6, 100};
     source.start_at(static_cast<std::uint64_t>(NOW_NS - 5'000'000'000LL));
     std::int64_t now = NOW_NS;
@@ -447,7 +447,7 @@ TEST(mediaclock_timebase, an_absolute_fit_jumps_with_its_source)
 
 TEST(mediaclock_timebase, a_new_epoch_keeps_domain_time_continuous)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     Continuity continuity;
@@ -473,7 +473,7 @@ TEST(mediaclock_timebase, a_new_epoch_keeps_domain_time_continuous)
 
 TEST(mediaclock_timebase, a_silent_source_holds_over_then_unlocks)
 {
-    TimebaseFit fit{TimebaseFitParams::avb_stream()};
+    TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
     Source source{48000, 48, 100e-6, 1'000};
     std::int64_t now = NOW_NS;
     run_for(fit, source, now, 1'000 * MS);

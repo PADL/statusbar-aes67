@@ -25,7 +25,7 @@ constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
 }  // namespace
 
-TimebaseFit::TimebaseFit(TimebaseFitParams const& params) noexcept
+TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept
     : params_{params}
 {
     params_.window_pairs = std::clamp<std::uint32_t>(params_.window_pairs, 2, MAX_WINDOW_PAIRS);
@@ -33,18 +33,18 @@ TimebaseFit::TimebaseFit(TimebaseFitParams const& params) noexcept
     params_.lock_pairs = std::clamp<std::uint32_t>(params_.lock_pairs, 2, params_.window_pairs);
 }
 
-auto TimebaseFit::pair_at(std::size_t i) const noexcept -> Pair const&
+auto TimebaseEstimator::pair_at(std::size_t i) const noexcept -> Pair const&
 {
     return window_[(head_ + i) % params_.window_pairs];
 }
 
-auto TimebaseFit::check_pairs() const noexcept -> std::size_t
+auto TimebaseEstimator::check_pairs() const noexcept -> std::size_t
 {
     return std::max<std::size_t>(3, params_.lock_pairs / 8);
 }
 
 template <class F>
-auto TimebaseFit::for_each_pair(F const& f) const noexcept -> void
+auto TimebaseEstimator::for_each_pair(F const& f) const noexcept -> void
 {
     std::size_t const first = std::min<std::size_t>(size_, params_.window_pairs - head_);
     for (std::size_t i = 0; i < first; ++i) {
@@ -55,7 +55,7 @@ auto TimebaseFit::for_each_pair(F const& f) const noexcept -> void
     }
 }
 
-auto TimebaseFit::push(Pair const& p) noexcept -> void
+auto TimebaseEstimator::push(Pair const& p) noexcept -> void
 {
     if (size_ == params_.window_pairs) {
         head_ = (head_ + 1) % params_.window_pairs;
@@ -66,7 +66,7 @@ auto TimebaseFit::push(Pair const& p) noexcept -> void
     ++pending_;
 }
 
-auto TimebaseFit::reset_window() noexcept -> void
+auto TimebaseEstimator::reset_window() noexcept -> void
 {
     head_ = 0;
     size_ = 0;
@@ -79,7 +79,7 @@ auto TimebaseFit::reset_window() noexcept -> void
     }
 }
 
-auto TimebaseFit::source_discontinuity() noexcept -> void
+auto TimebaseEstimator::source_discontinuity() noexcept -> void
 {
     reset_window();
     if (params_.absolute && state_ != State::unlocked) {
@@ -89,18 +89,18 @@ auto TimebaseFit::source_discontinuity() noexcept -> void
     }
 }
 
-auto TimebaseFit::fitted_source_ns(std::int64_t t_phc) const noexcept -> std::int64_t
+auto TimebaseEstimator::fitted_source_ns(std::int64_t t_phc) const noexcept -> std::int64_t
 {
     return anchor_source_ns_ + std::llround(intercept_ + (slope_ * static_cast<double>(t_phc - anchor_reference_ns_)));
 }
 
-auto TimebaseFit::residual(Pair const& p) const noexcept -> double
+auto TimebaseEstimator::residual(Pair const& p) const noexcept -> double
 {
     double const ds = static_cast<double>(p.source_ns - anchor_source_ns_);
     return ds - intercept_ - (slope_ * static_cast<double>(p.reference_ns - anchor_reference_ns_));
 }
 
-auto TimebaseFit::feed(ClockSample const& sample) noexcept -> void
+auto TimebaseEstimator::feed(ClockSample const& sample) noexcept -> void
 {
     if (sample.rate_hz == 0) {
         return;
@@ -142,7 +142,7 @@ auto TimebaseFit::feed(ClockSample const& sample) noexcept -> void
     push(p);
 }
 
-auto TimebaseFit::refit() noexcept -> void
+auto TimebaseEstimator::refit() noexcept -> void
 {
     pending_ = 0;
     if (size_ < 2) {
@@ -187,14 +187,14 @@ auto TimebaseFit::refit() noexcept -> void
     fit_pairs_ = size_;
 }
 
-auto TimebaseFit::meets_lock() const noexcept -> bool
+auto TimebaseEstimator::meets_lock() const noexcept -> bool
 {
     return fit_valid_ && fit_pairs_ >= params_.lock_pairs &&
         (newest().reference_ns - pair_at(0).reference_ns) >= params_.lock_span_ns &&
         rms_ns_ < static_cast<double>(params_.lock_rms_ns) && std::abs(slope_ - 1.0) < params_.lock_rate_ppm * 1e-6;
 }
 
-auto TimebaseFit::line() const noexcept -> Timebase
+auto TimebaseEstimator::line() const noexcept -> Timebase
 {
     return Timebase{
         .reference_ns = anchor_reference_ns_,
@@ -205,7 +205,7 @@ auto TimebaseFit::line() const noexcept -> Timebase
     };
 }
 
-auto TimebaseFit::update(std::int64_t now_ns) noexcept -> bool
+auto TimebaseEstimator::update(std::int64_t now_ns) noexcept -> bool
 {
     bool const stopped = std::exchange(stop_pending_, false);
     bool const refitted = pending_ != 0;
@@ -245,10 +245,10 @@ auto TimebaseFit::update(std::int64_t now_ns) noexcept -> bool
     return stopped;
 }
 
-auto TimebaseFit::status() const noexcept -> TimebaseFitStatus
+auto TimebaseEstimator::status() const noexcept -> TimebaseEstimatorStatus
 {
     double const rate = fit_valid_ ? slope_ - 1.0 : published_.rate_offset;
-    return TimebaseFitStatus{
+    return TimebaseEstimatorStatus{
         .locked = state_ == State::locked,
         .holdover = state_ == State::holdover,
         .reference_present = reference_present_,
