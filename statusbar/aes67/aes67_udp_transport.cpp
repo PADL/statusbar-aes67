@@ -21,10 +21,12 @@ namespace {
 class UdpReceivePort final : public ReceivePort
 {
   public:
-    UdpReceivePort(UdpTransport& transport, net::FileDescriptor fd, Endpoint const& destination) noexcept
+    UdpReceivePort(
+        UdpTransport& transport, net::FileDescriptor fd, Endpoint const& destination, unsigned int const interface_index) noexcept
         : transport_{transport}
         , fd_{std::move(fd)}
         , destination_{destination}
+        , interface_index_{interface_index}
     {
         // Built once; receive() resets only what recvmmsg() writes back.
         for (size_t i = 0; i < UdpTransport::RECEIVE_BATCH; ++i) {
@@ -57,8 +59,9 @@ class UdpReceivePort final : public ReceivePort
         }
         size_t written = 0;
         for (size_t i = 0; i < static_cast<size_t>(got); ++i) {
-            if ((messages_[i].msg_hdr.msg_flags & MSG_TRUNC) != 0 || !destined_for(messages_[i].msg_hdr, destination_.address)) {
-                continue;  // larger than any AES67 packet, or sent to another address on this port
+            if ((messages_[i].msg_hdr.msg_flags & MSG_TRUNC) != 0 ||
+                !destined_for(messages_[i].msg_hdr, destination_.address, interface_index_)) {
+                continue;  // larger than any AES67 packet, or another address's or interface's
             }
             out[written++] = {
                 .payload = std::span<uint8_t const>{buffers_[i]}.first(messages_[i].msg_len),
@@ -72,6 +75,7 @@ class UdpReceivePort final : public ReceivePort
     UdpTransport& transport_;
     net::FileDescriptor fd_;
     Endpoint destination_;
+    unsigned int interface_index_;  ///< the group's interface, or 0 for a unicast port
     std::array<std::array<uint8_t, UdpTransport::MAX_DATAGRAM>, UdpTransport::RECEIVE_BATCH> buffers_{};
     std::array<sockaddr_in, UdpTransport::RECEIVE_BATCH> sources_{};
     std::array<iovec, UdpTransport::RECEIVE_BATCH> iov_{};
@@ -177,35 +181,19 @@ auto UdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std:
     if (!multicast && std::ranges::find(unicast_, destination) != unicast_.end()) {
         return failure(std::errc::address_in_use);  // one unicast receiver per address and port
     }
-    auto fd = net::make_udp_socket();
+    // Bound to the destination address itself: a group's socket sees only that group, and a
+    // unicast receiver's specific bind wins its address:port over the group sockets on the port.
+    auto fd = open_receive_socket(interface_, destination, true);
     if (!fd) {
         return failure(fd.error());
     }
-    int const one = 1;
     int const buffer = 1 << 20;
-    if (auto set = net::set_reuse_addr(fd->get()); !set) {
-        return failure(set.error());
-    }
     (void)::setsockopt(fd->get(), SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
-    if (::setsockopt(fd->get(), IPPROTO_IP, IP_PKTINFO, &one, sizeof(one)) != 0) {
-        return failure(net::errno_code());
-    }
-    // Bound to the destination address itself: a group's socket sees only that group, and a
-    // unicast receiver's specific bind wins its address:port over the group sockets on the port;
-    // receive() checks each datagram's destination with IP_PKTINFO as well.
-    sockaddr_in const address = to_sockaddr(destination);
-    if (::bind(fd->get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address)) != 0) {
-        return failure(net::errno_code());
-    }
-    if (multicast) {
-        if (auto joined = net::join_group(fd->get(), destination.address, interface_.index); !joined) {
-            return failure(joined.error());
-        }
-    } else {
+    if (!multicast) {
         unicast_.push_back(destination);
     }
     ++live_ports_;
-    return std::make_unique<UdpReceivePort>(*this, std::move(*fd), destination);
+    return std::make_unique<UdpReceivePort>(*this, std::move(*fd), destination, multicast ? interface_.index : 0U);
 }
 
 void UdpTransport::release(Endpoint const& destination) noexcept

@@ -15,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <print>
@@ -1173,6 +1174,51 @@ TEST(aes67_udp, a_unicast_rtcp_port_reaches_its_peer)
     auto const [to_a, from_b] = receive_rtcp(**a);
     EXPECT_EQ(to_a.size(), packet.size());
     EXPECT_TRUE(from_b == (Endpoint{.address = y, .port = port}));
+}
+
+TEST(aes67_udp, multicast_receive_sockets_take_only_their_own_joins)
+{
+    auto const lo = find_interface("lo");
+    EXPECT_TRUE(lo.has_value());
+    auto const multicast_all = [](int const fd) {
+        int all = -1;
+        socklen_t length = sizeof(all);
+        EXPECT_EQ(::getsockopt(fd, IPPROTO_IP, IP_MULTICAST_ALL, &all, &length), 0);
+        return all;
+    };
+    auto const unicast = open_receive_socket(*lo, {.address = own_loopback(), .port = 45040}, true);
+    EXPECT_TRUE(unicast.has_value());
+    EXPECT_EQ(multicast_all(unicast->get()), 1);  // the kernel's default: nothing joined to filter by
+    auto const group = open_receive_socket(*lo, {.address = own_group(), .port = 45040}, true);
+    auto transport = UdpTransport::open("lo");
+    auto rtcp = (*transport)->open_rtcp({.destination = {.address = own_group(), .port = 45041}});
+    if (!group || !rtcp) {
+        std::println("  skipped: cannot join a group on lo");
+        return;
+    }
+    EXPECT_EQ(multicast_all(group->get()), 0);
+    EXPECT_EQ(multicast_all((*rtcp)->fd()), 0);
+}
+
+TEST(aes67_udp, a_datagram_is_kept_only_for_its_address_and_interface)
+{
+    alignas(cmsghdr) std::array<uint8_t, PKTINFO_SPACE> control{};
+    msghdr header{};
+    header.msg_control = control.data();
+    header.msg_controllen = control.size();
+    EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 2}));  // no IP_PKTINFO
+    cmsghdr* const cmsg = CMSG_FIRSTHDR(&header);
+    cmsg->cmsg_level = IPPROTO_IP;
+    cmsg->cmsg_type = IP_PKTINFO;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
+    in_pktinfo info{};
+    info.ipi_ifindex = 3;
+    info.ipi_addr.s_addr = htonl(IPv4Address{239, 69, 1, 2}.to_uint32());
+    std::memcpy(CMSG_DATA(cmsg), &info, sizeof(info));
+    EXPECT_TRUE(destined_for(header, IPv4Address{239, 69, 1, 2}));      // any interface
+    EXPECT_TRUE(destined_for(header, IPv4Address{239, 69, 1, 2}, 3));   // its own
+    EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 2}, 4));  // another NIC's join
+    EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 3}, 3));
 }
 
 TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)

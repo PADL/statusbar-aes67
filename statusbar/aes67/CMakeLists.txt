@@ -24,4 +24,5 @@ statusbar_add_module(
   TESTS
   aes67_rtcp_test.cpp
   aes67_test.cpp
+  aes67_veth_test.cpp
   aes67_xdp_test.cpp)

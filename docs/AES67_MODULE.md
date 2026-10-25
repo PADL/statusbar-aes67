@@ -72,7 +72,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `statusbar/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
 - `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
-- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `open_rtcp_socket()`.
+- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_rtcp_socket()`.
 - `statusbar/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`.
 - `statusbar/aes67/aes67_error.hpp` — `Aes67Error`.
 
@@ -260,6 +260,17 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   sees only that group and a unicast receiver's specific bind wins its address:port over
   the group sockets sharing the port; `IP_PKTINFO` checks each datagram's destination as
   well. One unicast receiver per address and port.
+- Group sockets, RTP and RTCP alike (`open_receive_socket()`), are scoped to the
+  transport's interface, so two transports on two NICs can receive the same group. Linux
+  delivers a group's datagrams to every socket bound to it, whichever interface joined
+  it, unless `IP_MULTICAST_ALL` is 0; with it 0, a socket gets only the groups it joined,
+  on the interfaces it joined them on. Each socket sets it to 0, and `receive()` also
+  drops a datagram whose `IP_PKTINFO` `ipi_ifindex` is not the transport's interface (one
+  compare on the ancillary data already read). `SO_BINDTODEVICE` would scope the socket
+  too, but needs `CAP_NET_RAW` before Linux 5.7 and also pins the socket's sends.
+  `aes67_veth_test` proves it on two veth pairs; it needs root, or runs unprivileged in a
+  user and network namespace:
+  `unshare -rn sh -c 'ip link set lo up; build/statusbar_test statusbar/aes67/aes67_veth_test'`.
 - A sender's socket is unconnected and every message names the destination, so a unicast
   receiver's ICMP port-unreachable never fails a send. Multicast goes out of the
   interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, from

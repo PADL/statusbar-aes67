@@ -38,8 +38,14 @@ struct InterfaceInfo
 /// The ancillary space recvmsg() needs for IP_PKTINFO.
 inline constexpr size_t PKTINFO_SPACE = CMSG_SPACE(sizeof(in_pktinfo));
 
-/// Whether a received message's IP_PKTINFO names `address` as its destination; false without one.
-[[nodiscard]] auto destined_for(msghdr& header, ip::IPv4Address const& address) noexcept -> bool;
+/// Whether a received message's IP_PKTINFO names `address` as its destination and, unless
+/// `interface_index` is 0, `interface_index` as the interface it arrived on; false without one.
+[[nodiscard]] auto destined_for(msghdr& header, ip::IPv4Address const& address, unsigned int interface_index = 0) noexcept -> bool;
+
+/// A UDP socket bound to `local` with IP_PKTINFO on (SO_REUSEADDR when `shared`). A group is joined
+/// on `interface` with IP_MULTICAST_ALL off, so only this socket's joins, on their interfaces, reach it.
+[[nodiscard]] auto open_receive_socket(InterfaceInfo const& interface, Endpoint const& local, bool shared)
+    -> StatusValue<net::FileDescriptor>;
 
 /// An RTCP port on a kernel UDP socket: bound to the group (joined, sent to with `options.ttl` and
 /// loopback) or to RtcpOptions::local (by default `interface`'s address), marked with RtcpOptions::dscp.
