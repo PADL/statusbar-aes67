@@ -34,6 +34,8 @@ auto Aes67ErrorCategory::message(int const ev) const -> std::string
             return "the sender of a unicast stream is not known for RTCP";
         case Aes67Error::not_configured:
             return "no stream configured";
+        case Aes67Error::not_sender_clocked:
+            return "stream has no sender (asynchronous) media clock";
     }
     return "unknown aes67 error";
 }

@@ -6,6 +6,7 @@
 #include "statusbar/aes67/aes67_error.hpp"
 #include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/mediaclock/mediaclock_ptp_clock.hpp"
+#include "statusbar/mediaclock/mediaclock_timebase.hpp"
 #include "statusbar/rtp/rtcp_ipmx.hpp"
 #include "statusbar/rtp/rtcp_packet.hpp"
 #include "statusbar/rtp/rtcp_time.hpp"
@@ -19,8 +20,10 @@
 #include <deque>
 #include <memory>
 #include <print>
+#include <span>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace statusbar;
@@ -180,6 +183,24 @@ auto make_sr(uint32_t const ssrc, uint64_t const ptp_ns) -> std::vector<uint8_t>
     std::array<uint8_t, 128> out{};
     rtp::RtcpWriter writer{out};
     writer.sender_report(ssrc, info).sdes(ssrc, "talker@10.0.0.1");
+    return {writer.bytes().begin(), writer.bytes().end()};
+}
+
+/// An SR in the IPMX form (its Info Block says the time field is PTP time) pairing `rtp_timestamp`
+/// with `ptp_ns`.
+auto make_ipmx_sr(uint32_t const ssrc, uint64_t const ptp_ns, uint32_t const rtp_timestamp) -> std::vector<uint8_t>
+{
+    auto const truncated = rtp::ptp_truncated_from_ns(ptp_ns);
+    rtp::SenderInfo info{};
+    info.ntp_msw = truncated.seconds;
+    info.ntp_lsw = truncated.nanoseconds;
+    info.rtp_timestamp = rtp_timestamp;
+    rtp::IpmxInfoBlock const block{.version = 1, .ts_refclk = "ptp=IEEE1588-2008:traceable", .mediaclk = "sender"};
+    std::vector<uint8_t> extension(rtp::ipmx_info_block_size(block));
+    (void)rtp::serialize_ipmx_info_block(block, extension);
+    std::array<uint8_t, 256> out{};
+    rtp::RtcpWriter writer{out};
+    writer.sender_report(ssrc, info, {}, extension).sdes(ssrc, "talker@10.0.0.1");
     return {writer.bytes().begin(), writer.bytes().end()};
 }
 
@@ -419,6 +440,157 @@ TEST(aes67_rtcp, a_receiver_reports_loss_jitter_and_the_last_sr)
     session->tick(T0 + (6 * MS));
     EXPECT_EQ(session->stats().bye_received, uint64_t{1});
     EXPECT_TRUE(session->stats().remote_bye);
+}
+
+TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)
+{
+    // A domain 100 ppm fast, 12.345 us ahead of PTP at T0.
+    mediaclock::Timebase const domain{
+        .reference_ns = static_cast<int64_t>(T0),
+        .domain_ns = static_cast<int64_t>(T0) + 12'345,
+        .rate_offset = 100e-6,
+        .running = true};
+    itc::SeqlockValue<mediaclock::Timebase> timebase{domain};
+    auto const clock = *mediaclock::PtpMediaClock::make(48000);
+    auto domain_index = [&](uint64_t const t) {
+        return clock.index_at(static_cast<uint64_t>(domain.to_domain(static_cast<int64_t>(t))));
+    };
+
+    SenderRig rig;
+    rig.sender.set_sender_clock(true);
+    rig.session->set_timebase(&timebase);
+    for (uint64_t t = T0; t <= T0 + (10 * MS); t += MS) {
+        rig.sender.tick(domain_index(t));
+        rig.session->tick(t);
+    }
+    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{1});
+    auto const sr = rtp::parse_rtcp(rig.transport.rtcp_out[0])->sr;
+    auto const at = rtp::ns_from_ptp_truncated({.seconds = sr->info.ntp_msw.get(), .nanoseconds = sr->info.ntp_lsw.get()}, T0);
+    uint64_t const index = domain_index(T0 + (10 * MS));  // the latest at or before the report
+    EXPECT_EQ(sr->info.rtp_timestamp.get(), static_cast<uint32_t>(index));
+    // The time field is the PTP time of that index, within the timebase's nanosecond.
+    int64_t const error = domain.to_domain(static_cast<int64_t>(*at)) - static_cast<int64_t>(clock.time_of(index));
+    EXPECT_TRUE(error >= -1 && error <= 1);
+    EXPECT_TRUE(*at <= T0 + (10 * MS));
+    // So a receiver in the domain takes offset 0 from it.
+    SenderReportTime const report{.rtp_timestamp = sr->info.rtp_timestamp.get(), .ptp_ns = *at};
+    EXPECT_TRUE(sender_clock_offset(report, domain, 48000) == std::optional<uint32_t>{0});
+
+    auto const block = rtp::parse_ipmx_info_block(sr->extension);
+    EXPECT_EQ(block->mediaclk, std::string_view{"sender"});
+    EXPECT_EQ(block->ts_refclk, std::string_view{"ptp=IEEE1588-2008:EC-46-70-FF-FE-10-FF-B0:0"});
+    EXPECT_EQ(block->pcm->sampling_rate, uint32_t{48000});
+    EXPECT_EQ(block->pcm->measured_sample_rate, uint32_t{48005});  // 48004.8
+    EXPECT_EQ(block->version, rig.sender.info_block_version());
+
+    // The measured rate moving is a new Info Block version; a domain not running sends no SR.
+    timebase.store(mediaclock::Timebase{.reference_ns = static_cast<int64_t>(T0), .domain_ns = domain.domain_ns, .running = true});
+    rig.session->tick(T0 + (20 * MS));
+    auto const moved = rtp::parse_ipmx_info_block(rtp::parse_rtcp(rig.transport.rtcp_out.at(1))->sr->extension);
+    EXPECT_EQ(moved->pcm->measured_sample_rate, uint32_t{48000});
+    EXPECT_EQ(moved->version, static_cast<uint8_t>(block->version + 1));
+    timebase.store(mediaclock::Timebase{});
+    rig.session->tick(T0 + (30 * MS));
+    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+}
+
+TEST(aes67_rtcp, an_identity_timebase_leaves_the_sender_report_unchanged)
+{
+    itc::SeqlockValue<mediaclock::Timebase> timebase{mediaclock::Timebase{.running = true}};
+    SenderRig rig;
+    auto mapped = std::move(*RtcpSession::open_sender(rig.sender, rig.transport, options("bridge@10.0.0.2")));
+    mapped->set_timebase(&timebase);
+    for (uint64_t t = T0; t <= T0 + (10 * MS); t += MS) {
+        rig.sender.tick(index_at(t));
+        rig.session->tick(t);
+        mapped->tick(t);
+    }
+    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+    EXPECT_TRUE(rig.transport.rtcp_out.at(0) == rig.transport.rtcp_out.at(1));
+}
+
+TEST(aes67_rtcp, a_foreign_domain_input_waits_for_a_sender_report)
+{
+    FakeTransport transport;
+    std::vector<std::pair<uint64_t, uint32_t>> placed;
+    Receiver receiver{
+        STEREO_L24,
+        [&](uint64_t const first, uint32_t const frames, std::span<uint8_t const>) { placed.emplace_back(first, frames); },
+        transport};
+    receiver.set_sender_clock(true);
+    auto described = stream_session(GROUP);
+    described.media[0].media_clock = sdp::MediaClock::sender();
+    EXPECT_TRUE(receiver.configure(described).has_value());
+
+    std::vector<SenderReportTime> reports;
+    auto opts = options("bridge@10.0.0.2", 5 * MS);
+    opts.on_sender_report = [&](SenderReportTime const& report) { reports.push_back(report); };
+    auto session = std::move(*RtcpSession::open_receiver(receiver, transport, std::move(opts)));
+
+    // The stream's clock: a domain 100 ppm slow, its RTP timestamps the domain index plus 0x12345678.
+    mediaclock::Timebase const domain{
+        .reference_ns = static_cast<int64_t>(T0), .domain_ns = static_cast<int64_t>(T0), .rate_offset = -100e-6, .running = true};
+    auto const clock = *mediaclock::PtpMediaClock::make(48000);
+    auto domain_index = [&](uint64_t const t) {
+        return clock.index_at(static_cast<uint64_t>(domain.to_domain(static_cast<int64_t>(t))));
+    };
+    uint32_t const offset = 0x1234'5678;
+    auto stream_packet = [&](uint16_t const seq, uint64_t const index) {
+        auto bytes = rtp_packet(seq, index);
+        rtp::RtpHeader header{};
+        header.init(96, seq, static_cast<uint32_t>(index) + offset, 0x5EED);
+        (void)store_unchecked(std::span{bytes}, header);
+        return bytes;
+    };
+
+    // Before any sender report nothing is placed.
+    uint64_t const first = domain_index(T0);
+    transport.rtp_in.push_back(stream_packet(0, first));
+    receiver.drain(first + 48);
+    EXPECT_TRUE(placed.empty());
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{1});
+    EXPECT_TRUE(receiver.state() == State::ready);
+    EXPECT_FALSE(receiver.offset().has_value());
+    EXPECT_EQ(receiver.receive_state().ssrc, uint32_t{0x5EED});  // learnt, so only its reports count
+
+    // An SR not in the IPMX form names no PTP time: still waiting.
+    session->tick(T0);
+    transport.rtcp_in.push_back(make_sr(0x5EED, T0 + MS));
+    session->tick(T0 + MS);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{1});
+    EXPECT_TRUE(reports.empty());
+    EXPECT_FALSE(session->stats().remote_sr.has_value());
+
+    // The first IPMX SR, a third of a sample off the sample grid, gives the offset.
+    uint64_t const sr_ptp = T0 + (2 * MS) + 7'000;
+    uint32_t const sr_rtp = static_cast<uint32_t>(domain_index(sr_ptp)) + offset;
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, sr_ptp, sr_rtp));
+    session->tick(T0 + (2 * MS) + 300'000);
+    EXPECT_EQ(reports.size(), size_t{1});
+    EXPECT_TRUE(
+        reports.at(0) == (SenderReportTime{.rtp_timestamp = sr_rtp, .ptp_ns = sr_ptp, .arrival_ns = T0 + (2 * MS) + 300'000}));
+    EXPECT_TRUE(session->stats().remote_sr == reports.at(0));
+    auto const taken = sender_clock_offset(reports.at(0), domain, 48000);
+    EXPECT_TRUE(taken == std::optional<uint32_t>{offset});
+    receiver.set_offset(*taken);
+    EXPECT_TRUE(receiver.offset() == std::optional<uint32_t>{offset});
+
+    // Then packets are placed at the domain's index.
+    uint64_t const next = first + (3 * 48);
+    transport.rtp_in.push_back(stream_packet(3, next));
+    receiver.drain(next + 48);
+    EXPECT_EQ(placed.size(), size_t{1});
+    EXPECT_TRUE(placed.at(0) == (std::pair<uint64_t, uint32_t>{next, 48}));
+    EXPECT_TRUE(receiver.state() == State::running);
+
+    // A new source after a second's silence has a timestamp base of its own: it waits again.
+    uint64_t const later = next + 48'000;
+    transport.rtp_in.push_back(rtp_packet(900, later, 0xBEEF));
+    transport.rtp_in.push_back(rtp_packet(901, later + 48, 0xBEEF));
+    receiver.drain(later + 96);
+    EXPECT_FALSE(receiver.offset().has_value());
+    EXPECT_EQ(placed.size(), size_t{1});
+    EXPECT_EQ(receiver.receive_state().ssrc, uint32_t{0xBEEF});
 }
 
 TEST(aes67_rtcp, receiver_jitter_follows_rfc_3550_appendix_a8)

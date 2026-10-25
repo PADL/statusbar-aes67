@@ -3,9 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// An AES67 sender: a FrameProvider's frames by PTP sample index, sent as RTP on the sample-index
-/// grid with `mediaclk:direct=0`, and the stream's SDP. configure(), clear(), set_grandmaster(),
-/// set_name() and session() allocate; tick() and the accessors are real-time safe.
+/// An AES67 sender: a FrameProvider's frames by sample index, sent as RTP on the sample-index grid
+/// with `mediaclk:direct=0` (or `sender`, for an index not derived from PTP), and the stream's SDP.
+/// configure(), clear(), the setters and session() allocate; tick() and the accessors are real-time safe.
 
 #include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
@@ -113,13 +113,24 @@ class Sender
 
     [[nodiscard]] auto grandmaster() const noexcept -> std::optional<Grandmaster> const& { return grandmaster_; }
 
+    /// Announce `mediaclk:sender` (true: the index tick() is given is the sender's own clock, RFC 7273
+    /// Section 5) instead of `direct=0` (false, the default); a change bumps the session and Info Block
+    /// versions. ts-refclk still names the grandmaster. Off the real-time thread.
+    void set_sender_clock(bool sender);
+    [[nodiscard]] auto sender_clock() const noexcept -> bool { return sender_clock_; }
+    /// The media clock session() and the Info Block announce.
+    [[nodiscard]] auto media_clock() const noexcept -> sdp::MediaClock
+    {
+        return sender_clock_ ? sdp::MediaClock::sender() : sdp::MediaClock::direct(0);
+    }
+
     /// The session name (s=) of session(), the constructor's until changed; a new name bumps the
     /// session version. Off the real-time thread.
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
 
-    /// Take `previous`'s read delay, grandmaster, name, SDP session id and version, DSCP, channel order
-    /// and Info Block version, so this sender's next configure() announces the same session one version on.
+    /// Take `previous`'s read delay, grandmaster, media clock, name, SDP session id and version, DSCP,
+    /// channel order and Info Block version, so this sender's next configure() announces the same session one version on.
     /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);
 
@@ -183,6 +194,7 @@ class Sender
     uint64_t session_id_{0};
     uint64_t session_version_{0};
     std::optional<Grandmaster> grandmaster_;
+    bool sender_clock_{false};
     std::atomic<uint32_t> read_delay_;
     uint32_t phase_{0};
     uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};

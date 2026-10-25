@@ -10,8 +10,11 @@
 #include "statusbar/aes67/aes67_receiver.hpp"
 #include "statusbar/aes67/aes67_sender.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
+#include "statusbar/mediaclock/mediaclock_timebase.hpp"
 #include "statusbar/rtp/rtcp_interval.hpp"
 #include "statusbar/rtp/rtcp_packet.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
 #include <array>
@@ -53,6 +56,26 @@ class Rfc3550Interval final : public RtcpCadence
     std::minstd_rand rng_;
 };
 
+/// A sender report's pair (RFC 3550 Section 6.4.1): an RTP timestamp and the PTP time it names, from
+/// an SR in the IPMX form (TR-10-1 Section 8.7), and when the SR arrived (PTP ns).
+struct SenderReportTime
+{
+    uint32_t rtp_timestamp{0};
+    uint64_t ptp_ns{0};
+    uint64_t arrival_ns{0};
+
+    auto operator==(SenderReportTime const&) const noexcept -> bool = default;
+};
+
+/// Called on the reactor with each of the stream's sender reports that carries the pair.
+using SenderReportHandler = sg14::inplace_function<void(SenderReportTime const&), 32>;
+
+/// The RTP offset of a sender-clocked stream (RFC 7273 Section 5) from one of its reports: the RTP
+/// timestamp less the index at the PTP time named, mapped through `timebase` and rounded to the
+/// nearest sample. nullopt for a rate PtpMediaClock does not support or a time before the epoch.
+[[nodiscard]] auto sender_clock_offset(
+    SenderReportTime const& report, mediaclock::Timebase const& timebase, uint32_t sample_rate) noexcept -> std::optional<uint32_t>;
+
 /// What a session has seen and done. "Remote" is the other end: for a sender, the latest report
 /// block about its stream (any receiver's); for a receiver, the stream's sender.
 struct RtcpStats
@@ -72,6 +95,7 @@ struct RtcpStats
     uint32_t remote_ssrc{0};
     std::string remote_cname;
     bool remote_bye{false};
+    std::optional<SenderReportTime> remote_sr;  ///< receiver: the stream's latest IPMX-form SR
 };
 
 /// What a session is opened with.
@@ -83,6 +107,7 @@ struct RtcpSessionOptions
     /// A sender's is its stream's.
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};
     std::unique_ptr<RtcpCadence> cadence;  ///< null: Rfc3550Interval with a random seed
+    SenderReportHandler on_sender_report;  ///< receiver: each new RtcpStats::remote_sr; may be empty
 };
 
 class RtcpSession
@@ -128,6 +153,10 @@ class RtcpSession
     void on_ready(uint64_t now_ns) noexcept;
     /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1.
     void tick(uint64_t now_ns) noexcept;
+    /// A sender's clock domain (null, the default: PTP time): each SR reads it, pairs the domain's
+    /// index with its PTP time through it, and reports the measured rate; none while not running.
+    /// `timebase` must outlive the session.
+    void set_timebase(itc::SeqlockValue<mediaclock::Timebase> const* const timebase) noexcept { timebase_ = timebase; }
     /// When the next report is due (PTP ns); 0 before the first tick.
     [[nodiscard]] auto next_report_ns() const noexcept -> uint64_t { return next_report_ns_; }
 
@@ -160,10 +189,12 @@ class RtcpSession
     auto write_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept -> Report;
     void write_receiver_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept;
     void handle(std::span<uint8_t const> datagram, uint64_t now_ns) noexcept;
-    /// The Info Block for the sender's current inputs (rebuilt when its version changes).
-    void refresh_info_block();
+    /// The Info Block for the sender's current inputs (rebuilt when its version or the rate changes).
+    void refresh_info_block(uint32_t measured_sample_rate);
     void handle_as_sender(rtp::RtcpCompound const& compound, uint32_t reporter, uint64_t now_ns) noexcept;
     void handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t now_ns) noexcept;
+    /// The pair from the stream's SR, when it is in the IPMX form.
+    void take_sender_report(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
     void take_report_block(rtp::ReportBlock const& block, uint64_t now_ns) noexcept;
 
     Role role_;
@@ -171,6 +202,7 @@ class RtcpSession
     Receiver const* receiver_;
     std::unique_ptr<RtcpPort> port_;
     RtcpSessionOptions options_;
+    itc::SeqlockValue<mediaclock::Timebase> const* timebase_{nullptr};
     uint32_t own_ssrc_{0};  ///< a receiver's
     uint32_t sample_rate_{48000};
     uint64_t minimum_ns_{0};  ///< the cadence's Tmin, for re-arming after a PTP step
@@ -181,6 +213,8 @@ class RtcpSession
     // Sender: the Info Block bytes and the SRs sent.
     std::vector<uint8_t> info_block_;
     std::optional<uint8_t> info_block_version_;
+    uint32_t info_block_rate_{0};  ///< the measured rate it carries
+    uint8_t rate_changes_{0};      ///< added to the sender's version: measured rate changes alone
     std::array<SentReport, SR_HISTORY> sent_{};
     size_t sent_next_{0};
 

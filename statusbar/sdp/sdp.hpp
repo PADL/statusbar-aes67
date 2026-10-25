@@ -99,11 +99,33 @@ struct SourceFilter
     auto operator==(SourceFilter const&) const noexcept -> bool = default;
 };
 
+/// The kinds of `a=mediaclk:` told apart (RFC 7273 §5).
+enum class MediaClockKind : uint8_t
+{
+    direct,  ///< `direct[=<offset>]`: the reference clock itself, offset
+    sender,  ///< `sender`: the sender's own clock, not derived from the reference
+    other,   ///< any other kind (`IEEE1722=<stream id>`, ...): read, written as `sender`
+};
+
 /// `a=mediaclk:` (RFC 7273 §5): `direct[=<offset>]` is the PTP clock itself, offset by `<offset>`
 /// (0 when absent); any other kind is a clock not derived from PTP. Media level overrides session.
 struct MediaClock
 {
     std::optional<uint32_t> direct_offset;  ///< nullopt for a media clock that is not direct
+    bool other{false};                      ///< not direct: a kind other than `sender`
+
+    /// `direct=<offset>`.
+    [[nodiscard]] static constexpr auto direct(uint32_t const offset = 0) noexcept -> MediaClock
+    {
+        return MediaClock{.direct_offset = offset};
+    }
+    /// `sender`.
+    [[nodiscard]] static constexpr auto sender() noexcept -> MediaClock { return MediaClock{}; }
+
+    [[nodiscard]] constexpr auto kind() const noexcept -> MediaClockKind
+    {
+        return direct_offset ? MediaClockKind::direct : other ? MediaClockKind::other : MediaClockKind::sender;
+    }
 
     auto operator==(MediaClock const&) const noexcept -> bool = default;
 };
@@ -259,6 +281,11 @@ struct Session
     {
         return m.clock_domain ? m.clock_domain : clock_domain;
     }
+    /// The media clock in force for `m` (media level over session level), nullopt when none is given.
+    [[nodiscard]] auto effective_media_clock(Media const& m) const noexcept -> std::optional<MediaClock>
+    {
+        return m.media_clock ? m.media_clock : media_clock;
+    }
     /// The direct media clock offset in force for `m`, or nullopt when no media
     /// clock was given or the one in force (media level over session level) is
     /// not direct: the stream's timestamps are then not PTP-locked.
@@ -285,7 +312,7 @@ struct Session
 /// "ptp=<version>:traceable"), as to_string() writes it; empty when it would not be written.
 [[nodiscard]] auto ts_refclk_value(PtpReference const& clock) -> std::string;
 
-/// The text an `a=mediaclk:` line carries for `clock` ("direct=<offset>" or "sender").
+/// The text an `a=mediaclk:` line carries for `clock` ("direct=<offset>", else "sender").
 [[nodiscard]] auto media_clock_value(MediaClock const& clock) -> std::string;
 
 /// Write a session description, CRLF line endings, fields in RFC 8866 order, sanitised so the

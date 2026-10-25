@@ -29,12 +29,13 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 
 - `StreamFormat` — encoding, channels, rate and frames per packet (the ptime).
 - `FrameHandler` / `FrameProvider` — the real-time callbacks, `sg14::inplace_function`s with 64 bytes of capture; `Supply` is what a provider gave.
-- `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC.
-- `Sender` — `configure(destination | session)`, `tick(now_index)`, `session()`, read delay, packet phase, session id, grandmaster, name, `continue_from()`.
+- `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
+- `Sender` — `configure(destination | session)`, `tick(now_index)`, `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
-- `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`; `RtcpSessionOptions` (CNAME, SR interval, receiver DSCP, cadence), `RtcpStats`.
+- `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, SR interval, receiver DSCP, cadence, `on_sender_report`), `RtcpStats`.
+- `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
 - `RtcpCadence` — when the next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
@@ -73,7 +74,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
 - `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_rtcp_socket()`.
-- `statusbar/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`.
+- `statusbar/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`, `SenderReportTime`, `sender_clock_offset()`.
 - `statusbar/aes67/aes67_error.hpp` — `Aes67Error`.
 
 ## Dependencies
@@ -167,9 +168,21 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   name need ids of their own. The version starts at the wall clock's seconds (RFC 8866's
   suggestion, so it grows across restarts too) and goes up by one with each
   `configure()`, grandmaster change and rename. Ids and versions are kept to 63 bits.
-  `continue_from()` carries the id and version (and the read delay, grandmaster and name)
-  to a replacement sender, so its next `configure()` announces the same session one
-  version on.
+  `continue_from()` carries the id and version (and the read delay, grandmaster, media
+  clock and name) to a replacement sender, so its next `configure()` announces the same
+  session one version on.
+- A clock domain other than PTP: the caller ticks the sender with the domain's index
+  (`PtpMediaClock::index_at(timebase.to_domain(ptp_now))`, `mediaclock::Timebase`), which
+  advances 5 to 7 frames a tick at 48 kHz for a domain within 100s of ppm; `tick()` needs no
+  change and sends every packet once, 0, 1 or 2 a tick. `set_sender_clock(true)` makes the
+  SDP say `mediaclk:sender` (RFC 7273 §5) instead of `direct=0`, which would claim the RTP
+  timestamps are PTP time; `ts-refclk` and `clock-domain` still name the grandmaster, the
+  reference the sender reports are in. Such a stream needs its `RtcpSession` with
+  `set_timebase()`: the SR is the only statement of its clock.
+- Who takes a `mediaclk:sender` stream: RAVENNA and IPMX receivers that follow its sender
+  reports (their asynchronous case), and a `Receiver` with `set_sender_clock(true)`. Dante
+  in AES67 mode expects `direct=0` on its PTP and refuses or drifts; nothing beyond the SDP
+  telling the truth prevents it listing the announcement.
 
 ### Receiver
 
@@ -180,6 +193,15 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   rate too (`format_mismatch`). The ptime need not match: any whole number of frames is
   taken. A stream without a direct media clock is refused (`not_ptp_locked`): its
   timestamps are not PTP time.
+- `set_sender_clock(true)` before `configure()` takes only `mediaclk:sender` streams (any
+  other fails `not_sender_clocked`, `direct` included, as a direct stream would drift in a
+  foreign domain). Such a stream has no offset until `set_offset()`: `drain()` learns its
+  SSRC and sequence (so its session takes only that source's reports) but drops its
+  packets (counted) until then, and a new source clears the offset. The offset comes from the stream's first IPMX-form SR:
+  `sender_clock_offset(report, timebase, fs)` is the RTP timestamp less the domain's index
+  at the PTP time named, rounded to the nearest sample. `set_offset()` is an atomic store,
+  safe from the reactor while the real-time thread drains; checking later reports against
+  it (a stream not in the domain moves) is the caller's.
 - Packets of the stream's payload type are accepted. The first one's SSRC is learnt and
   other sources dropped until the learnt one has been silent for a second. The sequence is
   tracked with `rtp::RtpSequence`; a new source's probation packets are handed on too, and
@@ -216,9 +238,19 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   receiver synchronises from it. The pair is exact: the field is the presentation time
   of the latest sample at or before now, the RTP timestamp that sample's
   (`mediaclk:direct=0`).
+- A sender in another clock domain (`set_timebase()`, read per report): the SR pairs the
+  domain's index at now with that index's PTP time through the timebase (`from_domain()`,
+  within a nanosecond), and none is sent while the timebase is not running. A null
+  timebase, or the identity, gives the same bytes as before; the SR path costs one seqlock
+  load per report, and the sender's tick is unchanged.
+- A receiver's session takes the pair from each of the stream's SRs that carries the IPMX
+  Info Block (`RtcpStats::remote_sr`, `RtcpSessionOptions::on_sender_report`); an SR
+  without it names no PTP time (it may be RFC 3550's wall clock) and gives no pair.
 - The Info Block's strings are the SDP's (`sdp::ts_refclk_value()`,
-  `media_clock_value()`); `measuredsamplerate` is the nominal rate (the stream is PTP
-  locked); the channel order is `Sender::set_channel_order()`, by default undefined
+  `media_clock_value()` of `Sender::media_clock()`); `measuredsamplerate` is the
+  nominal rate in PTP time, `round(fs * (1 + r))` in a domain of rate offset r, kept
+  until the rate moves a whole hertz from it, a change of it alone one version on (the
+  count is the session's; a replacement sender has a new SSRC); the channel order is `Sender::set_channel_order()`, by default undefined
   groups of at most 64 (ST 2110-30's U01–U64), `SMPTE2110.(U02)` or
   `SMPTE2110.(U64,U64,U08)`; the 8-bit channel count is clamped at 255; its version is `Sender::info_block_version()`, one on with every
   `configure()`, grandmaster and channel-order change. TR-10-3 allows sample sizes of

@@ -22,7 +22,7 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `Media` — one `m=audio` section: port, the primary format, up to `MAX_ALTERNATIVES` further offered formats, ptime and media-level attributes; `prefer(encoding)` promotes an offered format.
 - `PayloadFormat` — one rtpmap: payload type, `Encoding`, rate, channels.
 - `Encoding` — `l16`, `l24`, `l32`, `am824`; `bytes_per_sample()`, `encoding_name()`.
-- `Connection`, `PtpReference`, `MediaClock`, `SourceFilter`, `RtcpAttribute`, `Direction` — the attributes above.
+- `Connection`, `PtpReference`, `MediaClock` (`MediaClockKind`), `SourceFilter`, `RtcpAttribute`, `Direction` — the attributes above.
 - `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings.
 - `SdpError` — `enum class`, category `statusbar.sdp`.
 
@@ -79,7 +79,8 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   allows several reference clocks; the PTP one is kept.
 - `mediaclk` (RFC 7273 §5): any kind other than `direct` (`sender`, `IEEE1722`) is a
   clock that cannot be derived from PTP, and `effective_media_clock_offset()` is then
-  `nullopt`. A media-level clock of either kind overrides a session-level one; a level
+  `nullopt`. `MediaClock::kind()` tells `direct`, `sender` and `other` apart
+  (`effective_media_clock()` gives the clock in force); `other` is written as `sender`. A media-level clock of either kind overrides a session-level one; a level
   naming both keeps the direct one.
 - `clock-domain:PTPv2 <n>` duplicates `PtpReference::domain`; RAVENNA and Dante write it
   beside `ts-refclk` and some receivers look for it, so writers set both. Other clock

@@ -129,6 +129,7 @@ void Sender::continue_from(Sender const& previous)
 {
     read_delay_.store(previous.read_delay(), std::memory_order_relaxed);
     grandmaster_ = previous.grandmaster_;
+    sender_clock_ = previous.sender_clock_;
     name_ = previous.name_;
     session_id_ = previous.session_id_;
     session_version_ = previous.session_version_;
@@ -163,6 +164,16 @@ void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
     }
     grandmaster_ = grandmaster;
     bump_session_version();  // the SDP changed: a receiver keying on o= sees a new version
+    ++info_block_version_;
+}
+
+void Sender::set_sender_clock(bool const sender)
+{
+    if (sender == sender_clock_) {
+        return;
+    }
+    sender_clock_ = sender;
+    bump_session_version();
     ++info_block_version_;
 }
 
@@ -315,7 +326,7 @@ auto Sender::session() const -> std::optional<sdp::Session>
         media.clock = sdp::PtpReference{.grandmaster = grandmaster_->identity, .domain = grandmaster_->domain};
         media.clock_domain = grandmaster_->domain;
     }
-    media.media_clock = sdp::MediaClock{.direct_offset = 0};
+    media.media_clock = media_clock();
     if (multicast) {
         media.source_filter = sdp::SourceFilter{.destination = destination_.address, .source = origin};
     }

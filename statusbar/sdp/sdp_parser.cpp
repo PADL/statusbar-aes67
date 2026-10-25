@@ -148,12 +148,16 @@ auto parse_ptp_reference(std::string_view rest) -> StatusValue<PtpReference>
 }
 
 /// `direct[=<offset>][ <parameters>]`: a direct clock with its offset (0 if
-/// absent); any other kind is a media clock that is not direct.
+/// absent); `sender`; any other kind is a media clock that is neither.
 auto parse_media_clock(std::string_view rest) noexcept -> StatusValue<MediaClock>
 {
     auto clock = take(rest, ' ');
-    if (take(clock, '=') != "direct") {
-        return MediaClock{};
+    auto const kind = take(clock, '=');
+    if (kind == "sender") {
+        return MediaClock::sender();
+    }
+    if (kind != "direct") {
+        return MediaClock{.other = true};
     }
     if (clock.empty()) {
         return MediaClock{.direct_offset = 0};

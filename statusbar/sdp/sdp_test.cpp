@@ -533,6 +533,34 @@ TEST(sdp, rtcp_mux_is_read_and_bandwidth_lines_are_ignored)
     EXPECT_TRUE(to_string(*session).find("rtcp-mux") == std::string::npos);
 }
 
+TEST(sdp, mediaclk_sender_round_trips)
+{
+    // RFC 7273 section 5: an asynchronous sender keeps the grandmaster's ts-refclk
+    std::string text{DANTE};
+    text.replace(text.find("a=mediaclk:direct=1266592257"), 28, "a=mediaclk:sender");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const& m = session->media.at(0);
+    EXPECT_TRUE(m.media_clock == std::optional{MediaClock::sender()});
+    EXPECT_TRUE(session->effective_media_clock(m)->kind() == MediaClockKind::sender);
+    EXPECT_FALSE(session->effective_media_clock_offset(m).has_value());
+    EXPECT_TRUE(session->effective_clock(m)->grandmaster.has_value());
+    std::string const written = to_string(*session);
+    EXPECT_TRUE(written.find("a=mediaclk:sender\r\n") != std::string::npos);
+    EXPECT_TRUE(written.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n") != std::string::npos);
+    auto const again = parse(written);
+    EXPECT_TRUE(again.has_value());
+    EXPECT_TRUE(again->media.at(0).media_clock == m.media_clock);
+
+    // Another kind is neither direct nor sender.
+    text.replace(text.find("a=mediaclk:sender"), 17, "a=mediaclk:IEEE1722=00-1B-21-FF-FE-00-00-01");
+    auto const stream = parse(text);
+    EXPECT_TRUE(stream->effective_media_clock(stream->media.at(0))->kind() == MediaClockKind::other);
+    EXPECT_TRUE(session->effective_media_clock(session->media.at(0)) != stream->effective_media_clock(stream->media.at(0)));
+    EXPECT_TRUE(MediaClock::direct(7).kind() == MediaClockKind::direct);
+    EXPECT_FALSE(parse(LIB_AES67)->effective_media_clock(parse(LIB_AES67)->media.at(0)) == std::optional{MediaClock::sender()});
+}
+
 TEST(sdp, the_clock_values_are_the_attribute_text)
 {
     PtpReference const clock{.grandmaster = *ieee::eui64_from_string("EC-46-70-FF-FE-10-FF-B0"), .domain = 127};

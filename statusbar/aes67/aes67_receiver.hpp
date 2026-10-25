@@ -3,9 +3,10 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// An AES67 receiver: one RTP stream described by SDP, with an RFC 7273 direct media clock, its
-/// payloads handed to a FrameHandler by PTP sample index. configure() and clear() make and close
-/// sockets, off the real-time thread; drain() and the accessors are real-time safe.
+/// An AES67 receiver: one RTP stream described by SDP, with an RFC 7273 direct media clock (or a
+/// sender clock whose offset its sender reports give), its payloads handed to a FrameHandler by sample
+/// index. configure() and clear() make and close sockets, off the real-time thread; drain() and the
+/// accessors are real-time safe.
 
 #include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
@@ -14,6 +15,7 @@
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <atomic>
 #include <bitset>
 #include <cstdint>
 #include <memory>
@@ -32,8 +34,24 @@ class Receiver
 
     Receiver(StreamFormat const& format, FrameHandler handler, Transport& transport) noexcept;
 
-    /// Receive the stream `session.media[media_index]`, replacing any before.
+    /// Take only `mediaclk:sender` streams (true; others fail not_sender_clocked) instead of only
+    /// `direct` ones (false, the default; others fail not_ptp_locked). Call before configure().
+    void set_sender_clock(bool const sender) noexcept { sender_clock_ = sender; }
+    [[nodiscard]] auto sender_clock() const noexcept -> bool { return sender_clock_; }
+
+    /// Receive the stream `session.media[media_index]`, replacing any before. A direct stream's offset
+    /// is the SDP's; a sender-clocked stream has none until set_offset().
     [[nodiscard]] auto configure(sdp::Session const& session, size_t media_index = 0) -> Status;
+    /// The RTP offset (timestamp minus sample index, mod 2^32) drain() places packets by, replacing
+    /// any before; a sender-clocked stream's packets are learnt but dropped until it is set, and a new
+    /// source clears it. Any thread.
+    void set_offset(uint32_t const offset) noexcept { offset_.store(OFFSET_SET | offset, std::memory_order_release); }
+    /// The offset in force, or nullopt while a sender-clocked stream waits for set_offset(). Any thread.
+    [[nodiscard]] auto offset() const noexcept -> std::optional<uint32_t>
+    {
+        uint64_t const value = offset_.load(std::memory_order_acquire);
+        return (value & OFFSET_SET) != 0 ? std::optional{static_cast<uint32_t>(value)} : std::nullopt;
+    }
     /// Stop receiving: leave the group, forget the stream.
     void clear() noexcept;
 
@@ -61,7 +79,10 @@ class Receiver
     [[nodiscard]] auto receive_state() const noexcept -> ReceiveState { return receive_state_.load(); }
 
   private:
-    void accept(Datagram const& datagram, uint64_t now_index) noexcept;
+    static constexpr uint64_t OFFSET_SET = uint64_t{1} << 32U;
+
+    /// `offset` is offset_ as loaded: a packet is placed only when OFFSET_SET is in it.
+    void accept(Datagram const& datagram, uint64_t now_index, uint64_t offset) noexcept;
     /// Account a validated packet's place in the sequence; false to drop it.
     auto place(uint16_t sequence, uint32_t frames) noexcept -> bool;
     void reset_stream() noexcept;
@@ -74,7 +95,8 @@ class Receiver
     std::unique_ptr<ReceivePort> port_;
 
     uint8_t payload_type_{0};
-    uint32_t offset_{0};
+    std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet
+    bool sender_clock_{false};
     std::optional<ip::IPv4Address> source_filter_;
     std::optional<RtcpOptions> rtcp_;  ///< from configure(), without the DSCP
     std::error_code rtcp_error_;       ///< why there is none
@@ -97,7 +119,8 @@ class Receiver
     uint64_t polls_{0};
     uint64_t skipped_polls_{0};
     uint64_t newest_end_{0};     ///< this drain: the newest packet's end index
-    uint32_t newest_frames_{0};  ///< and its frames (0: none accepted)
+    uint32_t newest_frames_{0};  ///< and its frames (0: none placed)
+    bool heard_{false};          ///< this drain: a packet of the learnt source was accepted
 
     // RFC 3550 Appendix A.8 interarrival jitter, and what drain() publishes.
     uint32_t jitter_x16_{0};

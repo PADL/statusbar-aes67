@@ -27,6 +27,7 @@ enum class Aes67Error
     rtcp_multiplexed,         ///< the SDP asks for RTCP on the RTP port (a=rtcp-mux), which AES67 never does
     no_rtcp_peer,             ///< a unicast stream whose sender's address the SDP does not give
     not_configured,           ///< the receiver or sender has no stream
+    not_sender_clocked,       ///< no `mediaclk:sender`: a receiver set to take the sender's clock refuses it
 };
 
 class Aes67ErrorCategory : public std::error_category

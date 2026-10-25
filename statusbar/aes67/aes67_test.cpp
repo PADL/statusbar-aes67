@@ -6,6 +6,8 @@
 #include "statusbar/aes67/aes67_sender.hpp"
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_udp_transport.hpp"
+#include "statusbar/mediaclock/mediaclock_ptp_clock.hpp"
+#include "statusbar/mediaclock/mediaclock_timebase.hpp"
 #include "statusbar/rtp/rtp_header.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -760,6 +762,122 @@ TEST(aes67_sender, reports_the_transports_send_error)
     EXPECT_FALSE(sender.error());
     sender.tick(base + 95);
     EXPECT_TRUE(sender.state() == State::running);
+}
+
+TEST(aes67_sender, a_sender_on_a_drifting_index_sends_every_packet_once)
+{
+    // A domain 100 ppm fast or slow of PTP: ticks on the 125 us PTP grid see its index advance by
+    // 5, 6 or 7 frames, and a 125 us stream sends 0, 1 or 2 packets a tick.
+    auto const clock = *mediaclock::PtpMediaClock::make(48000);
+    uint64_t const t0 = 1'790'000'000ULL * 1'000'000'000ULL;
+    for (uint32_t const fpp : {6U, 48U}) {
+        for (double const rate_offset : {100e-6, -100e-6}) {
+            LoopTransport transport;
+            PatternSource source{6};
+            auto format = STEREO_L24;
+            format.frames_per_packet = fpp;
+            Sender sender{format, source.provider(), transport, "Drift"};
+            EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+            mediaclock::Timebase const timebase{
+                .reference_ns = static_cast<int64_t>(t0),
+                .domain_ns = static_cast<int64_t>(t0),
+                .rate_offset = rate_offset,
+                .running = true};
+            std::array<size_t, 9> advances{};
+            uint64_t previous = 0;
+            for (uint64_t tick = 0; tick < 24'000; ++tick) {  // 3 s
+                auto const t = static_cast<int64_t>(t0 + (tick * 125'000));
+                uint64_t const index = clock.index_at(static_cast<uint64_t>(timebase.to_domain(t)));
+                if (tick > 0) {
+                    ++advances[std::min<uint64_t>(index - previous, advances.size() - 1)];
+                }
+                previous = index;
+                sender.tick(index);
+            }
+            EXPECT_EQ(advances[6] + advances[rate_offset > 0 ? 7 : 5], size_t{23'999});
+            EXPECT_TRUE(advances[rate_offset > 0 ? 7 : 5] > 0);
+
+            // Every packet once, in order: timestamps one packet apart, sequence numbers one apart.
+            EXPECT_TRUE(transport.queue.size() > 1);
+            auto const first = rtp::parse_rtp(transport.queue.front().bytes);
+            uint32_t const first_ts = first->header.timestamp.get();
+            uint16_t const first_seq = first->header.sequence.get();
+            bool in_order = true;
+            for (size_t i = 0; i < transport.queue.size(); ++i) {
+                auto const packet = rtp::parse_rtp(transport.queue[i].bytes);
+                uint32_t const ts = packet->header.timestamp.get();
+                in_order = in_order && ts == first_ts + static_cast<uint32_t>(i * fpp) &&
+                    packet->header.sequence.get() == static_cast<uint16_t>(first_seq + i) && packet->payload[0] == pattern(ts, 0);
+            }
+            EXPECT_TRUE(in_order);
+            EXPECT_EQ(sender.counters().packets, uint64_t{transport.queue.size()});
+            EXPECT_EQ(sender.counters().lost, uint64_t{0});
+            EXPECT_EQ(sender.counters().dropped, uint64_t{0});
+        }
+    }
+}
+
+TEST(aes67_sender, a_foreign_domain_output_announces_mediaclk_sender)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Foreign"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    sender.set_grandmaster(GRANDMASTER);
+    auto const before = *sender.session();
+    uint8_t const info_version = sender.info_block_version();
+    EXPECT_FALSE(sender.sender_clock());
+
+    sender.set_sender_clock(true);
+    EXPECT_TRUE(sender.sender_clock());
+    EXPECT_TRUE(sender.media_clock().kind() == sdp::MediaClockKind::sender);
+    auto const session = *sender.session();
+    EXPECT_EQ(session.session_version, before.session_version + 1);
+    EXPECT_EQ(sender.info_block_version(), static_cast<uint8_t>(info_version + 1));
+    std::string const text = sdp::to_string(session);
+    EXPECT_TRUE(text.find("a=mediaclk:sender\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("direct") == std::string::npos);
+    // The reference the sender reports are in stays the grandmaster (RFC 7273 Section 4.8).
+    EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=clock-domain:PTPv2 0\r\n") != std::string::npos);
+    sender.set_sender_clock(true);
+    EXPECT_EQ(sender.session()->session_version, session.session_version);
+
+    // A direct receiver refuses it; one taking the sender's clock takes it and waits for an offset.
+    auto const parsed = sdp::parse(text);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed->effective_media_clock(parsed->media[0])->kind() == sdp::MediaClockKind::sender);
+    Receiver direct{STEREO_L24, {}, transport};
+    EXPECT_TRUE(direct.configure(*parsed).error() == Aes67Error::not_ptp_locked);
+    Receiver foreign{STEREO_L24, {}, transport};
+    foreign.set_sender_clock(true);
+    EXPECT_TRUE(foreign.configure(*parsed).has_value());
+    EXPECT_FALSE(foreign.offset().has_value());
+
+    // A replacement sender keeps announcing it.
+    Sender replacement{STEREO_L24, source.provider(), transport, "Foreign"};
+    replacement.continue_from(sender);
+    EXPECT_TRUE(replacement.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    EXPECT_TRUE(sdp::to_string(*replacement.session()).find("a=mediaclk:sender\r\n") != std::string::npos);
+}
+
+TEST(aes67_receiver, a_receiver_taking_the_senders_clock_refuses_a_direct_stream)
+{
+    LoopTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    receiver.set_sender_clock(true);
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)).error() == Aes67Error::not_sender_clocked);
+    EXPECT_TRUE(receiver.configure(stream_session(group, std::nullopt)).error() == Aes67Error::not_sender_clocked);
+    auto other = stream_session(group, std::nullopt);
+    other.media[0].media_clock = sdp::MediaClock{.other = true};  // e.g. IEEE1722=<stream id>
+    EXPECT_TRUE(receiver.configure(other).error() == Aes67Error::not_sender_clocked);
+    EXPECT_FALSE(receiver.configured());
+
+    // A direct receiver's offset is the SDP's.
+    Receiver direct{STEREO_L24, {}, transport};
+    EXPECT_TRUE(direct.configure(stream_session(group, 0x1000)).has_value());
+    EXPECT_TRUE(direct.offset() == std::optional<uint32_t>{0x1000});
 }
 
 TEST(aes67_receiver, refuses_streams_it_cannot_take)

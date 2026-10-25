@@ -38,8 +38,12 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     if (!connection) {
         return failure(Aes67Error::no_connection);
     }
-    auto const offset = session.effective_media_clock_offset(media);
-    if (!offset) {
+    auto const clock = session.effective_media_clock(media);
+    auto const kind = clock ? clock->kind() : sdp::MediaClockKind::other;
+    if (sender_clock_ && kind != sdp::MediaClockKind::sender) {
+        return failure(Aes67Error::not_sender_clocked);
+    }
+    if (!sender_clock_ && kind != sdp::MediaClockKind::direct) {
         return failure(Aes67Error::not_ptp_locked);
     }
     if (!mediaclock::PtpMediaClock::supports(media.sample_rate)) {
@@ -61,7 +65,7 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     }
     port_ = std::move(*port);
     payload_type_ = media.payload_type;
-    offset_ = *offset;
+    offset_.store(sender_clock_ ? 0 : OFFSET_SET | *clock->direct_offset, std::memory_order_release);
     auto const filter = session.effective_source_filter(media);
     if (filter && (!filter->destination || *filter->destination == connection->address)) {
         source_filter_ = filter->source;
@@ -125,6 +129,7 @@ void Receiver::clear() noexcept
     source_filter_.reset();
     rtcp_.reset();
     reset_stream();
+    offset_.store(0, std::memory_order_release);
     state_ = State::idle;
 }
 
@@ -153,20 +158,25 @@ void Receiver::drain(uint64_t const now_index) noexcept
     }
     newest_end_ = 0;
     newest_frames_ = 0;
+    heard_ = false;
+    uint64_t offset = offset_.load(std::memory_order_acquire);
     std::array<Datagram, BATCH> batch{};
     bool backlog = true;  // every batch came back full: more may be waiting
     for (size_t round = 0; round < MAX_BATCHES; ++round) {
         size_t const n = port_->receive(batch);
         ++polls_;
         for (size_t i = 0; i < n; ++i) {
-            accept(batch[i], now_index);
+            if (sender_clock_) {
+                offset = offset_.load(std::memory_order_acquire);  // set, or cleared by a new source
+            }
+            accept(batch[i], now_index, offset);
         }
         if (n < batch.size()) {
             backlog = false;
             break;
         }
     }
-    if (newest_frames_ != 0 && ssrc_) {
+    if (heard_ && ssrc_) {
         receive_state_.store({
             .ssrc = *ssrc_,
             .valid = true,
@@ -192,7 +202,7 @@ void Receiver::drain(uint64_t const now_index) noexcept
     // (Nothing came: the gate stays open, every tick until a packet does.)
 }
 
-void Receiver::accept(Datagram const& datagram, uint64_t const now_index) noexcept
+void Receiver::accept(Datagram const& datagram, uint64_t const now_index, uint64_t const offset) noexcept
 {
     auto const packet = rtp::parse_rtp(datagram.payload);
     uint32_t const frame_bytes = format_.bytes_per_frame();
@@ -211,6 +221,11 @@ void Receiver::accept(Datagram const& datagram, uint64_t const now_index) noexce
             return;
         }
         reset_stream();
+        if (sender_clock_) {
+            offset_.store(0, std::memory_order_release);  // the new source's reports give its own
+            ++counters_.dropped;
+            return;
+        }
     }
     if (!ssrc_) {
         ssrc_ = ssrc;
@@ -247,8 +262,13 @@ void Receiver::accept(Datagram const& datagram, uint64_t const now_index) noexce
         have_transit_ = true;
     }
     last_rtp_ts_ = timestamp;
+    heard_ = true;
+    if ((offset & OFFSET_SET) == 0) {
+        ++counters_.dropped;  // learnt, but not placed before the sender's first report
+        return;
+    }
 
-    uint64_t const index = mediaclock::PtpMediaClock::index_of_rtp(timestamp, offset_, now_index);
+    uint64_t const index = mediaclock::PtpMediaClock::index_of_rtp(timestamp, static_cast<uint32_t>(offset), now_index);
     if (index + frames > newest_end_) {
         newest_end_ = index + frames;
         newest_frames_ = frames;
