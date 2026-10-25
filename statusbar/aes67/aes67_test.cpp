@@ -1295,7 +1295,8 @@ TEST(aes67_udp, a_datagram_is_kept_only_for_its_address_and_interface)
     cmsg->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
     in_pktinfo info{};
     info.ipi_ifindex = 3;
-    info.ipi_addr.s_addr = htonl(IPv4Address{239, 69, 1, 2}.to_uint32());
+    uint32_t const group = IPv4Address{239, 69, 1, 2}.to_uint32();  // htonl is a macro: no commas in its argument
+    info.ipi_addr.s_addr = htonl(group);
     std::memcpy(CMSG_DATA(cmsg), &info, sizeof(info));
     EXPECT_TRUE(destined_for(header, IPv4Address{239, 69, 1, 2}));      // any interface
     EXPECT_TRUE(destined_for(header, IPv4Address{239, 69, 1, 2}, 3));   // its own
