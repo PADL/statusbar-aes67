@@ -48,10 +48,8 @@ auto origin_line_of(std::string_view sdp) -> std::optional<OriginLine>
 }
 
 auto subscription_matches(
-    sdp::Session const& session,
-    ip::IPv4Address const& sap_origin,
-    std::string_view const name,
-    std::string_view const origin) -> bool
+    sdp::Session const& session, ip::IPv4Address const& sap_origin, std::string_view const name, std::string_view const origin)
+    -> bool
 {
     if (session.name != name) {
         return false;

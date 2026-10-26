@@ -313,8 +313,8 @@ class XdpTransport final : public Transport
     size_t live_rtcp_{0};
 
     // Between the threads.
-    itc::QueuedPipe<PortState*, 128> added_;    ///< control -> real-time
-    itc::QueuedPipe<PortState*, 128> retired_;  ///< real-time -> control
+    itc::QueuedPipe<PortState*, 128> added_;        ///< control -> real-time
+    itc::QueuedPipe<PortState*, 128> retired_;      ///< real-time -> control
     itc::QueuedPipe<RtcpPipe*, 128> rtcp_added_;    ///< control -> real-time
     itc::QueuedPipe<RtcpPipe*, 128> rtcp_retired_;  ///< real-time -> control
     itc::SeqlockValue<std::error_code> rules_error_;
