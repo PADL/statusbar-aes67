@@ -65,7 +65,8 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     }
     port_ = std::move(*port);
     payload_type_ = media.payload_type;
-    offset_.store(sender_clock_ ? 0 : OFFSET_SET | *clock->direct_offset, std::memory_order_release);
+    offset_.store(
+        !sender_clock_ && clock && clock->direct_offset ? OFFSET_SET | *clock->direct_offset : 0, std::memory_order_release);
     auto const filter = session.effective_source_filter(media);
     if (filter && (!filter->destination || *filter->destination == connection->address)) {
         source_filter_ = filter->source;

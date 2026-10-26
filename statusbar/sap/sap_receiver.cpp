@@ -3,6 +3,8 @@
 
 #include "statusbar/sap/sap_receiver.hpp"
 
+#include "statusbar/net/net_posix_util.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <utility>
@@ -190,7 +192,7 @@ auto SapReceiver::open(
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
     address.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (::bind(fd->get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address)) != 0) {
+    if (::bind(fd->get(), net::sockaddr_cast(address), sizeof(address)) != 0) {
         return failure(net::errno_code());
     }
     for (size_t i = 0; i < groups.size(); ++i) {

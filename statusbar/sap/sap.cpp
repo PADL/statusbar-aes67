@@ -3,6 +3,9 @@
 
 #include "statusbar/sap/sap.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/net/net_posix_util.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -81,7 +84,7 @@ auto parse_sap_packet(std::span<uint8_t const> const packet) -> std::optional<Sa
     message.deletion = (flags & SAP_DELETION) != 0;
     message.message_id_hash = static_cast<uint16_t>((packet[2] << 8U) | packet[3]);
     message.origin = ip::IPv4Address{packet[4], packet[5], packet[6], packet[7]};
-    std::string_view rest{reinterpret_cast<char const*>(packet.data()) + 8 + auth, packet.size() - 8 - auth};
+    std::string_view rest = as_string_view(packet.subspan(8 + auth));
     // The payload type is optional: SDP text starts "v=0" (a deletion's may
     // be only its "o=" line, or nothing).
     if (!rest.empty() && !rest.starts_with("v=") && !rest.starts_with("o=")) {
@@ -116,7 +119,7 @@ auto SapAnnouncer::open(
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
     address.sin_addr.s_addr = htonl(destination.to_uint32());
-    if (::connect(fd->get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address)) != 0) {
+    if (::connect(fd->get(), net::sockaddr_cast(address), sizeof(address)) != 0) {
         return failure(net::errno_code());
     }
     return std::make_unique<SapAnnouncer>(std::move(*fd), origin);

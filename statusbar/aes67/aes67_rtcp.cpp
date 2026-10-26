@@ -332,7 +332,7 @@ void RtcpSession::on_ready(uint64_t const now_ns) noexcept
 void RtcpSession::handle(std::span<uint8_t const> const datagram, uint64_t const now_ns) noexcept
 {
     auto const compound = rtp::parse_rtcp(datagram);
-    if (!compound) {
+    if (!compound || (!compound->sr && !compound->rr)) {
         ++stats_.bad_packets;
         return;
     }

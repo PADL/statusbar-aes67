@@ -4,6 +4,7 @@
 #include "statusbar/aes67/aes67_socket.hpp"
 
 #include "statusbar/aes67/aes67_error.hpp"
+#include "statusbar/net/net_posix_util.hpp"
 
 #include <ifaddrs.h>
 
@@ -79,13 +80,8 @@ class UdpRtcpPort final : public RtcpPort
 
     auto send(std::span<uint8_t const> const packet) noexcept -> Status override
     {
-        ssize_t const sent = ::sendto(
-            fd_.get(),
-            packet.data(),
-            packet.size(),
-            MSG_DONTWAIT,
-            reinterpret_cast<sockaddr const*>(&destination_),
-            sizeof(destination_));
+        ssize_t const sent =
+            ::sendto(fd_.get(), packet.data(), packet.size(), MSG_DONTWAIT, net::sockaddr_cast(destination_), sizeof(destination_));
         if (sent < 0) {
             return failure(net::errno_code());
         }
@@ -183,7 +179,7 @@ auto open_receive_socket(InterfaceInfo const& interface, Endpoint const& local, 
         return failure(net::errno_code());
     }
     sockaddr_in const address = to_sockaddr(local);
-    if (::bind(fd->get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address)) != 0) {
+    if (::bind(fd->get(), net::sockaddr_cast(address), sizeof(address)) != 0) {
         return failure(net::errno_code());
     }
     if (multicast) {

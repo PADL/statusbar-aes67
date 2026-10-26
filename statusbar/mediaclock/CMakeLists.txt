@@ -6,6 +6,8 @@ statusbar_add_module(
   mediaclock
   SOURCES
   mediaclock_timebase.cpp
+  DEPS
+  statusbar::status
   TESTS
   mediaclock_ptp_clock_test.cpp
   mediaclock_timebase_test.cpp)

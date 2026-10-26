@@ -3,6 +3,8 @@
 
 #include "statusbar/mediaclock/mediaclock_timebase.hpp"
 
+#include "statusbar/status/statusbar_assert.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -57,6 +59,7 @@ auto TimebaseEstimator::for_each_pair(F const& f) const noexcept -> void
 
 auto TimebaseEstimator::push(Pair const& p) noexcept -> void
 {
+    STATUSBAR_ASSERT(params_.window_pairs >= 2);  // clamped by the constructor
     if (size_ == params_.window_pairs) {
         head_ = (head_ + 1) % params_.window_pairs;
         --size_;
@@ -113,7 +116,8 @@ auto TimebaseEstimator::feed(ClockSample const& sample) noexcept -> void
     source_epoch_ = sample.epoch;
     source_rate_hz_ = sample.rate_hz;
 
-    Pair const p{static_cast<std::int64_t>(sample.reference_ns), source_ns_of(sample.count, sample.rate_hz)};
+    Pair const p{
+        .reference_ns = static_cast<std::int64_t>(sample.reference_ns), .source_ns = source_ns_of(sample.count, sample.rate_hz)};
     if (have_reference_ && p.reference_ns <= last_reference_ns_) {
         return;  // out of order or repeated
     }

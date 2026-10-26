@@ -425,7 +425,7 @@ void XdpTransport::install_rules() noexcept
     std::error_code error;
     for (size_t i = 0; i < port_count_; ++i) {
         auto const& group = ports_[i]->destination.address;
-        auto const end = groups.begin() + static_cast<std::ptrdiff_t>(count);
+        auto* const end = groups.begin() + static_cast<std::ptrdiff_t>(count);
         if (std::find(groups.begin(), end, group) != end) {
             continue;
         }
@@ -504,9 +504,11 @@ void XdpTransport::begin_tick() noexcept
         auto const& rx = **slot;
         bool kept = false;
         if (auto const frame = rtp::parse_udp_frame(rx.buffer)) {
-            Endpoint const destination{frame->addressing.destination_address, frame->addressing.destination_port};
+            Endpoint const destination{
+                .address = frame->addressing.destination_address, .port = frame->addressing.destination_port};
             Datagram const datagram{
-                .payload = frame->datagram, .source = {frame->addressing.source_address, frame->addressing.source_port}};
+                .payload = frame->datagram,
+                .source = {.address = frame->addressing.source_address, .port = frame->addressing.source_port}};
             std::optional<bool> rtp;  // parsed only for a receive port's destination
             for (size_t i = 0; i < port_count_; ++i) {
                 auto& port = *ports_[i];

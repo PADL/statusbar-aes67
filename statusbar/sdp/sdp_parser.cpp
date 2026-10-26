@@ -448,7 +448,7 @@ class Parser
             }
             // a level that names both a direct clock and another keeps the direct one
             auto& slot = media_ != nullptr ? media_->media_clock : session_.media_clock;
-            if (!(slot && slot->direct_offset && !clock->direct_offset)) {
+            if (!slot || !slot->direct_offset || clock->direct_offset) {
                 slot = *clock;
             }
             return success();
@@ -458,7 +458,7 @@ class Parser
             if (rest.starts_with("PTPv2 ")) {
                 auto const domain = parse_number<uint8_t>(rest.substr(6));
                 if (domain && *domain <= 127) {
-                    (media_ != nullptr ? media_->clock_domain : session_.clock_domain) = *domain;
+                    (media_ != nullptr ? media_->clock_domain : session_.clock_domain) = domain;
                 }
             }
             return success();
