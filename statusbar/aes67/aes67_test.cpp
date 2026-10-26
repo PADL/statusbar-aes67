@@ -542,6 +542,64 @@ TEST(aes67_sender, sends_uncounted_silence_with_no_provider)
     EXPECT_EQ(sender.counters().packets, uint64_t{1});
 }
 
+TEST(aes67_sender, a_paused_sender_sends_nothing_and_resumes_on_the_grid_as_a_new_source)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    sender.tick(base + 47);
+    EXPECT_EQ(transport.queue.size(), size_t{1});
+    EXPECT_TRUE(sender.state() == State::running);
+
+    sender.pause();
+    EXPECT_TRUE(sender.state() == State::idle);
+    EXPECT_EQ(sender.send_state().ssrc, uint32_t{0});
+    auto const last = rtp::parse_rtp(transport.queue.back().bytes);
+
+    // Ten packets later: a new run from the newest due packet under a new SSRC (RFC 3550 Section 8).
+    sender.tick(base + 47 + (10 * uint64_t{FPP}));
+    EXPECT_EQ(transport.queue.size(), size_t{2});
+    auto const resumed = rtp::parse_rtp(transport.queue.back().bytes);
+    EXPECT_TRUE(last && resumed);
+    EXPECT_EQ(resumed->header.timestamp.get(), static_cast<uint32_t>(base + (10 * uint64_t{FPP})));
+    EXPECT_NE(resumed->header.ssrc.get(), last->header.ssrc.get());
+    EXPECT_NE(resumed->header.ssrc.get(), uint32_t{0});
+    EXPECT_EQ(resumed->header.ssrc.get(), sender.ssrc());
+    EXPECT_TRUE(sender.state() == State::running);
+    EXPECT_EQ(sender.send_state().ssrc, sender.ssrc());
+    EXPECT_EQ(sender.counters().lost, uint64_t{0});
+
+    Sender unconfigured{STEREO_L24, source.provider(), transport, "None"};
+    unconfigured.pause();
+    EXPECT_TRUE(unconfigured.state() == State::idle);
+}
+
+TEST(aes67_sender, a_paused_sender_whose_transport_fails_reports_error)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_read_delay(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    sender.tick(base + 47);
+    transport.failing = std::error_code{EINVAL, std::system_category()};
+    sender.tick(base + 95);
+    EXPECT_TRUE(sender.state() == State::error);
+    sender.pause();
+    EXPECT_TRUE(sender.state() == State::error);  // paused, but the transport still cannot send
+    EXPECT_TRUE(sender.error() == std::errc::invalid_argument);
+    sender.pause();
+    EXPECT_TRUE(sender.state() == State::error);
+    transport.failing.clear();
+    sender.pause();
+    EXPECT_TRUE(sender.state() == State::idle);
+    EXPECT_FALSE(sender.error());
+}
+
 namespace {
 
 /// Whether every big-endian word of `bytes` is `word`.

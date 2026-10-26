@@ -333,6 +333,75 @@ TEST(aes67_rtcp, a_sender_not_sending_reports_nothing)
     EXPECT_TRUE(RtcpSession::open_sender(idle, transport, options("x")).error() == Aes67Error::not_configured);
 }
 
+TEST(aes67_rtcp, a_paused_sender_says_bye_once_and_reports_again_when_it_sends)
+{
+    SenderRig rig;
+    rig.run(T0, 10);
+    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{1});
+    uint32_t const ssrc = rig.sender.ssrc();
+
+    // Stopped: a BYE at the next tick, not at the report interval, then nothing.
+    rig.sender.pause();
+    rig.session->tick(T0 + (11 * MS));
+    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+    auto const bye = rtp::parse_rtcp(rig.transport.rtcp_out.back());
+    EXPECT_TRUE(bye.has_value() && bye->bye.has_value() && bye->bye->contains(ssrc));
+    EXPECT_FALSE(bye.has_value() && bye->sr.has_value());
+    EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{1});
+    for (uint64_t t = T0 + (12 * MS); t <= T0 + (40 * MS); t += MS) {
+        rig.session->tick(t);
+    }
+    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+
+    // Sending again, under a new SSRC: its SRs, and its BYE when closed.
+    rig.run(T0 + (41 * MS), 20);
+    EXPECT_TRUE(rig.transport.rtcp_out.size() >= 3);
+    EXPECT_NE(rig.sender.ssrc(), ssrc);
+    auto const compound = rtp::parse_rtcp(rig.transport.rtcp_out.back());
+    auto const* const sr = compound && compound->sr ? &*compound->sr : nullptr;
+    EXPECT_EQ(sr != nullptr ? sr->ssrc : 0U, rig.sender.ssrc());
+    size_t const before = rig.transport.rtcp_out.size();
+    rig.session->close();
+    EXPECT_EQ(rig.transport.rtcp_out.size(), before + 1);
+    EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{1});
+}
+
+TEST(aes67_rtcp, a_pause_and_resume_between_two_ticks_still_says_bye_for_the_old_ssrc)
+{
+    SenderRig rig;
+    rig.run(T0, 10);
+    uint32_t const old = rig.sender.ssrc();
+    rig.sender.pause();
+    rig.sender.tick(index_at(T0 + (11 * MS)));  // resumed before the session's next tick
+    uint32_t const fresh = rig.sender.ssrc();
+    EXPECT_NE(fresh, old);
+    size_t const before = rig.transport.rtcp_out.size();
+    rig.run(T0 + (12 * MS), 20);
+    EXPECT_TRUE(rig.transport.rtcp_out.size() >= before + 2);
+    if (rig.transport.rtcp_out.size() < before + 2) {
+        return;
+    }
+    auto const bye = rtp::parse_rtcp(rig.transport.rtcp_out[before]);
+    EXPECT_TRUE(bye.has_value() && bye->bye.has_value() && bye->bye->contains(old));
+    EXPECT_FALSE(bye.has_value() && bye->bye.has_value() && bye->bye->contains(fresh));
+    auto const compound = rtp::parse_rtcp(rig.transport.rtcp_out.back());
+    auto const* const sr = compound && compound->sr ? &*compound->sr : nullptr;
+    EXPECT_EQ(sr != nullptr ? sr->ssrc : 0U, fresh);
+    EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{1});
+}
+
+TEST(aes67_rtcp, a_sender_closed_while_stopped_says_bye_only_once)
+{
+    SenderRig rig;
+    rig.run(T0, 10);
+    rig.sender.pause();
+    rig.session->tick(T0 + (11 * MS));
+    size_t const sent = rig.transport.rtcp_out.size();
+    rig.session->close();
+    EXPECT_EQ(rig.transport.rtcp_out.size(), sent);
+    EXPECT_EQ(rig.session->fd(), -1);
+}
+
 TEST(aes67_rtcp, a_sender_measures_the_round_trip_from_a_report_block)
 {
     SenderRig rig;

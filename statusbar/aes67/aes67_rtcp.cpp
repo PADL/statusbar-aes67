@@ -145,13 +145,40 @@ void RtcpSession::close() noexcept
     if (!port_) {
         return;
     }
-    // RFC 3550 Section 6.1: a compound packet starts with a report; an empty RR needs no clock.
-    rtp::RtcpWriter writer{packet_};
-    writer.receiver_report(ssrc()).sdes(ssrc(), options_.cname).bye(ssrc());
-    if (!writer || !port_->send(writer.bytes())) {
-        ++stats_.send_errors;
+    note_sending();
+    if (!stopped_bye_) {
+        (void)send_bye(ssrc());
     }
     port_.reset();
+}
+
+void RtcpSession::note_sending() noexcept
+{
+    if (role_ != Role::sender) {
+        return;
+    }
+    // The SSRC last seen sending is gone (stopped, or a new run under a new SSRC): its BYE.
+    uint32_t const sending = sender_->send_state().ssrc;
+    if (sending_ssrc_ != 0 && sending != sending_ssrc_) {
+        bool const sent = send_bye(sending_ssrc_);
+        stats_.bye_sent += sent ? 1 : 0;
+        stopped_bye_ = sent && sending == 0;  // still sending (a new SSRC): close() owes its BYE
+    } else if (sending != 0) {
+        stopped_bye_ = false;
+    }
+    sending_ssrc_ = sending;
+}
+
+auto RtcpSession::send_bye(uint32_t const ssrc) noexcept -> bool
+{
+    // RFC 3550 Section 6.1: a compound packet starts with a report; an empty RR needs no clock.
+    rtp::RtcpWriter writer{packet_};
+    writer.receiver_report(ssrc).sdes(ssrc, options_.cname).bye(ssrc);
+    if (!writer || !port_->send(writer.bytes())) {
+        ++stats_.send_errors;
+        return false;
+    }
+    return true;
 }
 
 void RtcpSession::tick(uint64_t const now_ns) noexcept
@@ -162,6 +189,7 @@ void RtcpSession::tick(uint64_t const now_ns) noexcept
     if (port_->fd() < 0) {
         on_ready(now_ns);
     }
+    note_sending();
     if (next_report_ns_ == 0) {
         next_report_ns_ = now_ns + options_.cadence->next_interval_ns(true);
         return;

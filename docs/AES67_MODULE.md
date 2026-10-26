@@ -30,7 +30,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `StreamFormat` — encoding, channels, rate and frames per packet (the ptime).
 - `FrameHandler` / `FrameProvider` — the real-time callbacks, `sg14::inplace_function`s with 64 bytes of capture; `Supply` is what a provider gave.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
-- `Sender` — `configure(destination | session)`, `tick(now_index)`, `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`.
+- `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
@@ -226,7 +226,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - Scope: RFC 3550 §6 as a dedicated device needs it. A sender's session sends,
   every interval, one compound packet: an SR, then SDES with its CNAME (§6.1 wants the
   CNAME in every compound packet). A receiver's sends an RR with one report block about
-  the stream, then SDES. Both send an empty RR, SDES and BYE on `close()` or destruction.
+  the stream, then SDES. Both send an empty RR, SDES and BYE on `close()` or destruction; a sender's
+  session also sends one, at its next `tick()`, for the SSRC it last saw sending once that is gone
+  (stopped by `Sender::pause()`, or replaced by a resumed run's, however quickly), and then none on
+  `close()` unless it sent again. The BYE is built on the reactor, never the real-time thread.
   Out of scope: an RFC 3550 wall-clock NTP mode, APP, SDES items past CNAME, RTCP-XR,
   timer reconsideration and member tables (§6.3.3–6.3.7), RTP/RTCP multiplexing (RFC
   5761), and the IPMX schedule (an SR before every Nth media packet, TR-10-1 §8.10.1),

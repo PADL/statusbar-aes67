@@ -82,6 +82,7 @@ struct RtcpStats
 {
     uint64_t sr_sent{0};
     uint64_t rr_sent{0};
+    uint64_t bye_sent{0};             ///< a sender's, each for an SSRC that stopped sending (Sender::pause())
     uint64_t sr_received{0};          ///< the stream's (receiver) or other senders' (sender)
     uint64_t rr_received{0};          ///< RRs from others, whatever they report on
     uint64_t bye_received{0};         ///< BYEs naming the remote
@@ -151,7 +152,8 @@ class RtcpSession
     [[nodiscard]] auto fd() const noexcept -> int;
     /// Take and parse what has arrived; `now_ns` is the PTP time.
     void on_ready(uint64_t now_ns) noexcept;
-    /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1.
+    /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1. A sender's SSRC
+    /// last seen sending that is gone (stopped, or replaced by a new run's) gets its BYE now.
     void tick(uint64_t now_ns) noexcept;
     /// A sender's clock domain (null, the default: PTP time): each SR reads it, pairs the domain's
     /// index with its PTP time through it, and reports the measured rate; none while not running.
@@ -185,6 +187,10 @@ class RtcpSession
     };
 
     void send_report(uint64_t now_ns) noexcept;
+    /// An empty RR, SDES and BYE for `ssrc` (RFC 3550 Sections 6.1, 6.6); whether it went.
+    auto send_bye(uint32_t ssrc) noexcept -> bool;
+    /// A sender's BYE for the SSRC it last saw sending, once that is gone.
+    void note_sending() noexcept;
     /// Write the SR (a sender sending) or RR (a receiver) due; none for a sender not sending.
     auto write_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept -> Report;
     void write_receiver_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept;
@@ -203,7 +209,9 @@ class RtcpSession
     std::unique_ptr<RtcpPort> port_;
     RtcpSessionOptions options_;
     itc::SeqlockValue<mediaclock::Timebase> const* timebase_{nullptr};
-    uint32_t own_ssrc_{0};  ///< a receiver's
+    uint32_t own_ssrc_{0};      ///< a receiver's
+    uint32_t sending_ssrc_{0};  ///< a sender's, as its last tick saw it sending (0: not sending)
+    bool stopped_bye_{false};   ///< a sender's BYE went for a stop, and it has not sent since
     uint32_t sample_rate_{48000};
     uint64_t minimum_ns_{0};  ///< the cadence's Tmin, for re-arming after a PTP step
     uint64_t next_report_ns_{0};

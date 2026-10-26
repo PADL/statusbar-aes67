@@ -156,6 +156,10 @@ class Sender
     /// Send every packet due by `now_index` (the media clock's index at the
     /// current PTP time).
     void tick(uint64_t now_index) noexcept;
+    /// Send nothing until the next tick(), which starts a new run on the index grid with a new SSRC and
+    /// sequence (RFC 3550 Section 8): send_state() is cleared (the RTCP session says BYE), state() reads
+    /// idle, or error while Transport::send_error() says so. Real-time safe; the ticking thread only.
+    void pause() noexcept;
 
     /// The stream's SDP, or nullopt when not configured.
     [[nodiscard]] auto session() const -> std::optional<sdp::Session>;
@@ -167,7 +171,8 @@ class Sender
     /// (Transport::send_error(), seen by the last tick), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
-    [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return ssrc_; }
+    /// The current run's SSRC (a resumed run draws a new one on the ticking thread). Any thread.
+    [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return ssrc_.load(std::memory_order_relaxed); }
 
   private:
     StreamFormat format_;
@@ -184,7 +189,12 @@ class Sender
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
-    uint32_t ssrc_{0};
+    /// Draws from rng_ (xorshift64*, seeded by configure()): no syscall on the ticking thread.
+    [[nodiscard]] auto next_random() noexcept -> uint32_t;
+
+    std::atomic<uint32_t> ssrc_{0};
+    uint64_t rng_{1};
+    bool paused_{false};  ///< pause() since the last tick()
     uint16_t sequence_{0};
     std::string channel_order_;
     uint8_t info_block_version_{0};

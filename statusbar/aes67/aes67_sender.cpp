@@ -74,7 +74,9 @@ auto Sender::configure(Destination const& destination) -> Status
     payload_.assign(format_.bytes_per_packet(), 0);
 
     std::random_device random;
-    ssrc_ = random();
+    ssrc_.store(random(), std::memory_order_relaxed);
+    rng_ = ((uint64_t{random()} << 32U) | random()) | 1U;
+    paused_ = false;
     sequence_ = static_cast<uint16_t>(random());
     if (session_id_ == 0) {
         std::string key = ip::to_string(transport_.local_address());
@@ -218,6 +220,20 @@ void Sender::tick(uint64_t const now_index) noexcept
     if (!port_) {
         return;
     }
+    if (paused_) {
+        // A new run after a pause: a new SSRC and sequence (RFC 3550 Section 8), its SR counts afresh.
+        paused_ = false;
+        uint32_t const old = ssrc();
+        uint32_t next = next_random();
+        while (next == 0 || next == old) {
+            next = next_random();
+        }
+        ssrc_.store(next, std::memory_order_relaxed);
+        sequence_ = static_cast<uint16_t>(next_random());
+        rtcp_packets_ = 0;
+        rtcp_octets_ = 0;
+    }
+    uint32_t const run_ssrc = ssrc();
     // A transport that cannot get packets out puts the sender in error until it can.
     if (auto const send_error = transport_.send_error()) {
         state_ = State::error;
@@ -254,7 +270,7 @@ void Sender::tick(uint64_t const now_index) noexcept
     uint32_t queued = 0;
     while (next_index_ <= newest) {
         rtp::RtpHeader header{};
-        header.init(destination_.payload_type, sequence_, mediaclock::PtpMediaClock::rtp_timestamp(next_index_, 0), ssrc_);
+        header.init(destination_.payload_type, sequence_, mediaclock::PtpMediaClock::rtp_timestamp(next_index_, 0), run_ssrc);
         // The provider writes straight into the transport's TX buffer; only
         // when the transport has none to give (the packet is dropped) does it
         // write the staging buffer, so its frames are still taken and counted.
@@ -282,11 +298,38 @@ void Sender::tick(uint64_t const now_index) noexcept
     counters_.packets += queued - refused;
     rtcp_packets_ += static_cast<uint32_t>(queued - refused);
     rtcp_octets_ += static_cast<uint32_t>((queued - refused) * payload_.size());
-    send_state_.store({.ssrc = ssrc_, .packets = rtcp_packets_, .octets = rtcp_octets_});
+    send_state_.store({.ssrc = run_ssrc, .packets = rtcp_packets_, .octets = rtcp_octets_});
     counters_.frames += (queued - refused) * fpp;
     if (queued > refused && state_ != State::error) {
         state_ = State::running;
     }
+}
+
+void Sender::pause() noexcept
+{
+    if (!port_) {
+        return;
+    }
+    if (!paused_) {
+        paused_ = true;
+        started_ = false;
+        send_state_.store({});  // the RTCP session takes an SSRC of 0 as not sending
+    }
+    if (auto const send_error = transport_.send_error()) {
+        state_ = State::error;
+        error_ = send_error;
+    } else {
+        state_ = State::idle;
+        error_.clear();
+    }
+}
+
+auto Sender::next_random() noexcept -> uint32_t
+{
+    rng_ ^= rng_ >> 12U;
+    rng_ ^= rng_ << 25U;
+    rng_ ^= rng_ >> 27U;
+    return static_cast<uint32_t>((rng_ * 0x2545'F491'4F6C'DD1DULL) >> 32U);
 }
 
 auto Sender::render_payload(uint64_t const first_index, std::span<uint8_t> const payload) noexcept -> Supply
