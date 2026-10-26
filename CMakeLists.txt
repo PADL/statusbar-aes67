@@ -45,6 +45,8 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   statusbar_package_cpack_defaults(
     NAME aes67 DESCRIPTION
     "AES67 — the PTP media clock, RTP and SDP for bridging.")
+  set(CPACK_PACKAGE_VENDOR "PADL Software Pty Ltd")
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Luke Howard <lukeh@padl.com>")
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
       "statusbar-aes67 (>= ${PROJECT_VERSION}), statusbar-core-dev (>= ${statusbar-core_VERSION})"
   )

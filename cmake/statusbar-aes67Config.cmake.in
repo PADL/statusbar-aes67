@@ -1,0 +1,11 @@
+# Copyright 2026 PADL Software Pty Ltd
+# SPDX-License-Identifier: MIT
+#
+# Generated CMake package config for statusbar-aes67.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(statusbar-core)
+
+include("${CMAKE_CURRENT_LIST_DIR}/statusbar-aes67Targets.cmake")
+check_required_components(statusbar-aes67)
