@@ -158,9 +158,11 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   tick, and returns to ready when it clears.
 - `session()` gives origin the transport's interface address, the group with its TTL, the
   encoding, channels, rate and ptime, `ts-refclk:ptp=IEEE1588-2008:<EUI-64>:<domain>` and
-  `clock-domain:PTPv2 <domain>` from `set_grandmaster()` (always PTPv2, the domain always
-  written), `mediaclk:direct=0`, a source filter naming this host for a multicast group,
-  and `a=recvonly`, as AES67's examples and Dante write it.
+  `clock-domain:PTPv2 <domain>` from `set_grandmaster()`, `mediaclk:direct=0`, a source
+  filter naming this host for a multicast group, and `a=recvonly`, as AES67's examples and
+  Dante write it. A `Grandmaster` whose `version` is `ieee802_1as` is written
+  `ts-refclk:ptp=IEEE802.1AS-2011:<EUI-64>` with no domain and no `clock-domain`
+  (AES67-2018 Clause 8.2, Example 2); the IPMX Info Block's `ts-refclk` follows it.
 - Session id and version: a receiver (Dante Controller, say) keys a session on the o=
   session id and origin, so a new id each start leaves stale sessions behind. The id is
   stable across restarts: `set_session_id()`, or by default `stable_session_id()`

@@ -316,9 +316,9 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     EXPECT_EQ(media.frames_per_packet(), FPP);
     EXPECT_TRUE(parsed->effective_direction(media) == sdp::Direction::recvonly);
     EXPECT_TRUE(parsed->effective_media_clock_offset(media) == uint32_t{0});
-    auto const clock = parsed->effective_clock(media);
-    EXPECT_TRUE(clock.has_value());
-    EXPECT_TRUE(clock->grandmaster == ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"));
+    auto const clocks = parsed->effective_clocks(media);
+    EXPECT_EQ(clocks.size(), size_t{1});
+    EXPECT_TRUE(clocks.front().grandmaster == ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"));
     auto const connection = parsed->effective_connection(media);
     EXPECT_TRUE(connection.has_value());
     EXPECT_TRUE(connection->address == (IPv4Address{239, 69, 1, 2}));
@@ -363,6 +363,20 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     Sender replacement{STEREO_L24, source.provider(), transport, "Test"};
     replacement.continue_from(sender);
     EXPECT_EQ(replacement.name(), std::string{"Bridge : Test"});
+}
+
+TEST(aes67_sender, an_802_1as_grandmaster_is_named_without_a_domain)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    sender.set_grandmaster(Grandmaster{.identity = GRANDMASTER.identity, .domain = 0, .version = sdp::PtpVersion::ieee802_1as});
+    std::string const text = sdp::to_string(*sender.session());
+    EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE802.1AS-2011:00-1D-C1-FF-FE-12-34-56\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("clock-domain") == std::string::npos);  // RAVENNA's PTPv2 domain: none for gPTP
+    auto const parsed = sdp::parse(text);
+    EXPECT_TRUE(parsed && parsed->names_clock(parsed->media.at(0), GRANDMASTER.reference()));  // domain 0, one clock
 }
 
 TEST(aes67_sender, writes_a_125_us_ptime)

@@ -72,11 +72,11 @@ TEST(sdp, parses_a_dante_announcement)
     EXPECT_TRUE(connection.has_value());
     EXPECT_EQ(connection->address, (ip::IPv4Address{239, 69, 161, 58}));
     EXPECT_EQ(connection->ttl, uint8_t{32});
-    auto const clock = session->effective_clock(m);
-    EXPECT_TRUE(clock.has_value());
-    EXPECT_EQ(clock->version, std::string{"IEEE1588-2008"});
-    EXPECT_EQ(*clock->grandmaster, *ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4"));
-    EXPECT_EQ(clock->domain, uint8_t{0});
+    auto const clocks = session->effective_clocks(m);
+    EXPECT_EQ(clocks.size(), size_t{1});
+    EXPECT_TRUE(clocks.front().version == PtpVersion::ieee1588_2008);
+    EXPECT_EQ(*clocks.front().grandmaster, *ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4"));
+    EXPECT_EQ(clocks.front().domain, uint8_t{0});
     EXPECT_EQ(session->effective_media_clock_offset(m).value_or(0), uint32_t{1266592257});
 }
 
@@ -90,7 +90,7 @@ TEST(sdp, parses_lib_aes67_output)
     EXPECT_EQ(m.channels, uint16_t{8});
     EXPECT_EQ(m.packet_time_us, uint32_t{1000});
     EXPECT_EQ(m.frames_per_packet(), uint32_t{96});
-    EXPECT_EQ(session->effective_clock(m)->domain, uint8_t{3});
+    EXPECT_EQ(session->effective_clocks(m).front().domain, uint8_t{3});
     EXPECT_EQ(session->effective_connection(m)->ttl, uint8_t{0});
 }
 
@@ -119,7 +119,8 @@ TEST(sdp, media_level_values_override_the_session)
     EXPECT_EQ(session->media.size(), size_t{1});
     auto const& m = session->media[0];
     EXPECT_EQ(session->effective_connection(m)->address, (ip::IPv4Address{239, 69, 0, 1}));
-    EXPECT_FALSE(session->effective_clock(m)->grandmaster.has_value());  // the later, traceable one
+    auto const clocks = session->effective_clocks(m);  // both, in order (RFC 7273 Section 4.8)
+    EXPECT_TRUE(clocks.size() == 2 && clocks[0].grandmaster.has_value() && clocks[1].traceable);
 }
 
 TEST(sdp, parses_a_2022_7_pair_and_skips_other_media)
@@ -201,7 +202,7 @@ TEST(sdp, writes_a_sender_description)
     session.session_version = 100;
     session.origin_address = "10.1.2.3";
     session.name = "Bridge out 1";
-    session.clock = PtpReference{.grandmaster = ieee::eui64_from_string("00-11-22-ff-fe-33-44-55"), .domain = 2};
+    session.clocks.ptp.push_back(PtpReference{.grandmaster = ieee::eui64_from_string("00-11-22-ff-fe-33-44-55"), .domain = 2});
     session.media.push_back(Media{
         .port = 5004,
         .payload_type = 96,
@@ -233,7 +234,8 @@ TEST(sdp, keeps_the_ptp_clock_among_others)
     auto const session = parse(text);
     EXPECT_TRUE(session.has_value());
     auto const& m = session->media.at(0);
-    EXPECT_TRUE(session->effective_clock(m)->grandmaster.has_value());
+    EXPECT_TRUE(session->effective_clocks(m).size() == 1 && session->effective_clocks(m).front().grandmaster.has_value());
+    EXPECT_TRUE(m.clocks.other);
     EXPECT_EQ(session->effective_media_clock_offset(m).value_or(0), uint32_t{1266592257});
 }
 
@@ -247,18 +249,19 @@ TEST(sdp, reads_every_rfc_7273_form)
     };
     auto const nmbr = clock_of("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:domain-nmbr=5", "direct");
     EXPECT_TRUE(nmbr.has_value());
-    EXPECT_EQ(nmbr->media.at(0).clock->domain, uint8_t{5});
+    EXPECT_EQ(nmbr->media.at(0).clocks.ptp.front().domain, uint8_t{5});
     EXPECT_EQ(nmbr->effective_media_clock_offset(nmbr->media.at(0)).value_or(1), uint32_t{0});
 
     auto const version_only = clock_of("ptp=IEEE802.1AS-2011", "direct=7 rate=48000/1");
     EXPECT_TRUE(version_only.has_value());
-    EXPECT_EQ(version_only->media.at(0).clock->version, std::string{"IEEE802.1AS-2011"});
-    EXPECT_FALSE(version_only->media.at(0).clock->grandmaster.has_value());
+    EXPECT_TRUE(version_only->media.at(0).clocks.ptp.front().version == PtpVersion::ieee802_1as);
+    EXPECT_FALSE(version_only->media.at(0).clocks.ptp.front().grandmaster.has_value());
     EXPECT_EQ(version_only->effective_media_clock_offset(version_only->media.at(0)).value_or(0), uint32_t{7});
 
     auto const named = clock_of("ptp=IEEE1588-2002:00-1D-C1-FF-FE-0E-10-C4:domain-name=_DFLT", "direct=1");
     EXPECT_TRUE(named.has_value());
-    EXPECT_EQ(named->media.at(0).clock->domain, uint8_t{0});
+    EXPECT_EQ(named->media.at(0).clocks.ptp.front().domain, uint8_t{0});
+    EXPECT_TRUE(named->media.at(0).clocks.ptp.front().version == PtpVersion::ieee1588_2002);
 
     EXPECT_FALSE(clock_of("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:128", "direct").has_value());
 }
@@ -374,7 +377,7 @@ TEST(sdp, writes_only_what_parses)
     EXPECT_TRUE(session.has_value());
     session->username = "my host";
     session->name = "Out 1\r\na=source-filter: excl IN IP4 * 1.2.3.4";
-    session->media.at(0).clock = PtpReference{.traceable = true};
+    session->media.at(0).clocks.ptp = {PtpReference{.traceable = true}};
     auto const text = to_string(*session);
     EXPECT_TRUE(text.find("o=- 42") != std::string::npos);
     EXPECT_TRUE(text.find("c=IN IP4 239.1.2.3/32\r\n") != std::string::npos);  // multicast needs a TTL
@@ -449,7 +452,7 @@ TEST(sdp, writes_only_what_the_rfcs_allow)
 {
     Session session;
     session.origin_address = "not a token";
-    session.clock = PtpReference{};  // neither grandmaster nor traceable: no valid form
+    session.clocks.ptp = {PtpReference{}, PtpReference{.version = PtpVersion::other, .traceable = true}};  // no valid form
     session.media.push_back(Media{
         .port = 5004,
         .payload_type = 96,
@@ -468,7 +471,7 @@ TEST(sdp, writes_domain_zero_and_reads_both_forms)
     text.replace(text.find(":0\r\n"), 2, "");  // the bare form, no domain
     auto const bare = parse(text);
     EXPECT_TRUE(bare.has_value());
-    EXPECT_EQ(bare->media.at(0).clock->domain, uint8_t{0});
+    EXPECT_EQ(bare->media.at(0).clocks.ptp.front().domain, uint8_t{0});
     EXPECT_TRUE(to_string(*bare).find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n") != std::string::npos);
 }
 
@@ -544,7 +547,7 @@ TEST(sdp, mediaclk_sender_round_trips)
     EXPECT_TRUE(m.media_clock == std::optional{MediaClock::sender()});
     EXPECT_TRUE(session->effective_media_clock(m)->kind() == MediaClockKind::sender);
     EXPECT_FALSE(session->effective_media_clock_offset(m).has_value());
-    EXPECT_TRUE(session->effective_clock(m)->grandmaster.has_value());
+    EXPECT_TRUE(session->effective_clocks(m).front().grandmaster.has_value());
     std::string const written = to_string(*session);
     EXPECT_TRUE(written.find("a=mediaclk:sender\r\n") != std::string::npos);
     EXPECT_TRUE(written.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n") != std::string::npos);
@@ -568,6 +571,132 @@ TEST(sdp, the_clock_values_are_the_attribute_text)
     EXPECT_EQ(ts_refclk_value(PtpReference{}), std::string{});
     EXPECT_EQ(media_clock_value(MediaClock{.direct_offset = 0}), std::string{"direct=0"});
     EXPECT_EQ(media_clock_value(MediaClock{}), std::string{"sender"});
+}
+
+TEST(sdp_ts_refclk, every_reference_at_a_level_is_kept_in_order)
+{
+    std::string text{DANTE};
+    text += "a=ts-refclk:ptp=IEEE802.1AS-2011:00-1D-C1-FF-FE-0E-10-C4\r\n";
+    text += "a=ts-refclk:ptp=IEEE1588-2019:00-1D-C1-FF-FE-0E-10-C4:0\r\n";
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const clocks = session->effective_clocks(session->media.at(0));
+    EXPECT_EQ(clocks.size(), size_t{3});
+    EXPECT_TRUE(clocks[1].version == PtpVersion::ieee802_1as && clocks[2].version == PtpVersion::ieee1588_2019);
+    auto const written = to_string(*session);
+    EXPECT_TRUE(written.find("a=ts-refclk:ptp=IEEE802.1AS-2011:00-1D-C1-FF-FE-0E-10-C4\r\n") != std::string::npos);
+    EXPECT_TRUE(written.find("a=ts-refclk:ptp=IEEE1588-2019:00-1D-C1-FF-FE-0E-10-C4:0\r\n") != std::string::npos);
+    EXPECT_TRUE(parse(written) == session);
+}
+
+TEST(sdp_ts_refclk, references_beyond_the_capacity_are_ignored)
+{
+    std::string text{DANTE};
+    for (size_t i = 0; i < ReferenceClocks::MAX + 2; ++i) {
+        text += "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n";
+    }
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.at(0).clocks.ptp.size(), ReferenceClocks::MAX);
+}
+
+TEST(sdp_ts_refclk, a_media_level_reference_overrides_the_sessions)
+{
+    std::string text{DANTE};
+    auto const clock_line = text.find("a=ts-refclk:");
+    text.erase(clock_line, text.find("\r\n", clock_line) + 2 - clock_line);
+    text.replace(text.find("t=0 0\r\n") + 7, 0, "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n");
+    auto session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->effective_clocks(session->media.at(0)).size(), size_t{1});  // the session's
+    text += "a=ts-refclk:localmac=00-1D-C1-0E-10-C4\r\n";
+    session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_TRUE(session->effective_clocks(session->media.at(0)).empty());  // the media's: no PTP clock
+    EXPECT_FALSE(session->clocks.other);
+}
+
+TEST(sdp_ts_refclk, an_802_1as_reference_is_written_without_a_domain)
+{
+    auto const gm = ieee::eui64_from_string("39-A7-94-FF-FE-07-CB-D0");
+    PtpReference const gptp{.version = PtpVersion::ieee802_1as, .grandmaster = gm};
+    EXPECT_EQ(ts_refclk_value(gptp), std::string{"ptp=IEEE802.1AS-2011:39-A7-94-FF-FE-07-CB-D0"});  // AES67-2018 8.2 Example 2
+    EXPECT_EQ(
+        ts_refclk_value(PtpReference{.version = PtpVersion::ieee802_1as, .traceable = true}),
+        std::string{"ptp=IEEE802.1AS-2011:traceable"});
+    EXPECT_EQ(ts_refclk_value(PtpReference{.version = PtpVersion::other, .grandmaster = gm}), std::string{});
+}
+
+TEST(sdp_ts_refclk, each_version_token_reads)
+{
+    auto version_of = [](std::string_view const token) {
+        std::string text{DANTE};
+        text.replace(text.find("IEEE1588-2008"), 13, token);
+        auto const session = parse(text);
+        return session ? std::optional{session->media.at(0).clocks.ptp.front()} : std::nullopt;
+    };
+    EXPECT_TRUE(version_of("IEEE1588-2002")->version == PtpVersion::ieee1588_2002);
+    EXPECT_TRUE(version_of("IEEE1588-2019")->version == PtpVersion::ieee1588_2019);
+    EXPECT_TRUE(version_of("IEEE802.1AS-2011")->version == PtpVersion::ieee802_1as);
+    EXPECT_TRUE(version_of("IEEE802.1AS-2020")->version == PtpVersion::ieee802_1as);  // the unregistered spelling
+    EXPECT_TRUE(version_of("IEEE1588-2030")->version == PtpVersion::other);
+    EXPECT_TRUE(version_of("IEEE1588-2030")->grandmaster.has_value());
+}
+
+TEST(sdp_ts_refclk, an_802_1as_reference_written_with_a_domain_reads_as_domain_zero)
+{
+    std::string text{DANTE};
+    text.replace(text.find("IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0"), 39, "IEEE802.1AS-2011:00-1D-C1-FF-FE-0E-10-C4:5");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.at(0).clocks.ptp.front().domain, uint8_t{0});
+    EXPECT_TRUE(to_string(*session).find("ptp=IEEE802.1AS-2011:00-1D-C1-FF-FE-0E-10-C4\r\n") != std::string::npos);
+}
+
+TEST(sdp_ts_refclk, the_same_grandmaster_in_the_same_domain_is_the_same_clock)
+{
+    auto const gm = ieee::eui64_from_string("00-1D-C1-FF-FE-10-6C-16");
+    auto const other = ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4");
+    PtpReference const ours{.grandmaster = gm};
+    EXPECT_TRUE(ours.same_clock(PtpReference{.grandmaster = gm}));
+    EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = other}));
+    EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = gm, .domain = 1}));  // AES67-2018 8.2: another domain
+    EXPECT_FALSE(ours.same_clock(PtpReference{.traceable = true}));
+    EXPECT_FALSE(ours.same_clock(PtpReference{}));
+}
+
+TEST(sdp_ts_refclk, ieee_802_1as_and_ieee_1588_in_domain_zero_are_one_clock)
+{
+    auto const gm = ieee::eui64_from_string("00-1D-C1-FF-FE-10-6C-16");
+    PtpReference const gptp{.version = PtpVersion::ieee802_1as, .grandmaster = gm};
+    EXPECT_TRUE(gptp.same_clock(PtpReference{.grandmaster = gm}));
+    PtpReference const v2019{.version = PtpVersion::ieee1588_2019, .grandmaster = gm};
+    EXPECT_TRUE(v2019.same_clock(gptp));
+    EXPECT_FALSE(gptp.same_clock(PtpReference{.grandmaster = gm, .domain = 3}));
+    EXPECT_FALSE(gptp.same_clock(PtpReference{.version = PtpVersion::ieee1588_2002, .grandmaster = gm}));  // PTPv1
+    EXPECT_FALSE(gptp.same_clock(PtpReference{.version = PtpVersion::other, .grandmaster = gm}));
+}
+
+TEST(sdp_ts_refclk, a_session_names_a_clock_when_any_reference_in_force_does)
+{
+    std::string text{DANTE};
+    text += "a=ts-refclk:ptp=IEEE802.1AS-2011:00-1D-C1-FF-FE-10-6C-16\r\n";
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const& m = session->media.at(0);
+    EXPECT_TRUE(session->names_clock(m, PtpReference{.grandmaster = ieee::eui64_from_string("00-1D-C1-FF-FE-10-6C-16")}));
+    EXPECT_TRUE(session->names_clock(m, PtpReference{.grandmaster = ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4")}));
+    EXPECT_FALSE(session->names_clock(m, PtpReference{.grandmaster = ieee::eui64_from_string("00-11-22-FF-FE-33-44-55")}));
+}
+
+TEST(sdp_ts_refclk, a_session_without_a_reference_names_no_clock)
+{
+    std::string text{DANTE};
+    text.erase(text.find("a=ts-refclk:"), std::string_view{"a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n"}.size());
+    auto const session = parse(text);  // RFC 7273 Section 6: a local clock is assumed
+    EXPECT_TRUE(session.has_value() && session->effective_clocks(session->media.at(0)).empty());
+    EXPECT_FALSE(session->names_clock(
+        session->media.at(0), PtpReference{.grandmaster = ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4")}));
 }
 
 TEST_MAIN(statusbar_sdp, sdp_test)

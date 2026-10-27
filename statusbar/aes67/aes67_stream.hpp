@@ -115,12 +115,20 @@ struct Destination
     auto operator==(Destination const&) const noexcept -> bool = default;
 };
 
-/// The PTP grandmaster a sender's ts-refclk names. AES67 references are
-/// always PTPv2 (IEEE 1588-2008); an 802.1AS grandmaster has the same EUI-64.
+/// The PTP grandmaster a sender's ts-refclk names (AES67-2018 Clause 8.2): IEEE 1588-2008 unless the
+/// interface runs IEEE 802.1AS, whose grandmaster has the same EUI-64 and is written with no domain.
 struct Grandmaster
 {
     ieee::Eui64 identity{};
-    uint8_t domain{0};  ///< 0-127
+    uint8_t domain{0};  ///< 0-127; 0 for IEEE 802.1AS
+    sdp::PtpVersion version{sdp::PtpVersion::ieee1588_2008};
+
+    /// The RFC 7273 reference that names it.
+    [[nodiscard]] auto reference() const noexcept -> sdp::PtpReference
+    {
+        return {
+            .version = version, .grandmaster = identity, .domain = version == sdp::PtpVersion::ieee802_1as ? uint8_t{0} : domain};
+    }
 
     auto operator==(Grandmaster const&) const noexcept -> bool = default;
 };

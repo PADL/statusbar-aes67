@@ -10,6 +10,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/sdp/sdp_error.hpp"
+#include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 
 #include <algorithm>
@@ -77,17 +78,64 @@ struct Connection
     auto operator==(Connection const&) const noexcept -> bool = default;
 };
 
-/// `a=ts-refclk:ptp=<version>:<grandmaster>[:<domain>]` or `ptp=<version>:traceable` (RFC 7273 §4.8).
-/// The domain is read bare, as `domain-nmbr=`, or absent (0), and written bare; a bare version (no
-/// grandmaster) is read but not written.
+/// The PTP versions RFC 7273 Section 4.8 registers, IEEE1588-2019 (as SMPTE ST 2110-10 writes it), and any
+/// other `ptp-version-ext` token; IEEE 802.1AS-2011 and -2020 are one gPTP, domain 0 (AES67-2018 Clause 8.2).
+enum class PtpVersion : uint8_t
+{
+    ieee1588_2002,
+    ieee1588_2008,
+    ieee1588_2019,
+    ieee802_1as,  ///< `IEEE802.1AS-2011`; `IEEE802.1AS-2020` reads as it
+    other,        ///< read, never written
+};
+
+/// The `ptp-version` token written for `version`; empty for other.
+[[nodiscard]] constexpr auto ptp_version_name(PtpVersion const version) noexcept -> std::string_view
+{
+    switch (version) {
+        case PtpVersion::ieee1588_2002:
+            return "IEEE1588-2002";
+        case PtpVersion::ieee1588_2008:
+            return "IEEE1588-2008";
+        case PtpVersion::ieee1588_2019:
+            return "IEEE1588-2019";
+        case PtpVersion::ieee802_1as:
+            return "IEEE802.1AS-2011";
+        case PtpVersion::other:
+            break;
+    }
+    return {};
+}
+
+/// `a=ts-refclk:ptp=<version>:<grandmaster>[:<domain>]` or `ptp=<version>:traceable` (RFC 7273 Section 4.8).
+/// The domain is read bare, as `domain-nmbr=`, or absent (0), and written bare, except for IEEE 802.1AS,
+/// which has none (AES67-2018 Clause 8.2); a bare version (no grandmaster) is read but not written.
 struct PtpReference
 {
-    std::string version{"IEEE1588-2008"};    ///< a sender writes PTPv2; IEEE802.1AS-2011 etc. are read
+    PtpVersion version{PtpVersion::ieee1588_2008};
     std::optional<ieee::Eui64> grandmaster;  ///< nullopt when not given, or traceable
     bool traceable{false};
-    uint8_t domain{0};
+    uint8_t domain{0};  ///< 0-127; always 0 for IEEE 802.1AS
+
+    /// Whether this names the clock `other` does: one grandmaster in one domain, an IEEE 802.1AS reference and an
+    /// IEEE 1588-2008/2019 one in domain 0 being the same (AES67-2018 Clause 8.2, Annex D.1). Never for traceable.
+    [[nodiscard]] auto same_clock(PtpReference const& other) const noexcept -> bool;
 
     auto operator==(PtpReference const&) const noexcept -> bool = default;
+};
+
+/// The ts-refclk PTP references of one level, all equivalent (RFC 7273 Section 4.8); more than MAX are ignored.
+struct ReferenceClocks
+{
+    static constexpr size_t MAX = 4;
+
+    sg14::inplace_vector<PtpReference, MAX> ptp;
+    bool other{false};  ///< a ts-refclk of another source (`localmac=`, `ntp=`, ...) was given; read, never written
+
+    /// Whether the level gives any ts-refclk at all.
+    [[nodiscard]] auto given() const noexcept -> bool { return !ptp.empty() || other; }
+
+    auto operator==(ReferenceClocks const&) const noexcept -> bool = default;
 };
 
 /// `a=source-filter: incl IN IP4 <destination> <source>` (RFC 4570), first source
@@ -176,7 +224,7 @@ struct Media
     std::string information;        ///< i=
     std::optional<Direction> direction;
     std::optional<Connection> connection;
-    std::optional<PtpReference> clock;
+    ReferenceClocks clocks;  ///< a=ts-refclk
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
     std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see ClockDomain below)
@@ -256,7 +304,7 @@ struct Session
     std::string information;
     std::optional<Direction> direction;
     std::optional<Connection> connection;
-    std::optional<PtpReference> clock;
+    ReferenceClocks clocks;  ///< a=ts-refclk
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
     std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see effective_clock_domain())
@@ -270,7 +318,17 @@ struct Session
     {
         return m.connection ? m.connection : connection;
     }
-    [[nodiscard]] auto effective_clock(Media const& m) const -> std::optional<PtpReference> { return m.clock ? m.clock : clock; }
+    /// The ts-refclk PTP references in force for `m`: the media level's when it gives any ts-refclk, else the
+    /// session's (RFC 7273 Section 4.8); empty when the level in force names no PTP clock.
+    [[nodiscard]] auto effective_clocks(Media const& m) const noexcept -> std::span<PtpReference const>
+    {
+        return m.clocks.given() ? std::span<PtpReference const>{m.clocks.ptp} : std::span<PtpReference const>{clocks.ptp};
+    }
+    /// Whether one of `m`'s references (effective_clocks()) names the clock `reference` does (PtpReference::same_clock()).
+    [[nodiscard]] auto names_clock(Media const& m, PtpReference const& reference) const noexcept -> bool
+    {
+        return std::ranges::any_of(effective_clocks(m), [&](PtpReference const& r) { return r.same_clock(reference); });
+    }
     [[nodiscard]] auto effective_source_filter(Media const& m) const noexcept -> std::optional<SourceFilter>
     {
         return m.source_filter ? m.source_filter : source_filter;
@@ -308,8 +366,9 @@ struct Session
 /// deletion, which may carry only that line. On failure `session` is unchanged.
 [[nodiscard]] auto parse_origin_line(std::string_view value, Session& session) -> Status;
 
-/// The text an `a=ts-refclk:` line carries for `clock` ("ptp=IEEE1588-2008:<EUI-64>:<domain>" or
-/// "ptp=<version>:traceable"), as to_string() writes it; empty when it would not be written.
+/// The text an `a=ts-refclk:` line carries for `clock` ("ptp=IEEE1588-2008:<EUI-64>:<domain>",
+/// "ptp=IEEE802.1AS-2011:<EUI-64>" or "ptp=<version>:traceable"), as to_string() writes it; empty when it
+/// would not be written (no grandmaster and not traceable, or another version).
 [[nodiscard]] auto ts_refclk_value(PtpReference const& clock) -> std::string;
 
 /// The text an `a=mediaclk:` line carries for `clock` ("direct=<offset>", else "sender").

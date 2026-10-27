@@ -123,6 +123,13 @@ class Sender
     {
         return sender_clock_ ? sdp::MediaClock::sender() : sdp::MediaClock::direct(0);
     }
+    /// The RAVENNA `a=clock-domain:PTPv2` session() writes beside ts-refclk: the grandmaster's IEEE 1588
+    /// domain; nullopt without one, or for IEEE 802.1AS.
+    [[nodiscard]] auto clock_domain() const noexcept -> std::optional<uint8_t>
+    {
+        bool const ptpv2 = grandmaster_ && grandmaster_->version != sdp::PtpVersion::ieee802_1as;
+        return ptpv2 ? std::optional{grandmaster_->domain} : std::nullopt;
+    }
 
     /// The session name (s=) of session(), the constructor's until changed; a new name bumps the
     /// session version. Off the real-time thread.

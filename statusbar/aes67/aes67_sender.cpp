@@ -443,14 +443,11 @@ auto Sender::media_description(ip::IPv4Address const& origin, bool const multica
         .channels = format_.channels,
         .packet_time_us = format_.packet_time_us(),
         .direction = sdp::Direction::recvonly,
-        // Always PTPv2 (PtpReference's default version), whatever the AVB side runs.
-        .clock = grandmaster_
-            ? std::optional{sdp::PtpReference{.grandmaster = grandmaster_->identity, .domain = grandmaster_->domain}}
-            : std::nullopt,
+        .clocks = grandmaster_ ? sdp::ReferenceClocks{.ptp = {grandmaster_->reference()}} : sdp::ReferenceClocks{},
         .media_clock = media_clock(),
         .source_filter =
             multicast ? std::optional{sdp::SourceFilter{.destination = destination_.address, .source = origin}} : std::nullopt,
-        .clock_domain = grandmaster_ ? std::optional{grandmaster_->domain} : std::nullopt,
+        .clock_domain = clock_domain(),
     };
 }
 

@@ -14,3 +14,6 @@ statusbar_add_module(
   statusbar::status
   TESTS
   sdp_test.cpp)
+
+# Fuzz harnesses (built only when -DENABLE_FUZZING=ON).
+add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/sdp_parse_fuzzer.cpp)

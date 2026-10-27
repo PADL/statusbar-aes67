@@ -23,6 +23,9 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `PayloadFormat` — one rtpmap: payload type, `Encoding`, rate, channels.
 - `Encoding` — `l16`, `l24`, `l32`, `am824`; `bytes_per_sample()`, `encoding_name()`.
 - `Connection`, `PtpReference`, `MediaClock` (`MediaClockKind`), `SourceFilter`, `RtcpAttribute`, `Direction` — the attributes above.
+- `PtpVersion` — `ieee1588_2002`, `ieee1588_2008`, `ieee1588_2019`, `ieee802_1as`, `other`; `ptp_version_name()`.
+- `ReferenceClocks` — one level's `ts-refclk` lines: every PTP reference (up to `MAX`), and whether another source was given.
+- `Session::effective_clocks()`, `Session::names_clock()`, `PtpReference::same_clock()` — the references in force for a media, and whether one of them names a given clock (AES67-2018 Clause 8.2).
 - `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings.
 - `SdpError` — `enum class`, category `statusbar.sdp`.
 
@@ -72,17 +75,33 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   transport (IEC 61883-6 32-bit subframes, as ST 2110-31).
 - `ts-refclk` (RFC 7273 §4.8): the domain may be written bare (`:0`, as AES67 devices
   do), as `domain-nmbr=0`, or left out (domain 0); a 2002 `domain-name=` is read as
-  domain 0. `to_string()` always writes it bare, 0 included, as Dante writes it, with the
+  domain 0. `to_string()` writes it bare, 0 included, as Dante writes it, with the
   grandmaster as an upper-case EUI-64 in IEEE canonical form. RFC 7273 requires a
   grandmaster or `traceable`; `parse()` tolerates a bare version and leaves the
-  grandmaster unset, and `to_string()` writes nothing for such a reference. RFC 7273
-  allows several reference clocks; the PTP one is kept.
+  grandmaster unset, and `to_string()` writes nothing for such a reference.
+- Several `ts-refclk` lines at one level are equivalent clocks (RFC 7273 §4.8), and every
+  PTP one is kept, in order, up to `ReferenceClocks::MAX`; AES67-2018 Clause 8.2 asks
+  receivers to evaluate them all. A level with any `ts-refclk` (a `localmac=` or `ntp=`
+  one included, noted in `ReferenceClocks::other` and not written) overrides the session
+  level, so `effective_clocks()` may be empty though the session names a PTP clock. With
+  no `ts-refclk` at all, RFC 7273 Section 6 says a local clock is assumed: the session
+  names no PTP clock.
+- Versions: the RFC 7273 tokens, `IEEE1588-2019` (SMPTE ST 2110-10 writes it), and
+  `IEEE802.1AS-2020`, which is not registered and reads as `IEEE802.1AS-2011` (both are
+  gPTP in domain 0); any other `ptp-version-ext` token is `PtpVersion::other`, kept but
+  naming no clock and not written. IEEE 802.1AS has no domain (AES67-2018 Clause 8.2:
+  "no domain indication is supported or necessary"): one written is read as 0, and
+  `to_string()` writes none (`ptp=IEEE802.1AS-2011:<EUI-64>`).
+- `PtpReference::same_clock()`: one grandmaster in one domain. IEEE 1588-2008, 1588-2019
+  and 802.1AS are one PTPv2 clock, so an 802.1AS reference and a 1588 one in domain 0 with
+  the same grandmaster match (a boundary clock joins them into one domain, AES67-2018
+  Annex D.1); IEEE 1588-2002 (PTPv1) matches only itself, and `traceable` nothing.
 - `mediaclk` (RFC 7273 §5): any kind other than `direct` (`sender`, `IEEE1722`) is a
   clock that cannot be derived from PTP, and `effective_media_clock_offset()` is then
   `nullopt`. `MediaClock::kind()` tells `direct`, `sender` and `other` apart
   (`effective_media_clock()` gives the clock in force); `other` is written as `sender`. A media-level clock of either kind overrides a session-level one; a level
   naming both keeps the direct one.
-- `clock-domain:PTPv2 <n>` duplicates `PtpReference::domain`; RAVENNA and Dante write it
+- `clock-domain:PTPv2 <n>` duplicates an IEEE 1588 `PtpReference::domain`; RAVENNA and Dante write it
   beside `ts-refclk` and some receivers look for it, so writers set both. Other clock
   kinds in it are not kept.
 - `to_string()` sanitises so its output always parses: line breaks in text fields become

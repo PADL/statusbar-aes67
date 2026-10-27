@@ -73,12 +73,21 @@ void write_source_filter(Out out, SourceFilter const& filter)
     std::format_to(out, "\r\n");
 }
 
-/// RFC 7273: the grandmaster as an upper-case EUI-64 in IEEE canonical form, the domain bare (0
-/// included, as Dante writes it); a reference with neither grandmaster nor traceable is not written.
-void write_clock(Out out, PtpReference const& clock)
+/// `eui` in IEEE canonical form, upper case: "00-1D-C1-FF-FE-10-6C-16".
+auto canonical_eui64(ieee::Eui64 const& eui) -> std::string
 {
-    if (auto const value = ts_refclk_value(clock); !value.empty()) {
-        std::format_to(out, "a=ts-refclk:{}\r\n", value);
+    auto const g = eui.span();
+    return std::format("{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}", g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
+}
+
+/// RFC 7273: each PTP reference, the grandmaster as an upper-case EUI-64 in IEEE canonical form, the domain
+/// bare (0 included, as Dante writes it); one ts_refclk_value() leaves empty is not written.
+void write_clocks(Out out, ReferenceClocks const& clocks)
+{
+    for (auto const& clock : clocks.ptp) {
+        if (auto const value = ts_refclk_value(clock); !value.empty()) {
+            out = std::format_to(out, "a=ts-refclk:{}\r\n", value);
+        }
     }
 }
 
@@ -134,9 +143,7 @@ void write_direction(Out out, std::optional<Direction> const direction)
 template <typename Level>
 void write_clock_attributes(Out out, Level const& level)
 {
-    if (level.clock) {
-        write_clock(out, *level.clock);
-    }
+    write_clocks(out, level.clocks);
     if (level.media_clock) {
         write_media_clock(out, *level.media_clock);
     }
@@ -212,26 +219,16 @@ void write_session_level(Out out, Session const& session)
 
 auto ts_refclk_value(PtpReference const& clock) -> std::string
 {
-    if (!clock.traceable && !clock.grandmaster) {
+    auto const version = ptp_version_name(clock.version);
+    if ((!clock.traceable && !clock.grandmaster) || version.empty()) {
         return {};
     }
-    std::string value = std::format("ptp={}", one_line(clock.version));
     if (clock.traceable) {
-        value += ":traceable";
-    } else {
-        auto const g = clock.grandmaster->span();
-        std::format_to(
-            std::back_inserter(value),
-            ":{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}:{}",
-            g[0],
-            g[1],
-            g[2],
-            g[3],
-            g[4],
-            g[5],
-            g[6],
-            g[7],
-            clock.domain);
+        return std::format("ptp={}:traceable", version);
+    }
+    std::string value = std::format("ptp={}:{}", version, canonical_eui64(*clock.grandmaster));
+    if (clock.version != PtpVersion::ieee802_1as) {
+        std::format_to(std::back_inserter(value), ":{}", clock.domain);  // AES67-2018 Clause 8.2: none for 802.1AS
     }
     return value;
 }

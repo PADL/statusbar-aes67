@@ -153,18 +153,46 @@ auto parse_network(std::string_view& rest) noexcept -> Status
     if (!clock.grandmaster) {
         return failure(SdpError::malformed_line);
     }
-    return parse_ptp_domain(rest, std::move(clock));
+    return parse_ptp_domain(rest, clock);
 }
 
-/// The text after `ptp=`: `<version>[:<gmid>|:traceable][:<domain>]`.
+/// A `ptp-version` token: RFC 7273's, IEEE1588-2019, and IEEE802.1AS-2020 as IEEE 802.1AS (its unregistered spelling).
+[[nodiscard]] auto parse_ptp_version(std::string_view const token) noexcept -> PtpVersion
+{
+    static constexpr std::array<std::pair<std::string_view, PtpVersion>, 5> VERSIONS{{
+        {"IEEE1588-2002", PtpVersion::ieee1588_2002},
+        {"IEEE1588-2008", PtpVersion::ieee1588_2008},
+        {"IEEE1588-2019", PtpVersion::ieee1588_2019},
+        {"IEEE802.1AS-2011", PtpVersion::ieee802_1as},
+        {"IEEE802.1AS-2020", PtpVersion::ieee802_1as},
+    }};
+    auto const* const it = std::ranges::find(VERSIONS, token, &std::pair<std::string_view, PtpVersion>::first);
+    return it == VERSIONS.end() ? PtpVersion::other : it->second;
+}
+
+/// The text after `ptp=`: `<version>[:<gmid>|:traceable][:<domain>]`; IEEE 802.1AS's domain is 0 whatever is
+/// written (AES67-2018 Clause 8.2).
 [[nodiscard]] auto parse_ptp_reference(std::string_view rest) -> StatusValue<PtpReference>
 {
-    PtpReference clock{};
-    clock.version = take(rest, ':');
+    PtpReference clock{.version = parse_ptp_version(take(rest, ':'))};
     if (rest.empty()) {
         return clock;
     }
-    return parse_ptp_grandmaster(rest, std::move(clock));
+    auto parsed = parse_ptp_grandmaster(rest, clock);
+    if (parsed && parsed->version == PtpVersion::ieee802_1as) {
+        parsed->domain = 0;
+    }
+    return parsed;
+}
+
+/// Whether PTP versions `a` and `b` can name one clock: PTPv1 only itself, and IEEE 1588-2008, 1588-2019 and 802.1AS
+/// one another (one PTPv2 domain across a boundary clock, AES67-2018 Annex D.1); never another token.
+[[nodiscard]] auto same_protocol(PtpVersion const a, PtpVersion const b) noexcept -> bool
+{
+    if (a == PtpVersion::other || b == PtpVersion::other) {
+        return false;
+    }
+    return (a == PtpVersion::ieee1588_2002) == (b == PtpVersion::ieee1588_2002);
 }
 
 /// The `[=<offset>]` of a direct media clock: 0 when absent.
@@ -524,17 +552,19 @@ class Parser
         return (this->*handler->parse)(rest);
     }
 
-    /// `a=ts-refclk:`; RFC 7273 allows several reference clocks, and the PTP one is kept.
+    /// `a=ts-refclk:`: every PTP reference kept, the level noting any other source (RFC 7273 Section 4.8).
     auto ts_refclk_attribute(std::string_view const rest) -> Status
     {
+        auto& clocks = media_ != nullptr ? media_->clocks : session_.clocks;
         if (!rest.starts_with("ptp=")) {
+            clocks.other = true;
             return success();
         }
         auto clock = parse_ptp_reference(rest.substr(4));
         if (!clock) {
             return std::unexpected(clock.error());
         }
-        (media_ != nullptr ? media_->clock : session_.clock) = std::move(*clock);
+        (void)clocks.ptp.try_push_back(*clock);  // beyond ReferenceClocks::MAX, ignored
         return success();
     }
 
@@ -656,6 +686,12 @@ std::array<Parser::AttributeHandler, 8> const Parser::ATTRIBUTES{{
 }};
 
 }  // namespace
+
+auto PtpReference::same_clock(PtpReference const& other) const noexcept -> bool
+{
+    return grandmaster && other.grandmaster && *grandmaster == *other.grandmaster && domain == other.domain &&
+        same_protocol(version, other.version);
+}
 
 auto parse(std::string_view text) -> StatusValue<Session>
 {

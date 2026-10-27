@@ -60,9 +60,7 @@ auto default_cadence(StreamFormat const& format, uint64_t const minimum_ns, bool
 /// The `ts-refclk` value naming the grandmaster (RFC 7273), empty when there is none.
 [[nodiscard]] auto ts_refclk_of(std::optional<Grandmaster> const& grandmaster) -> std::string
 {
-    return grandmaster
-        ? sdp::ts_refclk_value(sdp::PtpReference{.grandmaster = grandmaster->identity, .domain = grandmaster->domain})
-        : std::string{};
+    return grandmaster ? sdp::ts_refclk_value(grandmaster->reference()) : std::string{};
 }
 
 /// The PCM Media Info Block for `format` (TR-10-3); `measured_sample_rate` is the nominal rate in PTP time.
