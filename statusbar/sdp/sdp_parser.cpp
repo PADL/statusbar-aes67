@@ -171,11 +171,13 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 }
 
 /// The text after `ptp=`: `<version>[:<gmid>|:traceable][:<domain>]`; IEEE 802.1AS's domain is 0 whatever is
-/// written (AES67-2018 Clause 8.2).
-[[nodiscard]] auto parse_ptp_reference(std::string_view rest) -> StatusValue<PtpReference>
+/// written (AES67-2018 Clause 8.2). Another version is kept unparsed, and a bare one as read: neither fails.
+[[nodiscard]] auto parse_ptp_reference(std::string_view const value) -> StatusValue<PtpReference>
 {
+    auto rest = value.substr(4);
     PtpReference clock{.version = parse_ptp_version(take(rest, ':'))};
-    if (rest.empty()) {
+    if (clock.version == PtpVersion::other || rest.empty()) {
+        clock.text = value;
         return clock;
     }
     auto parsed = parse_ptp_grandmaster(rest, clock);
@@ -183,6 +185,24 @@ auto parse_network(std::string_view& rest) noexcept -> Status
         parsed->domain = 0;
     }
     return parsed;
+}
+
+/// Whether `clock` may name a clock (a known version with a grandmaster, or traceable).
+[[nodiscard]] auto may_name_a_clock(PtpReference const& clock) noexcept -> bool
+{
+    return clock.version != PtpVersion::other && (clock.grandmaster || clock.traceable);
+}
+
+/// `clock` into `clocks`; when full, in place of one that cannot name a clock if it can, else dropped.
+void keep_reference(ReferenceClocks& clocks, PtpReference clock)
+{
+    if (clocks.ptp.try_push_back(clock) != nullptr || !may_name_a_clock(clock)) {
+        return;
+    }
+    auto* const it = std::ranges::find_if(clocks.ptp, [](PtpReference const& r) { return !may_name_a_clock(r); });
+    if (it != clocks.ptp.end()) {
+        *it = std::move(clock);
+    }
 }
 
 /// Whether PTP versions `a` and `b` can name one clock: PTPv1 only itself, and IEEE 1588-2008, 1588-2019 and 802.1AS
@@ -552,19 +572,19 @@ class Parser
         return (this->*handler->parse)(rest);
     }
 
-    /// `a=ts-refclk:`: every PTP reference kept, the level noting any other source (RFC 7273 Section 4.8).
+    /// `a=ts-refclk:`: every reference kept (RFC 7273 Section 4.8), those beyond ReferenceClocks::MAX as keep_reference() says.
     auto ts_refclk_attribute(std::string_view const rest) -> Status
     {
         auto& clocks = media_ != nullptr ? media_->clocks : session_.clocks;
         if (!rest.starts_with("ptp=")) {
-            clocks.other = true;
+            (void)clocks.other.try_push_back(std::string{rest});  // beyond ReferenceClocks::MAX, ignored
             return success();
         }
-        auto clock = parse_ptp_reference(rest.substr(4));
+        auto clock = parse_ptp_reference(rest);
         if (!clock) {
             return std::unexpected(clock.error());
         }
-        (void)clocks.ptp.try_push_back(*clock);  // beyond ReferenceClocks::MAX, ignored
+        keep_reference(clocks, std::move(*clock));
         return success();
     }
 

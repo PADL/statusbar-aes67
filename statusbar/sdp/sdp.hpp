@@ -109,13 +109,21 @@ enum class PtpVersion : uint8_t
 
 /// `a=ts-refclk:ptp=<version>:<grandmaster>[:<domain>]` or `ptp=<version>:traceable` (RFC 7273 Section 4.8).
 /// The domain is read bare, as `domain-nmbr=`, or absent (0), and written bare, except for IEEE 802.1AS,
-/// which has none (AES67-2018 Clause 8.2); a bare version (no grandmaster) is read but not written.
+/// which has none (AES67-2018 Clause 8.2); another version, or a bare one, is kept and written as read (`text`).
 struct PtpReference
 {
     PtpVersion version{PtpVersion::ieee1588_2008};
     std::optional<ieee::Eui64> grandmaster;  ///< nullopt when not given, or traceable
     bool traceable{false};
     uint8_t domain{0};  ///< 0-127; always 0 for IEEE 802.1AS
+    std::string text;   ///< the value as read ("ptp=..."), for a reference with no canonical form; else empty
+
+    /// The reference naming `grandmaster` in `domain` under `version` (no domain for IEEE 802.1AS).
+    [[nodiscard]] static auto naming(
+        ieee::Eui64 const& grandmaster, uint8_t const domain, PtpVersion const version = PtpVersion::ieee1588_2008) -> PtpReference
+    {
+        return {.version = version, .grandmaster = grandmaster, .domain = version == PtpVersion::ieee802_1as ? uint8_t{0} : domain};
+    }
 
     /// Whether this names the clock `other` does: one grandmaster in one domain, an IEEE 802.1AS reference and an
     /// IEEE 1588-2008/2019 one in domain 0 being the same (AES67-2018 Clause 8.2, Annex D.1). Never for traceable.
@@ -124,16 +132,27 @@ struct PtpReference
     auto operator==(PtpReference const&) const noexcept -> bool = default;
 };
 
-/// The ts-refclk PTP references of one level, all equivalent (RFC 7273 Section 4.8); more than MAX are ignored.
+/// The ts-refclk lines of one level, all equivalent (RFC 7273 Section 4.8): up to MAX PTP references (those that can
+/// name a clock kept first) and up to MAX of other sources, kept as read.
 struct ReferenceClocks
 {
     static constexpr size_t MAX = 4;
 
     sg14::inplace_vector<PtpReference, MAX> ptp;
-    bool other{false};  ///< a ts-refclk of another source (`localmac=`, `ntp=`, ...) was given; read, never written
+    sg14::inplace_vector<std::string, MAX> other;  ///< `localmac=...`, `ntp=...`, ...: the values as read
+
+    /// A level naming `reference` alone; none when nullopt.
+    [[nodiscard]] static auto of(std::optional<PtpReference> const& reference) -> ReferenceClocks
+    {
+        ReferenceClocks clocks;
+        if (reference) {
+            clocks.ptp.push_back(*reference);
+        }
+        return clocks;
+    }
 
     /// Whether the level gives any ts-refclk at all.
-    [[nodiscard]] auto given() const noexcept -> bool { return !ptp.empty() || other; }
+    [[nodiscard]] auto given() const noexcept -> bool { return !ptp.empty() || !other.empty(); }
 
     auto operator==(ReferenceClocks const&) const noexcept -> bool = default;
 };
@@ -322,7 +341,12 @@ struct Session
     /// session's (RFC 7273 Section 4.8); empty when the level in force names no PTP clock.
     [[nodiscard]] auto effective_clocks(Media const& m) const noexcept -> std::span<PtpReference const>
     {
-        return m.clocks.given() ? std::span<PtpReference const>{m.clocks.ptp} : std::span<PtpReference const>{clocks.ptp};
+        return effective_references(m).ptp;
+    }
+    /// Every ts-refclk in force for `m`, of any source: the media level's when it gives any, else the session's.
+    [[nodiscard]] auto effective_references(Media const& m) const noexcept -> ReferenceClocks const&
+    {
+        return m.clocks.given() ? m.clocks : clocks;
     }
     /// Whether one of `m`'s references (effective_clocks()) names the clock `reference` does (PtpReference::same_clock()).
     [[nodiscard]] auto names_clock(Media const& m, PtpReference const& reference) const noexcept -> bool
@@ -367,9 +391,12 @@ struct Session
 [[nodiscard]] auto parse_origin_line(std::string_view value, Session& session) -> Status;
 
 /// The text an `a=ts-refclk:` line carries for `clock` ("ptp=IEEE1588-2008:<EUI-64>:<domain>",
-/// "ptp=IEEE802.1AS-2011:<EUI-64>" or "ptp=<version>:traceable"), as to_string() writes it; empty when it
-/// would not be written (no grandmaster and not traceable, or another version).
+/// "ptp=IEEE802.1AS-2011:<EUI-64>" or "ptp=<version>:traceable"), as to_string() writes it; a reference with no
+/// canonical form (another version, no grandmaster) as read (`text`); empty when it has neither.
 [[nodiscard]] auto ts_refclk_value(PtpReference const& clock) -> std::string;
+
+/// Every `a=ts-refclk:` value `clocks` gives, as to_string() writes them, space separated; "no ts-refclk" for none.
+[[nodiscard]] auto ts_refclk_text(ReferenceClocks const& clocks) -> std::string;
 
 /// The text an `a=mediaclk:` line carries for `clock` ("direct=<offset>", else "sender").
 [[nodiscard]] auto media_clock_value(MediaClock const& clock) -> std::string;

@@ -443,7 +443,7 @@ auto Sender::media_description(ip::IPv4Address const& origin, bool const multica
         .channels = format_.channels,
         .packet_time_us = format_.packet_time_us(),
         .direction = sdp::Direction::recvonly,
-        .clocks = grandmaster_ ? sdp::ReferenceClocks{.ptp = {grandmaster_->reference()}} : sdp::ReferenceClocks{},
+        .clocks = sdp::ReferenceClocks::of(grandmaster_.transform(&Grandmaster::reference)),
         .media_clock = media_clock(),
         .source_filter =
             multicast ? std::optional{sdp::SourceFilter{.destination = destination_.address, .source = origin}} : std::nullopt,

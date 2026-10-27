@@ -235,7 +235,7 @@ TEST(sdp, keeps_the_ptp_clock_among_others)
     EXPECT_TRUE(session.has_value());
     auto const& m = session->media.at(0);
     EXPECT_TRUE(session->effective_clocks(m).size() == 1 && session->effective_clocks(m).front().grandmaster.has_value());
-    EXPECT_TRUE(m.clocks.other);
+    EXPECT_TRUE(m.clocks.other.size() == 1 && m.clocks.other.front() == "localmac=00-1D-C1-0E-10-C4");
     EXPECT_EQ(session->effective_media_clock_offset(m).value_or(0), uint32_t{1266592257});
 }
 
@@ -589,15 +589,48 @@ TEST(sdp_ts_refclk, every_reference_at_a_level_is_kept_in_order)
     EXPECT_TRUE(parse(written) == session);
 }
 
-TEST(sdp_ts_refclk, references_beyond_the_capacity_are_ignored)
+TEST(sdp_ts_refclk, references_beyond_the_capacity_give_way_to_ones_that_name_a_clock)
 {
-    std::string text{DANTE};
-    for (size_t i = 0; i < ReferenceClocks::MAX + 2; ++i) {
-        text += "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n";
+    std::string text{"v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=x\r\nc=IN IP4 239.69.1.1/32\r\nt=0 0\r\nm=audio 5004 RTP/AVP 97\r\n"
+                     "a=rtpmap:97 L24/48000/2\r\n"};
+    for (size_t i = 0; i < ReferenceClocks::MAX; ++i) {
+        text += "a=ts-refclk:ptp=IEEE1588-2030:junk\r\n";  // unknown: kept, naming nothing
     }
+    text += "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n";
+    text += "a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n";
+    text += "a=ts-refclk:ptp=IEEE1588-2031:more\r\n";  // full, and names nothing: dropped
     auto const session = parse(text);
     EXPECT_TRUE(session.has_value());
-    EXPECT_EQ(session->media.at(0).clocks.ptp.size(), ReferenceClocks::MAX);
+    auto const& clocks = session->media.at(0).clocks.ptp;
+    EXPECT_EQ(clocks.size(), ReferenceClocks::MAX);
+    EXPECT_TRUE(clocks[0].grandmaster.has_value() && clocks[1].traceable && clocks[2].version == PtpVersion::other);
+}
+
+TEST(sdp_ts_refclk, an_unknown_version_never_fails_the_session_and_is_written_as_read)
+{
+    std::string text{DANTE};
+    text += "a=ts-refclk:ptp=IEEE1588-2030:not-a-gmid:999\r\n";
+    text += "a=ts-refclk:ptp=IEEE1588-2008\r\n";  // a bare version
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const written = to_string(*session);
+    EXPECT_TRUE(written.find("a=ts-refclk:ptp=IEEE1588-2030:not-a-gmid:999\r\n") != std::string::npos);
+    EXPECT_TRUE(written.find("a=ts-refclk:ptp=IEEE1588-2008\r\n") != std::string::npos);
+    EXPECT_EQ(ts_refclk_value(session->media.at(0).clocks.ptp[1]), std::string{"ptp=IEEE1588-2030:not-a-gmid:999"});
+}
+
+TEST(sdp_ts_refclk, every_reference_round_trips_with_a_media_level_override)
+{
+    std::string text{DANTE};
+    text.erase(text.find("a=ts-refclk:"), std::string_view{"a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n"}.size());
+    text.replace(text.find("t=0 0\r\n") + 7, 0, "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n");
+    text += "a=ts-refclk:localmac=00-1D-C1-0E-10-C4\r\na=ts-refclk:ptp=IEEE802.1AS-2030:x\r\n";
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const again = parse(to_string(*session));
+    EXPECT_TRUE(again == session);
+    EXPECT_TRUE(again && again->effective_clocks(again->media.at(0)).size() == 1);  // the media level's unknown one
+    EXPECT_TRUE(again && !again->names_clock(again->media.at(0), session->clocks.ptp.front()));
 }
 
 TEST(sdp_ts_refclk, a_media_level_reference_overrides_the_sessions)
@@ -613,7 +646,7 @@ TEST(sdp_ts_refclk, a_media_level_reference_overrides_the_sessions)
     session = parse(text);
     EXPECT_TRUE(session.has_value());
     EXPECT_TRUE(session->effective_clocks(session->media.at(0)).empty());  // the media's: no PTP clock
-    EXPECT_FALSE(session->clocks.other);
+    EXPECT_TRUE(session->clocks.other.empty());
 }
 
 TEST(sdp_ts_refclk, an_802_1as_reference_is_written_without_a_domain)
@@ -640,7 +673,8 @@ TEST(sdp_ts_refclk, each_version_token_reads)
     EXPECT_TRUE(version_of("IEEE802.1AS-2011")->version == PtpVersion::ieee802_1as);
     EXPECT_TRUE(version_of("IEEE802.1AS-2020")->version == PtpVersion::ieee802_1as);  // the unregistered spelling
     EXPECT_TRUE(version_of("IEEE1588-2030")->version == PtpVersion::other);
-    EXPECT_TRUE(version_of("IEEE1588-2030")->grandmaster.has_value());
+    EXPECT_FALSE(version_of("IEEE1588-2030")->grandmaster.has_value());  // kept unparsed, as read
+    EXPECT_EQ(version_of("IEEE1588-2030")->text, std::string{"ptp=IEEE1588-2030:00-1D-C1-FF-FE-0E-10-C4:0"});
 }
 
 TEST(sdp_ts_refclk, an_802_1as_reference_written_with_a_domain_reads_as_domain_zero)

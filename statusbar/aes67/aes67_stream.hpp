@@ -124,11 +124,7 @@ struct Grandmaster
     sdp::PtpVersion version{sdp::PtpVersion::ieee1588_2008};
 
     /// The RFC 7273 reference that names it.
-    [[nodiscard]] auto reference() const noexcept -> sdp::PtpReference
-    {
-        return {
-            .version = version, .grandmaster = identity, .domain = version == sdp::PtpVersion::ieee802_1as ? uint8_t{0} : domain};
-    }
+    [[nodiscard]] auto reference() const -> sdp::PtpReference { return sdp::PtpReference::naming(identity, domain, version); }
 
     auto operator==(Grandmaster const&) const noexcept -> bool = default;
 };

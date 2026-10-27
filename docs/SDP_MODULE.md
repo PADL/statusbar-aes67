@@ -24,7 +24,7 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `Encoding` — `l16`, `l24`, `l32`, `am824`; `bytes_per_sample()`, `encoding_name()`.
 - `Connection`, `PtpReference`, `MediaClock` (`MediaClockKind`), `SourceFilter`, `RtcpAttribute`, `Direction` — the attributes above.
 - `PtpVersion` — `ieee1588_2002`, `ieee1588_2008`, `ieee1588_2019`, `ieee802_1as`, `other`; `ptp_version_name()`.
-- `ReferenceClocks` — one level's `ts-refclk` lines: every PTP reference (up to `MAX`), and whether another source was given.
+- `ReferenceClocks` — one level's `ts-refclk` lines: the PTP references and the other sources (up to `MAX` each); `ReferenceClocks::of()`, `PtpReference::naming()` build a sender's.
 - `Session::effective_clocks()`, `Session::names_clock()`, `PtpReference::same_clock()` — the references in force for a media, and whether one of them names a given clock (AES67-2018 Clause 8.2).
 - `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings.
 - `SdpError` — `enum class`, category `statusbar.sdp`.
@@ -77,19 +77,22 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   do), as `domain-nmbr=0`, or left out (domain 0); a 2002 `domain-name=` is read as
   domain 0. `to_string()` writes it bare, 0 included, as Dante writes it, with the
   grandmaster as an upper-case EUI-64 in IEEE canonical form. RFC 7273 requires a
-  grandmaster or `traceable`; `parse()` tolerates a bare version and leaves the
-  grandmaster unset, and `to_string()` writes nothing for such a reference.
+  grandmaster or `traceable`; `parse()` tolerates a bare version, keeps it as read
+  (`PtpReference::text`) and `to_string()` writes it back so.
 - Several `ts-refclk` lines at one level are equivalent clocks (RFC 7273 §4.8), and every
-  PTP one is kept, in order, up to `ReferenceClocks::MAX`; AES67-2018 Clause 8.2 asks
-  receivers to evaluate them all. A level with any `ts-refclk` (a `localmac=` or `ntp=`
-  one included, noted in `ReferenceClocks::other` and not written) overrides the session
-  level, so `effective_clocks()` may be empty though the session names a PTP clock. With
-  no `ts-refclk` at all, RFC 7273 Section 6 says a local clock is assumed: the session
-  names no PTP clock.
+  one is kept, in order: the PTP references in `ReferenceClocks::ptp`, other sources
+  (`localmac=`, `ntp=`, ...) as read in `ReferenceClocks::other`, up to
+  `ReferenceClocks::MAX` each. AES67-2018 Clause 8.2 asks receivers to evaluate them all.
+  Past `MAX`, a PTP reference that can name a clock (a known version with a grandmaster,
+  or `traceable`) takes the place of one that cannot; any other is dropped. A level with
+  any `ts-refclk` overrides the session level, so `effective_clocks()` may be empty though
+  the session names a PTP clock. With no `ts-refclk` at all, RFC 7273 Section 6 says a
+  local clock is assumed: the session names no PTP clock. `to_string()` writes every
+  reference, so a parsed session writes back as it was given.
 - Versions: the RFC 7273 tokens, `IEEE1588-2019` (SMPTE ST 2110-10 writes it), and
   `IEEE802.1AS-2020`, which is not registered and reads as `IEEE802.1AS-2011` (both are
-  gPTP in domain 0); any other `ptp-version-ext` token is `PtpVersion::other`, kept but
-  naming no clock and not written. IEEE 802.1AS has no domain (AES67-2018 Clause 8.2:
+  gPTP in domain 0); any other `ptp-version-ext` token is `PtpVersion::other`, kept
+  unparsed and as read, naming no clock, and never failing `parse()`. IEEE 802.1AS has no domain (AES67-2018 Clause 8.2:
   "no domain indication is supported or necessary"): one written is read as 0, and
   `to_string()` writes none (`ptp=IEEE802.1AS-2011:<EUI-64>`).
 - `PtpReference::same_clock()`: one grandmaster in one domain. IEEE 1588-2008, 1588-2019

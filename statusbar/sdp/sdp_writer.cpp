@@ -74,20 +74,23 @@ void write_source_filter(Out out, SourceFilter const& filter)
 }
 
 /// `eui` in IEEE canonical form, upper case: "00-1D-C1-FF-FE-10-6C-16".
-auto canonical_eui64(ieee::Eui64 const& eui) -> std::string
+[[nodiscard]] auto canonical_eui64(ieee::Eui64 const& eui) -> std::string
 {
     auto const g = eui.span();
     return std::format("{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}", g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7]);
 }
 
-/// RFC 7273: each PTP reference, the grandmaster as an upper-case EUI-64 in IEEE canonical form, the domain
-/// bare (0 included, as Dante writes it); one ts_refclk_value() leaves empty is not written.
+/// RFC 7273: each PTP reference as ts_refclk_value() gives it (one it leaves empty is not written), then each other
+/// source as read.
 void write_clocks(Out out, ReferenceClocks const& clocks)
 {
     for (auto const& clock : clocks.ptp) {
         if (auto const value = ts_refclk_value(clock); !value.empty()) {
             out = std::format_to(out, "a=ts-refclk:{}\r\n", value);
         }
+    }
+    for (auto const& value : clocks.other) {
+        out = std::format_to(out, "a=ts-refclk:{}\r\n", one_line(value));
     }
 }
 
@@ -221,7 +224,7 @@ auto ts_refclk_value(PtpReference const& clock) -> std::string
 {
     auto const version = ptp_version_name(clock.version);
     if ((!clock.traceable && !clock.grandmaster) || version.empty()) {
-        return {};
+        return one_line(clock.text);  // as read, or nothing
     }
     if (clock.traceable) {
         return std::format("ptp={}:traceable", version);
@@ -231,6 +234,19 @@ auto ts_refclk_value(PtpReference const& clock) -> std::string
         std::format_to(std::back_inserter(value), ":{}", clock.domain);  // AES67-2018 Clause 8.2: none for 802.1AS
     }
     return value;
+}
+
+auto ts_refclk_text(ReferenceClocks const& clocks) -> std::string
+{
+    std::string text;
+    auto const add = [&text](std::string const& value) { text += (text.empty() || value.empty() ? "" : " ") + value; };
+    for (auto const& clock : clocks.ptp) {
+        add(ts_refclk_value(clock));
+    }
+    for (auto const& value : clocks.other) {
+        add(one_line(value));
+    }
+    return text.empty() ? std::string{"no ts-refclk"} : text;
 }
 
 auto media_clock_value(MediaClock const& clock) -> std::string
