@@ -35,9 +35,9 @@ add_subdirectory(aes67)
 # Populate the package INTERFACE library — skipped under an outer aggregate
 # build, which populates a single shared `statusbar` itself.
 if(NOT STATUSBAR_AGGREGATE_BUILD)
-  target_link_libraries(statusbar INTERFACE statusbar-mediaclock statusbar-rtp statusbar-sdp
-                                            statusbar-sap statusbar-aes67
-                                            statusbar::test)
+  target_link_libraries(
+    statusbar INTERFACE statusbar-mediaclock statusbar-rtp statusbar-sdp
+                        statusbar-sap statusbar-aes67 statusbar::test)
 endif()
 
 # Standalone per-package test binary (statusbar_package_test_binary in
