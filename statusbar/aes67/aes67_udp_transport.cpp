@@ -47,18 +47,31 @@ class UdpReceivePort final : public ReceivePort
     auto receive(std::span<Datagram> const out) noexcept -> size_t override
     {
         size_t const want = std::min(out.size(), UdpTransport::RECEIVE_BATCH);
-        for (size_t i = 0; i < want; ++i) {
+        rearm(want);
+        int const got = ::recvmmsg(fd_.get(), messages_.data(), static_cast<unsigned int>(want), MSG_DONTWAIT, nullptr);
+        if (got <= 0) {
+            return 0;
+        }
+        return take(static_cast<size_t>(got), out);
+    }
+
+  private:
+    /// Resets the first `count` headers' lengths and flags for recvmmsg().
+    void rearm(size_t const count) noexcept
+    {
+        for (size_t i = 0; i < count; ++i) {
             messages_[i].msg_len = 0;
             messages_[i].msg_hdr.msg_namelen = sizeof(sources_[i]);
             messages_[i].msg_hdr.msg_controllen = controls_[i].size();
             messages_[i].msg_hdr.msg_flags = 0;
         }
-        int const got = ::recvmmsg(fd_.get(), messages_.data(), static_cast<unsigned int>(want), MSG_DONTWAIT, nullptr);
-        if (got <= 0) {
-            return 0;
-        }
+    }
+
+    /// Hands the `got` datagrams read to `out`, skipping any truncated or for another address or interface.
+    [[nodiscard]] auto take(size_t const got, std::span<Datagram> const out) noexcept -> size_t
+    {
         size_t written = 0;
-        for (size_t i = 0; i < static_cast<size_t>(got); ++i) {
+        for (size_t i = 0; i < got; ++i) {
             if ((messages_[i].msg_hdr.msg_flags & MSG_TRUNC) != 0 ||
                 !destined_for(messages_[i].msg_hdr, destination_.address, interface_index_)) {
                 continue;  // larger than any AES67 packet, or another address's or interface's
@@ -71,7 +84,6 @@ class UdpReceivePort final : public ReceivePort
         return written;
     }
 
-  private:
     UdpTransport& transport_;
     net::FileDescriptor fd_;
     Endpoint destination_;
@@ -143,11 +155,10 @@ class UdpSendPort final : public SendPort
     void enqueue(size_t const length) noexcept
     {
         iov_[queued_] = {.iov_base = buffers_[queued_].data(), .iov_len = length};
-        messages_[queued_] = {};
-        messages_[queued_].msg_hdr.msg_name = &destination_;
-        messages_[queued_].msg_hdr.msg_namelen = sizeof(destination_);
-        messages_[queued_].msg_hdr.msg_iov = &iov_[queued_];
-        messages_[queued_].msg_hdr.msg_iovlen = 1;
+        messages_[queued_] = {
+            .msg_hdr = {.msg_name = &destination_, .msg_namelen = sizeof(destination_), .msg_iov = &iov_[queued_], .msg_iovlen = 1},
+            .msg_len = 0,
+        };
         ++queued_;
     }
 
@@ -158,6 +169,13 @@ class UdpSendPort final : public SendPort
     std::array<iovec, UdpTransport::SEND_BATCH> iov_{};
     std::array<mmsghdr, UdpTransport::SEND_BATCH> messages_{};
 };
+
+/// A receive buffer of 1 MiB, best effort, for a burst after a stall.
+void set_receive_buffer(int const fd) noexcept
+{
+    int const buffer = 1 << 20;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
+}
 
 }  // namespace
 
@@ -177,8 +195,7 @@ UdpTransport::~UdpTransport()
 
 auto UdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>>
 {
-    bool const multicast = destination.address.is_multicast();
-    if (!multicast && std::ranges::find(unicast_, destination) != unicast_.end()) {
+    if (!destination.address.is_multicast() && std::ranges::find(unicast_, destination) != unicast_.end()) {
         return failure(std::errc::address_in_use);  // one unicast receiver per address and port
     }
     // Bound to the destination address itself: a group's socket sees only that group, and a
@@ -187,13 +204,18 @@ auto UdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std:
     if (!fd) {
         return failure(fd.error());
     }
-    int const buffer = 1 << 20;
-    (void)::setsockopt(fd->get(), SOL_SOCKET, SO_RCVBUF, &buffer, sizeof(buffer));
-    if (!multicast) {
+    set_receive_buffer(fd->get());
+    retain(destination);
+    return std::make_unique<UdpReceivePort>(
+        *this, std::move(*fd), destination, destination.address.is_multicast() ? interface_.index : 0U);
+}
+
+void UdpTransport::retain(Endpoint const& destination)
+{
+    if (!destination.address.is_multicast()) {
         unicast_.push_back(destination);
     }
     ++live_ports_;
-    return std::make_unique<UdpReceivePort>(*this, std::move(*fd), destination, multicast ? interface_.index : 0U);
 }
 
 void UdpTransport::release(Endpoint const& destination) noexcept

@@ -11,6 +11,7 @@
 #include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
+#include "statusbar/rtp/rtp_header.hpp"
 #include "statusbar/rtp/rtp_sequence.hpp"
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/status/status.hpp"
@@ -86,8 +87,41 @@ class Receiver
     /// Account a validated packet's place in the sequence; false to drop it.
     auto place(uint16_t sequence, uint32_t frames) noexcept -> bool;
     void reset_stream() noexcept;
+    /// From configure(), the media validated: open the port and set the stream up from the SDP.
+    [[nodiscard]] auto open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
+        -> Status;
+    /// The stream's payload type, offset, source filter and RTCP endpoints, from the SDP.
+    void apply_media(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection);
+    /// clear(), then open the transport for `destination`; on failure State::error and error().
+    [[nodiscard]] auto reopen(Endpoint const& destination) -> Status;
+    /// offset_'s value for a stream with `clock`: a direct clock's offset, flagged set; 0 when sender-clocked.
+    [[nodiscard]] auto initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t;
     /// From configure(): the RTCP endpoints, or why there are none.
     void set_rtcp(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection);
+    /// The RTCP endpoints for the media (RFC 3605), without the DSCP; fails rtcp_multiplexed or no_rtcp_peer.
+    [[nodiscard]] auto rtcp_options_for(
+        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection) const -> StatusValue<RtcpOptions>;
+    /// Receives and accepts up to MAX_BATCHES batches; true when every batch came back full (more may wait).
+    [[nodiscard]] auto receive_batches(uint64_t now_index) noexcept -> bool;
+    /// Sets the due-tick gate after a drain: open after a backlog, else a tick before the next packet is due.
+    void set_gate(uint64_t now_index, bool backlog) noexcept;
+    /// The packet's frames when it is this stream's, from its source and in sequence; nullopt to drop it.
+    [[nodiscard]] auto admit(rtp::RtpPacket const& packet, ip::IPv4Address const& source, uint64_t now_index) noexcept
+        -> std::optional<uint32_t>;
+    /// Learns the SSRC, or adopts a new one after the learnt source fell silent; false to drop the packet.
+    [[nodiscard]] auto admit_source(uint32_t ssrc, uint64_t now_index) noexcept -> bool;
+    /// Validates the sequence number (RFC 3550 Appendix A.1) and places it; false to drop the packet.
+    [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames) noexcept -> bool;
+    /// Notes an accepted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.
+    void note_arrival(uint32_t timestamp, uint64_t now_index) noexcept;
+    /// Hands a placed packet to the handler at its sample index and counts it.
+    void deliver(rtp::RtpPacket const& packet, uint32_t frames, uint64_t offset, uint64_t now_index) noexcept;
+    /// Restarts the reorder window at `sequence`.
+    void start_window(uint16_t sequence) noexcept;
+    /// Moves the window `ahead` to `sequence`, counting the packets skipped as lost.
+    void advance_window(uint16_t sequence, uint16_t ahead, uint32_t frames) noexcept;
+    /// Marks a late packet `behind` the newest; false for a duplicate.
+    [[nodiscard]] auto mark_late(uint16_t behind, uint32_t frames) noexcept -> bool;
 
     StreamFormat format_;
     FrameHandler handler_;
@@ -118,9 +152,14 @@ class Receiver
     uint64_t gate_set_at_{0};
     uint64_t polls_{0};
     uint64_t skipped_polls_{0};
-    uint64_t newest_end_{0};     ///< this drain: the newest packet's end index
-    uint32_t newest_frames_{0};  ///< and its frames (0: none placed)
-    bool heard_{false};          ///< this drain: a packet of the learnt source was accepted
+    /// What the current drain has seen.
+    struct DrainState
+    {
+        uint64_t newest_end{0};     ///< the newest packet's end index
+        uint32_t newest_frames{0};  ///< and its frames (0: none placed)
+        bool heard{false};          ///< a packet of the learnt source was accepted
+    };
+    DrainState this_drain_{};
 
     // RFC 3550 Appendix A.8 interarrival jitter, and what drain() publishes.
     uint32_t jitter_x16_{0};

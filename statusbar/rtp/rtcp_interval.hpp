@@ -7,6 +7,7 @@
 /// reconsideration or member tables (Sections 6.3.3 to 6.3.7): the caller states the members and
 /// senders it assumes, and injects the random generator.
 
+#include <algorithm>
 #include <cstdint>
 #include <numbers>
 #include <random>
@@ -25,6 +26,26 @@ struct RtcpIntervalParams
     bool initial{false};                 ///< no report sent yet: Tmin is halved (Section 6.2)
 };
 
+/// The participants counted and the RTCP bandwidth they share: when senders are at most a quarter of
+/// the members, senders share a quarter of it and receivers the rest (RFC 3550 Section 6.3.1).
+struct RtcpBandwidthShare
+{
+    double participants;  ///< members, or the senders or receivers among them
+    double bandwidth;     ///< octets per second
+};
+
+/// The share of the RTCP bandwidth this participant's group gets (Section 6.3.1).
+[[nodiscard]] constexpr auto rtcp_bandwidth_share(RtcpIntervalParams const& p) noexcept -> RtcpBandwidthShare
+{
+    if (p.senders > p.members / 4.0) {
+        return {.participants = static_cast<double>(p.members), .bandwidth = p.rtcp_bandwidth};
+    }
+    if (p.we_sent) {
+        return {.participants = static_cast<double>(p.senders), .bandwidth = p.rtcp_bandwidth * 0.25};
+    }
+    return {.participants = static_cast<double>(p.members - p.senders), .bandwidth = p.rtcp_bandwidth * 0.75};
+}
+
 /// The deterministic interval Td of Section 6.3.1 in nanoseconds: the larger of Tmin (halved for
 /// the first report) and the members' share of the RTCP bandwidth, at most a day.
 [[nodiscard]] constexpr auto deterministic_rtcp_interval(RtcpIntervalParams const& p) noexcept -> uint64_t
@@ -33,23 +54,11 @@ struct RtcpIntervalParams
         return p.initial ? p.minimum_ns / 2 : p.minimum_ns;
     }
     double const minimum = p.initial ? static_cast<double>(p.minimum_ns) / 2.0 : static_cast<double>(p.minimum_ns);
-    // Senders get a quarter of the bandwidth when they are at most a quarter of the members.
-    auto n = static_cast<double>(p.members);
-    double bandwidth = p.rtcp_bandwidth;
-    if (p.senders <= p.members / 4.0) {
-        if (p.we_sent) {
-            bandwidth *= 0.25;
-            n = static_cast<double>(p.senders);
-        } else {
-            bandwidth *= 0.75;
-            n = static_cast<double>(p.members - p.senders);
-        }
-    }
+    auto const share = rtcp_bandwidth_share(p);
+    double const interval = share.participants * p.average_size / share.bandwidth * 1e9;
     // Clamped to a day, so the conversion is defined for any inputs.
     constexpr double DAY_NS = 86'400e9;
-    double const share = n * p.average_size / bandwidth * 1e9;
-    double const td = share > minimum ? share : minimum;
-    return static_cast<uint64_t>(td < DAY_NS ? td : DAY_NS);
+    return static_cast<uint64_t>(std::min(std::max(minimum, interval), DAY_NS));
 }
 
 /// Td scaled by a uniform draw in [0.5, 1.5) and divided by e - 3/2 (Section 6.3.1), in ns.

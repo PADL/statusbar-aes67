@@ -92,21 +92,32 @@ class RtpSequence
     /// The figures for the interval since the previous call (or since validation).
     constexpr auto report() noexcept -> LossReport
     {
-        uint32_t const expected_now = expected();
-        uint32_t const expected_interval = expected_now - expected_prior_;
-        uint32_t const received_interval = received_ - received_prior_;
-        expected_prior_ = expected_now;
-        received_prior_ = received_;
-
-        auto const lost_interval = static_cast<int64_t>(expected_interval) - static_cast<int64_t>(received_interval);
+        auto const interval = take_interval();
+        auto const lost_interval = static_cast<int64_t>(interval.expected) - static_cast<int64_t>(interval.received);
         uint8_t const fraction =
-            (expected_interval == 0 || lost_interval <= 0) ? 0 : static_cast<uint8_t>((lost_interval << 8) / expected_interval);
+            (interval.expected == 0 || lost_interval <= 0) ? 0 : static_cast<uint8_t>((lost_interval << 8) / interval.expected);
         return {
             .fraction_lost = fraction, .cumulative_lost = static_cast<int32_t>(std::clamp<int64_t>(lost(), -0x800000, 0x7FFFFF))};
     }
 
   private:
     static constexpr uint32_t SEQ_MOD = 1U << 16U;
+
+    /// Packets expected and received, as running totals or over an interval.
+    struct Counts
+    {
+        uint32_t expected{0};
+        uint32_t received{0};
+    };
+
+    /// The counts since the previous call, and starts the next interval (RFC 3550 Appendix A.3).
+    [[nodiscard]] constexpr auto take_interval() noexcept -> Counts
+    {
+        Counts const now{.expected = expected(), .received = received_};
+        Counts const interval{.expected = now.expected - prior_.expected, .received = now.received - prior_.received};
+        prior_ = now;
+        return interval;
+    }
 
     constexpr void restart(uint16_t const seq) noexcept
     {
@@ -115,8 +126,7 @@ class RtpSequence
         bad_seq_ = SEQ_MOD + 1;  // matches no sequence number
         cycles_ = 0;
         received_ = 0;
-        received_prior_ = 0;
-        expected_prior_ = 0;
+        prior_ = {};
     }
 
     bool started_{false};
@@ -126,8 +136,7 @@ class RtpSequence
     uint32_t base_seq_{0};
     uint32_t bad_seq_{SEQ_MOD + 1};
     uint32_t received_{0};
-    uint32_t received_prior_{0};
-    uint32_t expected_prior_{0};
+    Counts prior_{};  ///< the totals at the previous report
 };
 
 }  // namespace statusbar::rtp

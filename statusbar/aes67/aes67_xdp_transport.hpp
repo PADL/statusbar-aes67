@@ -302,6 +302,30 @@ class XdpTransport final : public Transport
     void install_rules() noexcept;
     void release_held() noexcept;
     void refill_tx_pool() noexcept;
+    /// Destructor: frees every port state and RTCP pipe, live or not yet taken.
+    void delete_port_states() noexcept;
+    /// Control thread: why a receive port for `destination` cannot open, if it cannot.
+    [[nodiscard]] auto check_receive(Endpoint const& destination) const noexcept -> Status;
+    /// Control thread: a socket that joins `group`, so the switch sends it here.
+    [[nodiscard]] auto open_group_socket(ip::IPv4Address const& group) const -> StatusValue<net::FileDescriptor>;
+    /// Control thread: counts one more port on `group`.
+    void retain_group(ip::IPv4Address const& group);
+    /// Control thread: a new port's state, handed to the real-time thread.
+    [[nodiscard]] auto publish_port(Endpoint const& destination, net::FileDescriptor fd) -> PortState*;
+    /// Control thread: a new RTCP pipe, handed to the real-time thread.
+    [[nodiscard]] auto publish_rtcp_pipe(Endpoint const& destination) -> RtcpPipe*;
+    /// Real-time thread: take new ports, retire closed ones; true when the set changed.
+    [[nodiscard]] auto update_ports() noexcept -> bool;
+    /// Real-time thread: reap TX completions, refill the TX pool and the fill ring, begin the cycle.
+    void start_cycle() noexcept;
+    /// Real-time thread: take the received frames, holding those a receive port kept.
+    void receive_frames() noexcept;
+    /// Real-time thread: offers a frame to its ports and RTCP pipes; true when a port kept it.
+    [[nodiscard]] auto dispatch(rtp::UdpFrame const& frame) noexcept -> bool;
+    /// Real-time thread: offers an RTP datagram to the receive ports of `destination`; true when one kept it.
+    [[nodiscard]] auto offer_to_ports(Endpoint const& destination, Datagram const& datagram) noexcept -> bool;
+    /// Real-time thread: copies a datagram to the RTCP pipes of `destination`.
+    void offer_to_rtcp(Endpoint const& destination, Datagram const& datagram) noexcept;
 
     InterfaceInfo interface_;
     net::XdpContext context_;

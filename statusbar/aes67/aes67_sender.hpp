@@ -191,6 +191,31 @@ class Sender
 
     /// Draws from rng_ (xorshift64*, seeded by configure()): no syscall on the ticking thread.
     [[nodiscard]] auto next_random() noexcept -> uint32_t;
+    /// A random SSRC, neither 0 nor the current one.
+    [[nodiscard]] auto fresh_ssrc() noexcept -> uint32_t;
+
+    /// clear(), then open the transport to `destination`; on failure State::error and error().
+    [[nodiscard]] auto open_port(Destination const& destination) -> Status;
+    /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.
+    void seed_run();
+    /// A new session version, and the session id from the origin and name when none was set.
+    void renew_session();
+    /// Ready, not paused or started, with nothing published yet.
+    void become_ready() noexcept;
+    /// The newest packet due at `now_index`, next_index_ resynchronised; nullopt when none is to be sent.
+    [[nodiscard]] auto newest_due(uint64_t now_index) noexcept -> std::optional<uint64_t>;
+    /// Moves next_index_ toward `newest` after a start or a clock step; false to wait out a small step back.
+    [[nodiscard]] auto resync(uint64_t newest) noexcept -> bool;
+    /// Sends the packets from next_index_ up to `newest`, then flushes them.
+    void send_until(uint64_t newest) noexcept;
+    /// Renders and queues the packet at next_index_; true when the transport took it.
+    [[nodiscard]] auto send_packet(rtp::RtpHeader const& header) noexcept -> bool;
+    /// Flushes the `queued` packets and counts what went out.
+    void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
+    /// Adds `packets` sent to the SR's counts and publishes them.
+    void report_sent(uint32_t packets, uint32_t run_ssrc) noexcept;
+    /// The SDP media section this sender describes.
+    [[nodiscard]] auto media_description(ip::IPv4Address const& origin, bool multicast) const -> sdp::Media;
 
     std::atomic<uint32_t> ssrc_{0};
     uint64_t rng_{1};
@@ -198,8 +223,13 @@ class Sender
     uint16_t sequence_{0};
     std::string channel_order_;
     uint8_t info_block_version_{0};
-    uint32_t rtcp_packets_{0};  ///< since configure(): the SR's counts (real-time thread)
-    uint32_t rtcp_octets_{0};
+    /// Since the run began: the SR's counts (real-time thread).
+    struct RtcpCounts
+    {
+        uint32_t packets{0};
+        uint32_t octets{0};
+    };
+    RtcpCounts rtcp_counts_{};
     itc::SeqlockValue<SendState> send_state_;  ///< real-time -> RTCP session
     uint64_t session_id_{0};
     uint64_t session_version_{0};

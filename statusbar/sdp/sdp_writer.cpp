@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <format>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -109,47 +110,102 @@ void write_rtpmap(Out out, PayloadFormat const& format)
         out, "a=rtpmap:{} {}/{}/{}\r\n", format.payload_type, encoding_name(format.encoding), format.sample_rate, format.channels);
 }
 
-void write_media(Out out, Media const& media)
+/// The `i=` and `c=` lines of a session or media level, each when present.
+template <typename Level>
+void write_information_and_connection(Out out, Level const& level)
+{
+    if (!level.information.empty()) {
+        out = std::format_to(out, "i={}\r\n", one_line(level.information));
+    }
+    if (level.connection) {
+        write_connection(out, *level.connection);
+    }
+}
+
+/// The direction attribute, when set.
+void write_direction(Out out, std::optional<Direction> const direction)
+{
+    if (direction) {
+        std::format_to(out, "a={}\r\n", direction_name(*direction));
+    }
+}
+
+/// The clock and source attributes of a session or media level, each when present (RFC 7273, RFC 4570).
+template <typename Level>
+void write_clock_attributes(Out out, Level const& level)
+{
+    if (level.clock) {
+        write_clock(out, *level.clock);
+    }
+    if (level.media_clock) {
+        write_media_clock(out, *level.media_clock);
+    }
+    if (level.clock_domain) {
+        out = std::format_to(out, "a=clock-domain:PTPv2 {}\r\n", *level.clock_domain);
+    }
+    if (level.source_filter) {
+        write_source_filter(out, *level.source_filter);
+    }
+}
+
+/// The `m=` line: the preferred payload type, then the alternatives.
+void write_media_line(Out out, Media const& media)
 {
     out = std::format_to(out, "m=audio {} RTP/AVP {}", media.port, media.payload_type);
     for (auto const& alternative : media.other_formats()) {
         out = std::format_to(out, " {}", alternative.payload_type);
     }
-    out = std::format_to(out, "\r\n");
-    if (!media.information.empty()) {
-        out = std::format_to(out, "i={}\r\n", one_line(media.information));
-    }
-    if (media.connection) {
-        write_connection(out, *media.connection);
-    }
-    if (media.direction) {
-        out = std::format_to(out, "a={}\r\n", direction_name(*media.direction));
-    }
+    std::format_to(out, "\r\n");
+}
+
+/// An rtpmap for each payload type, in order of preference, then the ptime.
+void write_formats(Out out, Media const& media)
+{
     write_rtpmap(out, media.format());
     for (auto const& alternative : media.other_formats()) {
         write_rtpmap(out, alternative);
     }
     write_ptime(out, media.packet_time_us);
-    if (media.clock) {
-        write_clock(out, *media.clock);
+}
+
+/// `a=rtcp:<port>[ IN IP4 <address>]` (RFC 3605).
+void write_rtcp(Out out, RtcpAttribute const& rtcp)
+{
+    out = std::format_to(out, "a=rtcp:{}", rtcp.port);
+    if (rtcp.address) {
+        out = std::format_to(out, " IN IP4 ");
+        out = ip::format_to(out, *rtcp.address);
     }
-    if (media.media_clock) {
-        write_media_clock(out, *media.media_clock);
-    }
-    if (media.clock_domain) {
-        out = std::format_to(out, "a=clock-domain:PTPv2 {}\r\n", *media.clock_domain);
-    }
-    if (media.source_filter) {
-        write_source_filter(out, *media.source_filter);
-    }
+    std::format_to(out, "\r\n");
+}
+
+void write_media(Out out, Media const& media)
+{
+    write_media_line(out, media);
+    write_information_and_connection(out, media);
+    write_direction(out, media.direction);
+    write_formats(out, media);
+    write_clock_attributes(out, media);
     if (media.rtcp) {
-        out = std::format_to(out, "a=rtcp:{}", media.rtcp->port);
-        if (media.rtcp->address) {
-            out = std::format_to(out, " IN IP4 ");
-            out = ip::format_to(out, *media.rtcp->address);
-        }
-        std::format_to(out, "\r\n");
+        write_rtcp(out, *media.rtcp);
     }
+}
+
+/// The session level: the `v=`, `o=` and `s=` lines, `i=`, `c=`, `t=`, then the session attributes.
+void write_session_level(Out out, Session const& session)
+{
+    out = std::format_to(
+        out,
+        "v=0\r\no={} {} {} IN IP4 {}\r\ns={}\r\n",
+        token(session.username, "-"),
+        session.session_id,
+        session.session_version,
+        token(session.origin_address, "0.0.0.0"),
+        session.name.empty() ? std::string{"-"} : one_line(session.name));
+    write_information_and_connection(out, session);
+    out = std::format_to(out, "t=0 0\r\n");
+    write_direction(out, session.direction);
+    write_clock_attributes(out, session);
 }
 
 }  // namespace
@@ -188,39 +244,9 @@ auto media_clock_value(MediaClock const& clock) -> std::string
 auto to_string(Session const& session) -> std::string
 {
     std::string text;
-    auto out = std::back_inserter(text);
-    out = std::format_to(
-        out,
-        "v=0\r\no={} {} {} IN IP4 {}\r\ns={}\r\n",
-        token(session.username, "-"),
-        session.session_id,
-        session.session_version,
-        token(session.origin_address, "0.0.0.0"),
-        session.name.empty() ? std::string{"-"} : one_line(session.name));
-    if (!session.information.empty()) {
-        out = std::format_to(out, "i={}\r\n", one_line(session.information));
-    }
-    if (session.connection) {
-        write_connection(out, *session.connection);
-    }
-    out = std::format_to(out, "t=0 0\r\n");
-    if (session.direction) {
-        out = std::format_to(out, "a={}\r\n", direction_name(*session.direction));
-    }
-    if (session.clock) {
-        write_clock(out, *session.clock);
-    }
-    if (session.media_clock) {
-        write_media_clock(out, *session.media_clock);
-    }
-    if (session.clock_domain) {
-        out = std::format_to(out, "a=clock-domain:PTPv2 {}\r\n", *session.clock_domain);
-    }
-    if (session.source_filter) {
-        write_source_filter(out, *session.source_filter);
-    }
+    write_session_level(std::back_inserter(text), session);
     for (auto const& media : session.media) {
-        write_media(out, media);
+        write_media(std::back_inserter(text), media);
     }
     return text;
 }

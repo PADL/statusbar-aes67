@@ -81,37 +81,29 @@ struct TimebaseEstimatorParams
     /// RTCP sender reports (RFC 3550 Section 6.4.1), about one a second.
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
-        TimebaseEstimatorParams p{};
-        p.window_pairs = 16;
-        p.lock_pairs = 4;
-        p.lock_span_ns = 0;
-        p.step_pairs = 2;
-        p.reference_timeout_ns = 3'000'000'000;
-        return p;
+        return TimebaseEstimatorParams{
+            .window_pairs = 16, .lock_pairs = 4, .lock_span_ns = 0, .step_pairs = 2, .reference_timeout_ns = 3'000'000'000};
     }
 
     /// A CRF stream (Milan v1.2 Section 7.3), 500 timestamps a second (48 kHz, timestamp_interval 96).
     [[nodiscard]] static constexpr auto crf() noexcept -> TimebaseEstimatorParams
     {
-        TimebaseEstimatorParams p{};
-        p.window_pairs = 1024;
-        p.lock_pairs = 128;
-        return p;
+        return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128};
     }
 
     /// PHC-to-PHC cross-timestamps against a followed PTP instance, 16 a second; count is that
     /// PTP's time in ns at rate_hz 1e9, and domain time is that PTP's time (absolute).
     [[nodiscard]] static constexpr auto phc_pairs() noexcept -> TimebaseEstimatorParams
     {
-        TimebaseEstimatorParams p{};
-        p.window_pairs = 64;
-        p.lock_pairs = 16;
-        p.lock_span_ns = 900'000'000;
-        p.lock_rms_ns = 1'000;
-        p.step_threshold_ns = 2'000;
-        p.reference_timeout_ns = 500'000'000;
-        p.absolute = true;
-        return p;
+        return TimebaseEstimatorParams{
+            .window_pairs = 64,
+            .lock_pairs = 16,
+            .lock_span_ns = 900'000'000,
+            .lock_rms_ns = 1'000,
+            .step_threshold_ns = 2'000,
+            .reference_timeout_ns = 500'000'000,
+            .absolute = true,
+        };
     }
 };
 
@@ -181,6 +173,24 @@ class TimebaseEstimator
     auto reset_window() noexcept -> void;
     auto source_discontinuity() noexcept -> void;
     auto refit() noexcept -> void;
+    /// Fits a least-squares line through the window, centred on `anchor`; false, the old line kept, when degenerate.
+    [[nodiscard]] auto fit_line(Pair const& anchor) noexcept -> bool;
+    /// The RMS residual of the window about the fitted line, ns.
+    [[nodiscard]] auto rms_residual() const noexcept -> double;
+    /// Restarts the window when the source's epoch or rate changes, and remembers them.
+    auto track_source(ClockSample const& sample) noexcept -> void;
+    /// Accepts a pair's reference time; false when out of order or repeated.
+    [[nodiscard]] auto accept_reference(std::int64_t reference_ns) noexcept -> bool;
+    /// Holds a pair off the fit when its residual says it may be a step; true when it was held.
+    [[nodiscard]] auto screen_step(Pair const& p) noexcept -> bool;
+    /// Holds a step candidate; enough in a row restart the window from them (a step, once the fit was long).
+    auto hold(Pair const& p) noexcept -> void;
+    /// Notes whether the reference is present at `now_ns`; pairs from before a silence are dropped.
+    auto check_reference(std::int64_t now_ns) noexcept -> void;
+    /// Publishes the locked line, joining it to the one in use when the lock is new; true when published.
+    [[nodiscard]] auto publish_locked(std::int64_t now_ns, bool refitted) noexcept -> bool;
+    /// Goes to holdover, then unlocked once the holdover runs out; true when the line stopped running.
+    [[nodiscard]] auto lose_lock(std::int64_t now_ns) noexcept -> bool;
     [[nodiscard]] auto pair_at(std::size_t i) const noexcept -> Pair const&;
     [[nodiscard]] auto newest() const noexcept -> Pair const& { return pair_at(size_ - 1); }
     [[nodiscard]] auto residual(Pair const& p) const noexcept -> double;

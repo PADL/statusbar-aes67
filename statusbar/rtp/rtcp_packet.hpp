@@ -8,6 +8,7 @@
 
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/rtp/rtp_error.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <cstddef>
@@ -230,6 +231,14 @@ class RtcpWriter
     /// Room for `size` more bytes, else the sticky error.
     auto reserve(size_t size) noexcept -> bool;
     void append_zeros(size_t count) noexcept;
+    /// Sets the sticky error to `error` when `condition` holds and nothing was refused before.
+    void refuse_if(bool condition, RtpError error) noexcept;
+    /// Reserves `size` bytes and writes the header and SSRC; false, writing nothing, when refused.
+    [[nodiscard]] auto begin_packet(uint8_t count, uint8_t type, size_t size, uint32_t ssrc) noexcept -> bool;
+    /// Appends the report blocks in order.
+    void append_blocks(std::span<ReportBlock const> blocks) noexcept;
+    /// Appends one SDES item: type, length, text (at most 255 bytes).
+    void append_sdes_item(uint8_t type, std::string_view text) noexcept;
 
     BufferSerializerBuilderWithBuffer writer_;
     std::error_code error_;

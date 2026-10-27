@@ -70,7 +70,7 @@ auto TimebaseEstimator::push(Pair const& p) noexcept -> void
 }
 
 auto TimebaseEstimator::reset_window() noexcept -> void
-{
+{  // NOLINT(statusbar-block-statements): the window's fields reset together
     head_ = 0;
     size_ = 0;
     pending_ = 0;
@@ -103,11 +103,8 @@ auto TimebaseEstimator::residual(Pair const& p) const noexcept -> double
     return ds - intercept_ - (slope_ * static_cast<double>(p.reference_ns - anchor_reference_ns_));
 }
 
-auto TimebaseEstimator::feed(ClockSample const& sample) noexcept -> void
+auto TimebaseEstimator::track_source(ClockSample const& sample) noexcept -> void
 {
-    if (sample.rate_hz == 0) {
-        return;
-    }
     if (have_source_ && (sample.epoch != source_epoch_ || sample.rate_hz != source_rate_hz_)) {
         outliers_ += static_cast<std::uint32_t>(held_count_);
         source_discontinuity();
@@ -115,46 +112,65 @@ auto TimebaseEstimator::feed(ClockSample const& sample) noexcept -> void
     have_source_ = true;
     source_epoch_ = sample.epoch;
     source_rate_hz_ = sample.rate_hz;
+}
 
-    Pair const p{
-        .reference_ns = static_cast<std::int64_t>(sample.reference_ns), .source_ns = source_ns_of(sample.count, sample.rate_hz)};
-    if (have_reference_ && p.reference_ns <= last_reference_ns_) {
-        return;  // out of order or repeated
+auto TimebaseEstimator::accept_reference(std::int64_t const reference_ns) noexcept -> bool
+{
+    if (have_reference_ && reference_ns <= last_reference_ns_) {
+        return false;
     }
     have_reference_ = true;
-    last_reference_ns_ = p.reference_ns;
-    if (fit_valid_ && fit_pairs_ >= check_pairs()) {
-        if (std::abs(residual(p)) > static_cast<double>(params_.step_threshold_ns)) {
-            held_[held_count_++] = p;
-            if (held_count_ < params_.step_pairs) {
-                return;
-            }
-            if (fit_pairs_ >= params_.lock_pairs) {  // a shorter fit is restarted, not stepped
-                ++steps_;
-                last_step_ns_ = held_[0].reference_ns;
-            }
-            std::size_t const n = held_count_;
-            source_discontinuity();
-            for (std::size_t i = 0; i < n; ++i) {
-                push(held_[i]);
-            }
-            return;
-        }
-        outliers_ += static_cast<std::uint32_t>(held_count_);
-        held_count_ = 0;
+    last_reference_ns_ = reference_ns;
+    return true;
+}
+
+auto TimebaseEstimator::hold(Pair const& p) noexcept -> void
+{
+    held_[held_count_++] = p;
+    if (held_count_ < params_.step_pairs) {
+        return;
+    }
+    if (fit_pairs_ >= params_.lock_pairs) {  // a shorter fit is restarted, not stepped
+        ++steps_;
+        last_step_ns_ = held_[0].reference_ns;
+    }
+    std::size_t const n = held_count_;
+    source_discontinuity();
+    for (std::size_t i = 0; i < n; ++i) {
+        push(held_[i]);
+    }
+}
+
+auto TimebaseEstimator::screen_step(Pair const& p) noexcept -> bool
+{
+    if (!fit_valid_ || fit_pairs_ < check_pairs()) {
+        return false;
+    }
+    if (std::abs(residual(p)) > static_cast<double>(params_.step_threshold_ns)) {
+        hold(p);
+        return true;
+    }
+    outliers_ += static_cast<std::uint32_t>(held_count_);  // the pairs held were outliers, not a step
+    held_count_ = 0;
+    return false;
+}
+
+auto TimebaseEstimator::feed(ClockSample const& sample) noexcept -> void
+{
+    if (sample.rate_hz == 0) {
+        return;
+    }
+    track_source(sample);
+    Pair const p{
+        .reference_ns = static_cast<std::int64_t>(sample.reference_ns), .source_ns = source_ns_of(sample.count, sample.rate_hz)};
+    if (!accept_reference(p.reference_ns) || screen_step(p)) {
+        return;
     }
     push(p);
 }
 
-auto TimebaseEstimator::refit() noexcept -> void
-{
-    pending_ = 0;
-    if (size_ < 2) {
-        fit_valid_ = false;
-        return;
-    }
-    // Centre on the newest pair: integer subtraction first, so nothing loses a nanosecond.
-    Pair const anchor = newest();
+auto TimebaseEstimator::fit_line(Pair const& anchor) noexcept -> bool
+{  // NOLINT(statusbar-block-statements): an ordinary least-squares fit, read as one derivation
     double const n = static_cast<double>(size_);
     double sum_x = 0.0;
     double sum_y = 0.0;
@@ -173,22 +189,34 @@ auto TimebaseEstimator::refit() noexcept -> void
     double const sxx = sum_xx - (n * mean_x * mean_x);
     double const sxy = sum_xy - (n * mean_x * mean_y);
     if (sxx <= 0.0) {
-        fit_valid_ = false;
-        return;
+        return false;
     }
     slope_ = sxy / sxx;
     intercept_ = mean_y - (slope_ * mean_x);
     anchor_reference_ns_ = anchor.reference_ns;
     anchor_source_ns_ = anchor.source_ns;
+    return true;
+}
 
+auto TimebaseEstimator::rms_residual() const noexcept -> double
+{
     double rss = 0.0;
     for_each_pair([&](Pair const& p) {
         double const r = residual(p);
         rss += r * r;
     });
-    rms_ns_ = std::sqrt(rss / n);
-    fit_valid_ = true;
-    fit_pairs_ = size_;
+    return std::sqrt(rss / static_cast<double>(size_));
+}
+
+auto TimebaseEstimator::refit() noexcept -> void
+{
+    pending_ = 0;
+    // Centre on the newest pair: integer subtraction first, so nothing loses a nanosecond.
+    fit_valid_ = size_ >= 2 && fit_line(newest());
+    if (fit_valid_) {
+        rms_ns_ = rms_residual();
+        fit_pairs_ = size_;
+    }
 }
 
 auto TimebaseEstimator::meets_lock() const noexcept -> bool
@@ -209,35 +237,34 @@ auto TimebaseEstimator::line() const noexcept -> Timebase
     };
 }
 
-auto TimebaseEstimator::update(std::int64_t now_ns) noexcept -> bool
+auto TimebaseEstimator::check_reference(std::int64_t const now_ns) noexcept -> void
 {
-    bool const stopped = std::exchange(stop_pending_, false);
-    bool const refitted = pending_ != 0;
-    if (refitted) {
-        refit();
-    }
     reference_present_ = have_reference_ && (now_ns - last_reference_ns_) <= params_.reference_timeout_ns;
     if (!reference_present_ && size_ != 0) {
-        reset_window();  // pairs from before a silence do not lock the line after it
+        reset_window();
     }
+}
 
-    if (reference_present_ && meets_lock()) {
-        bool const joined = state_ != State::locked;
-        if (joined) {
-            // Join the new line to the one in use at now_ns (only the slope changes), or take the
-            // source's own time when absolute.
-            domain_constant_ns_ = params_.absolute ? 0 : published_.to_domain(now_ns) - fitted_source_ns(now_ns);
-            ++published_.epoch;
-            state_ = State::locked;
-        }
-        if (!joined && !refitted) {
-            return false;
-        }
-        last_good_ns_ = now_ns;
-        published_ = line();
-        return true;
+auto TimebaseEstimator::publish_locked(std::int64_t const now_ns, bool const refitted) noexcept -> bool
+{
+    bool const joined = state_ != State::locked;
+    if (joined) {
+        // Join the new line to the one in use at now_ns (only the slope changes), or take the
+        // source's own time when absolute.
+        domain_constant_ns_ = params_.absolute ? 0 : published_.to_domain(now_ns) - fitted_source_ns(now_ns);
+        ++published_.epoch;
+        state_ = State::locked;
     }
+    if (!joined && !refitted) {
+        return false;
+    }
+    last_good_ns_ = now_ns;
+    published_ = line();
+    return true;
+}
 
+auto TimebaseEstimator::lose_lock(std::int64_t const now_ns) noexcept -> bool
+{
     if (state_ == State::locked) {
         state_ = State::holdover;
     }
@@ -246,7 +273,21 @@ auto TimebaseEstimator::update(std::int64_t now_ns) noexcept -> bool
         published_.running = false;
         return true;
     }
-    return stopped;
+    return false;
+}
+
+auto TimebaseEstimator::update(std::int64_t now_ns) noexcept -> bool
+{
+    bool const stopped = std::exchange(stop_pending_, false);
+    bool const refitted = pending_ != 0;
+    if (refitted) {
+        refit();
+    }
+    check_reference(now_ns);
+    if (reference_present_ && meets_lock()) {
+        return publish_locked(now_ns, refitted);
+    }
+    return lose_lock(now_ns) || stopped;
 }
 
 auto TimebaseEstimator::status() const noexcept -> TimebaseEstimatorStatus

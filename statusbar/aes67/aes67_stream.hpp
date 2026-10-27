@@ -7,11 +7,13 @@
 /// PTP sample index, on the real-time thread, never allocating), its destination, counters, state,
 /// and the figures it publishes for its RTCP session.
 
+#include "statusbar/aes67/aes67_error.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/sg14/inplace_function.h"
+#include "statusbar/status/status.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -39,6 +41,31 @@ struct StreamFormat
 
     auto operator==(StreamFormat const&) const noexcept -> bool = default;
 };
+
+/// The media at `media_index`, its formats reordered to prefer `encoding` (else the primary, which
+/// check_media_format() refuses); fails no_media.
+[[nodiscard]] inline auto select_media(sdp::Session const& session, size_t const media_index, sdp::Encoding const encoding)
+    -> StatusValue<sdp::Media>
+{
+    if (media_index >= session.media.size()) {
+        return failure(Aes67Error::no_media);
+    }
+    auto media = session.media[media_index];
+    (void)media.prefer(encoding);
+    return media;
+}
+
+/// Fails encoding_mismatch or format_mismatch unless the media's encoding, channels and rate are `format`'s.
+[[nodiscard]] inline auto check_media_format(sdp::Media const& media, StreamFormat const& format) noexcept -> Status
+{
+    if (media.encoding != format.encoding) {
+        return failure(Aes67Error::encoding_mismatch);
+    }
+    if (media.channels != format.channels || media.sample_rate != format.sample_rate) {
+        return failure(Aes67Error::format_mismatch);
+    }
+    return success();
+}
 
 /// One silent sample of `encoding` as a big-endian word: zero for linear PCM; for AM824 the
 /// MBLA label 0x40 with a zero sample (IEC 61883-6 Clause 6.2), as a zero word is IEC 60958 data.

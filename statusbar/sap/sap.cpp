@@ -47,11 +47,51 @@ auto hash_of(std::string_view const sdp) noexcept -> uint16_t
     return value == 0 ? uint16_t{1} : value;  // 0 means "no hash"
 }
 
+/// A version 1 header with no IPv6 origin, encryption or compression, and room for its authentication data.
+[[nodiscard]] auto is_supported_header(std::span<uint8_t const> const packet) noexcept -> bool
+{
+    if (packet.size() < 8) {
+        return false;
+    }
+    uint8_t const flags = packet[0];
+    return (flags & 0xE0U) == SAP_V1 && (flags & (SAP_IPV6 | SAP_ENCRYPTED | SAP_COMPRESSED)) == 0 &&
+        packet.size() >= 8 + (size_t{packet[1]} * 4);
+}
+
+/// Takes the optional payload type from `rest`: SDP text starts "v=0" (a deletion's may be only its "o="
+/// line, or nothing), anything else is a NUL-terminated type. False when the NUL is missing.
+[[nodiscard]] auto take_payload_type(std::string_view& rest, std::string& payload_type) -> bool
+{
+    if (rest.empty() || rest.starts_with("v=") || rest.starts_with("o=")) {
+        return true;
+    }
+    auto const nul = rest.find('\0');
+    if (nul == std::string_view::npos) {
+        return false;
+    }
+    payload_type = std::string{rest.substr(0, nul)};
+    rest.remove_prefix(nul + 1);
+    return true;
+}
+
+/// Connects `fd` to `destination`:`port`, so send() needs no address.
+[[nodiscard]] auto connect_to(int const fd, ip::IPv4Address const& destination, uint16_t const port) noexcept -> Status
+{
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(destination.to_uint32());
+    if (::connect(fd, net::sockaddr_cast(address), sizeof(address)) != 0) {
+        return failure(net::errno_code());
+    }
+    return success();
+}
+
 }  // namespace
 
 auto make_sap_packet(bool const deletion, uint16_t const message_id_hash, ip::IPv4Address const& origin, std::string_view const sdp)
     -> std::vector<uint8_t>
-{
+{  // NOLINT(statusbar-block-statements): the RFC 2974 Section 3 header, field by field
     std::vector<uint8_t> packet;
     packet.reserve(8 + SAP_PAYLOAD_TYPE.size() + 1 + sdp.size());
     packet.push_back(static_cast<uint8_t>(SAP_V1 | (deletion ? SAP_DELETION : 0U)));
@@ -69,31 +109,17 @@ auto make_sap_packet(bool const deletion, uint16_t const message_id_hash, ip::IP
 
 auto parse_sap_packet(std::span<uint8_t const> const packet) -> std::optional<SapMessage>
 {
-    if (packet.size() < 8) {
+    if (!is_supported_header(packet)) {
         return std::nullopt;
     }
-    uint8_t const flags = packet[0];
-    if ((flags & 0xE0U) != SAP_V1 || (flags & (SAP_IPV6 | SAP_ENCRYPTED | SAP_COMPRESSED)) != 0) {
+    SapMessage message{
+        .deletion = (packet[0] & SAP_DELETION) != 0,
+        .message_id_hash = static_cast<uint16_t>((packet[2] << 8U) | packet[3]),
+        .origin = ip::IPv4Address{packet[4], packet[5], packet[6], packet[7]},
+    };
+    std::string_view rest = as_string_view(packet.subspan(8 + (size_t{packet[1]} * 4)));
+    if (!take_payload_type(rest, message.payload_type)) {
         return std::nullopt;
-    }
-    size_t const auth = size_t{packet[1]} * 4;
-    if (packet.size() < 8 + auth) {
-        return std::nullopt;
-    }
-    SapMessage message{};
-    message.deletion = (flags & SAP_DELETION) != 0;
-    message.message_id_hash = static_cast<uint16_t>((packet[2] << 8U) | packet[3]);
-    message.origin = ip::IPv4Address{packet[4], packet[5], packet[6], packet[7]};
-    std::string_view rest = as_string_view(packet.subspan(8 + auth));
-    // The payload type is optional: SDP text starts "v=0" (a deletion's may
-    // be only its "o=" line, or nothing).
-    if (!rest.empty() && !rest.starts_with("v=") && !rest.starts_with("o=")) {
-        auto const nul = rest.find('\0');
-        if (nul == std::string_view::npos) {
-            return std::nullopt;
-        }
-        message.payload_type = std::string{rest.substr(0, nul)};
-        rest.remove_prefix(nul + 1);
     }
     message.sdp = rest;
     return message;
@@ -115,12 +141,8 @@ auto SapAnnouncer::open(
             return failure(set.error());
         }
     }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(destination.to_uint32());
-    if (::connect(fd->get(), net::sockaddr_cast(address), sizeof(address)) != 0) {
-        return failure(net::errno_code());
+    if (auto connected = connect_to(fd->get(), destination, port); !connected) {
+        return failure(connected.error());
     }
     return std::make_unique<SapAnnouncer>(std::move(*fd), origin);
 }

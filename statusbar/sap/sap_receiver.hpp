@@ -111,6 +111,15 @@ class SapDirectory
 
   private:
     [[nodiscard]] auto entry_timeout_ns(Entry const& entry) const noexcept -> int64_t;
+    /// The entry a deletion names, or end(): by its o= line when it carries one that reads, else by message id hash.
+    [[nodiscard]] auto deleted_entry(SapMessage const& message) -> std::vector<Entry>::iterator;
+    /// A deletion: the entry it names, removed.
+    [[nodiscard]] auto handle_deletion(SapMessage const& message) -> std::optional<Event>;
+    /// An announcement: a new entry, or a changed one; nothing for a copy, a late version or a full directory.
+    [[nodiscard]] auto handle_announcement(SapMessage const& message, int64_t now_ns) -> std::optional<Event>;
+    /// A new session, announced; nothing once the directory holds MAX_SESSIONS.
+    [[nodiscard]] auto add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t now_ns)
+        -> std::optional<Event>;
 
     int64_t timeout_ns_;
     std::vector<Entry> entries_;

@@ -11,6 +11,7 @@
 #include "statusbar/aes67/aes67_sender.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
+#include "statusbar/mediaclock/mediaclock_ptp_clock.hpp"
 #include "statusbar/mediaclock/mediaclock_timebase.hpp"
 #include "statusbar/rtp/rtcp_interval.hpp"
 #include "statusbar/rtp/rtcp_packet.hpp"
@@ -194,6 +195,36 @@ class RtcpSession
     /// Write the SR (a sender sending) or RR (a receiver) due; none for a sender not sending.
     auto write_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept -> Report;
     void write_receiver_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept;
+    /// A sample index, its presentation time in PTP ns, and the measured rate an SR carries.
+    struct ReportTime
+    {
+        uint64_t index{0};
+        uint64_t time_ns{0};
+        uint32_t measured_rate{0};
+    };
+    /// The index and time an SR at `now_ns` pairs; nullopt when the rate or the domain's outputs are not sending.
+    [[nodiscard]] auto report_time(uint64_t now_ns) const noexcept -> std::optional<ReportTime>;
+    /// report_time() in the sender's media clock domain (timebase_).
+    [[nodiscard]] auto domain_report_time(mediaclock::PtpMediaClock const& clock, uint64_t now_ns) const noexcept
+        -> std::optional<ReportTime>;
+    /// The rate the Info Block carries for `rate_offset`: kept until it moves a whole hertz.
+    [[nodiscard]] auto measured_rate(double rate_offset) const noexcept -> uint32_t;
+    /// The SR with the Info Block, remembered for the round trip.
+    void write_sender_report(rtp::RtcpWriter& writer, SendState const& state, ReportTime const& at, uint64_t now_ns);
+    /// Serialises the Info Block, version `version`, for the sender's current inputs; empty when it does not serialise.
+    void rebuild_info_block(uint8_t version, uint32_t measured_sample_rate);
+    /// The sender's published state while it is sending since its last configure().
+    [[nodiscard]] auto sending_state() const noexcept -> std::optional<SendState>;
+    /// The report block on the stream's source (RFC 3550 Section 6.4.1).
+    [[nodiscard]] auto report_block(ReceiveState const& state, uint64_t now_ns) noexcept -> rtp::ReportBlock;
+    /// The fraction lost since the last report, in 1/256ths (Appendix A.3); restarts on a new source.
+    [[nodiscard]] auto take_fraction_lost(ReceiveState const& state) noexcept -> uint8_t;
+    /// The round trip a report block echoing one of the SRs sent gives (RFC 3550 Section 6.4.1).
+    [[nodiscard]] auto round_trip_ns(rtp::ReportBlock const& block, uint64_t now_ns) const noexcept -> std::optional<uint64_t>;
+    /// The stream's SR: remembered for the next report block, and its time pair taken.
+    void take_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
+    /// The remote's CNAME and BYE.
+    void note_remote(rtp::RtcpCompound const& compound, uint32_t remote);
     void handle(std::span<uint8_t const> datagram, uint64_t now_ns) noexcept;
     /// The Info Block for the sender's current inputs (rebuilt when its version or the rate changes).
     void refresh_info_block(uint32_t measured_sample_rate);
@@ -227,12 +258,20 @@ class RtcpSession
     size_t sent_next_{0};
 
     // Receiver: the remote's last SR and the last report's cumulative figures.
-    std::optional<uint32_t> last_sr_lsr_;
-    uint32_t last_sr_ssrc_{0};
-    uint64_t last_sr_arrival_ns_{0};
+    struct LastSenderReport
+    {
+        uint32_t lsr{0};
+        uint32_t ssrc{0};
+        uint64_t arrival_ns{0};
+    };
+    struct Totals
+    {
+        uint32_t expected{0};
+        uint32_t received{0};
+    };
+    std::optional<LastSenderReport> last_sr_;
     uint32_t reported_ssrc_{0};
-    uint32_t prior_expected_{0};
-    uint32_t prior_received_{0};
+    Totals prior_{};
 };
 
 }  // namespace statusbar::aes67

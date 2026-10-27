@@ -50,6 +50,9 @@ class UdpTransport final : public Transport
     void release(Endpoint const& destination) noexcept;
 
   private:
+    /// Counts a new receive port, and claims a unicast destination for it.
+    void retain(Endpoint const& destination);
+
     InterfaceInfo interface_;
     std::vector<Endpoint> unicast_;  ///< destinations of the unicast receive ports (control thread)
     size_t live_ports_{0};           ///< receive ports not yet destroyed (control thread)

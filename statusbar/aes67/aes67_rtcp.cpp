@@ -44,6 +44,42 @@ auto default_cadence(StreamFormat const& format, uint64_t const minimum_ns, bool
     return std::make_unique<Rfc3550Interval>(params, random());
 }
 
+/// The options a session takes: a CNAME of at most 255 bytes (RFC 3550 Section 6.5) and, for a
+/// sender, a report interval.
+[[nodiscard]] auto check_options(RtcpSessionOptions const& options, bool const sender) noexcept -> Status
+{
+    if (options.cname.size() > 255) {
+        return failure(rtp::RtpError::field_too_long);
+    }
+    if (sender && options.interval_ms == 0) {
+        return failure(std::errc::invalid_argument);
+    }
+    return success();
+}
+
+/// The `ts-refclk` value naming the grandmaster (RFC 7273), empty when there is none.
+[[nodiscard]] auto ts_refclk_of(std::optional<Grandmaster> const& grandmaster) -> std::string
+{
+    return grandmaster
+        ? sdp::ts_refclk_value(sdp::PtpReference{.grandmaster = grandmaster->identity, .domain = grandmaster->domain})
+        : std::string{};
+}
+
+/// The PCM Media Info Block for `format` (TR-10-3); `measured_sample_rate` is the nominal rate in PTP time.
+[[nodiscard]] auto pcm_media_info(
+    StreamFormat const& format, std::string_view const channel_order, uint32_t const measured_sample_rate) noexcept
+    -> rtp::IpmxPcmMediaInfo
+{
+    return rtp::IpmxPcmMediaInfo{
+        .sampling_rate = format.sample_rate,
+        .sample_size = static_cast<uint8_t>(sdp::bytes_per_sample(format.encoding) * 8),
+        .channel_count = static_cast<uint8_t>(std::min<uint16_t>(format.channels, 255)),
+        .packet_time_us = static_cast<uint16_t>(format.packet_time_us()),
+        .measured_sample_rate = measured_sample_rate,
+        .channel_order = channel_order,
+    };
+}
+
 }  // namespace
 
 auto sender_clock_offset(SenderReportTime const& report, mediaclock::Timebase const& timebase, uint32_t const sample_rate) noexcept
@@ -66,11 +102,8 @@ auto RtcpSession::open_sender(Sender const& sender, Transport& transport, RtcpSe
     if (!rtcp) {
         return failure(Aes67Error::not_configured);
     }
-    if (options.cname.size() > 255) {
-        return failure(rtp::RtpError::field_too_long);
-    }
-    if (options.interval_ms == 0) {
-        return failure(std::errc::invalid_argument);
+    if (auto const checked = check_options(options, true); !checked) {
+        return forward_failure(checked);
     }
     auto port = transport.open_rtcp(*rtcp);
     if (!port) {
@@ -86,8 +119,8 @@ auto RtcpSession::open_receiver(Receiver const& receiver, Transport& transport, 
     if (!rtcp) {
         return failure(rtcp.error());
     }
-    if (options.cname.size() > 255) {
-        return failure(rtp::RtpError::field_too_long);
+    if (auto const checked = check_options(options, false); !checked) {
+        return forward_failure(checked);
     }
     auto port = transport.open_rtcp(*rtcp);
     if (!port) {
@@ -224,48 +257,77 @@ auto RtcpSession::write_report(rtp::RtcpWriter& writer, uint64_t const now_ns) n
         write_receiver_report(writer, now_ns);
         return Report::rr;
     }
+    auto const state = sending_state();
+    auto const at = report_time(now_ns);
+    if (!state || !at) {
+        return Report::none;
+    }
+    write_sender_report(writer, *state, *at, now_ns);
+    return Report::sr;
+}
+
+auto RtcpSession::sending_state() const noexcept -> std::optional<SendState>
+{
     SendState const state = sender_->send_state();
     if (!sender_->configured() || state.ssrc != sender_->ssrc()) {
-        return Report::none;  // not sending, or not since the last configure()
+        return std::nullopt;  // not sending, or not since the last configure()
     }
+    return state;
+}
+
+auto RtcpSession::report_time(uint64_t const now_ns) const noexcept -> std::optional<ReportTime>
+{
     // The SR pairs a sample index with its presentation time exactly (TR-10-1 Section 8.7: the
     // PTP truncated form), the index the latest at or before now, in the sender's domain.
     auto const clock = mediaclock::PtpMediaClock::make(sample_rate_);
     if (!clock) {
-        return Report::none;
+        return std::nullopt;
     }
-    uint64_t index = 0;
-    uint64_t time_ns = 0;
-    uint32_t measured_rate = sample_rate_;
     if (timebase_ == nullptr) {
-        index = clock->index_at(now_ns);
-        time_ns = clock->time_of(index);
-    } else {
-        mediaclock::Timebase const timebase = timebase_->load();
-        int64_t const domain_ns = timebase.to_domain(static_cast<int64_t>(now_ns));
-        if (!timebase.running || domain_ns < 0) {
-            return Report::none;  // the domain's outputs are not sending
-        }
-        index = clock->index_at(static_cast<uint64_t>(domain_ns));
-        time_ns = static_cast<uint64_t>(timebase.from_domain(static_cast<int64_t>(clock->time_of(index))));
-        // Kept until the rate moves a whole hertz from it, so fit noise does not churn the version.
-        double const rate = static_cast<double>(sample_rate_) * (1.0 + timebase.rate_offset);
-        measured_rate = (info_block_rate_ != 0 && std::fabs(rate - info_block_rate_) < 1.0)
-            ? info_block_rate_
-            : static_cast<uint32_t>(std::llround(rate));
+        uint64_t const index = clock->index_at(now_ns);
+        return ReportTime{.index = index, .time_ns = clock->time_of(index), .measured_rate = sample_rate_};
     }
-    auto const truncated = rtp::ptp_truncated_from_ns(time_ns);
-    rtp::SenderInfo info{};
-    info.ntp_msw = truncated.seconds;
-    info.ntp_lsw = truncated.nanoseconds;
-    info.rtp_timestamp = mediaclock::PtpMediaClock::rtp_timestamp(index, 0);
-    info.packet_count = state.packets;
-    info.octet_count = state.octets;
-    refresh_info_block(measured_rate);
+    return domain_report_time(*clock, now_ns);
+}
+
+auto RtcpSession::domain_report_time(mediaclock::PtpMediaClock const& clock, uint64_t const now_ns) const noexcept
+    -> std::optional<ReportTime>
+{
+    mediaclock::Timebase const timebase = timebase_->load();
+    int64_t const domain_ns = timebase.to_domain(static_cast<int64_t>(now_ns));
+    if (!timebase.running || domain_ns < 0) {
+        return std::nullopt;  // the domain's outputs are not sending
+    }
+    uint64_t const index = clock.index_at(static_cast<uint64_t>(domain_ns));
+    return ReportTime{
+        .index = index,
+        .time_ns = static_cast<uint64_t>(timebase.from_domain(static_cast<int64_t>(clock.time_of(index)))),
+        .measured_rate = measured_rate(timebase.rate_offset),
+    };
+}
+
+auto RtcpSession::measured_rate(double const rate_offset) const noexcept -> uint32_t
+{
+    // Kept until the rate moves a whole hertz from it, so fit noise does not churn the version.
+    double const rate = static_cast<double>(sample_rate_) * (1.0 + rate_offset);
+    return (info_block_rate_ != 0 && std::fabs(rate - info_block_rate_) < 1.0) ? info_block_rate_
+                                                                               : static_cast<uint32_t>(std::llround(rate));
+}
+
+void RtcpSession::write_sender_report(rtp::RtcpWriter& writer, SendState const& state, ReportTime const& at, uint64_t const now_ns)
+{
+    auto const truncated = rtp::ptp_truncated_from_ns(at.time_ns);
+    rtp::SenderInfo const info{
+        .ntp_msw = truncated.seconds,
+        .ntp_lsw = truncated.nanoseconds,
+        .rtp_timestamp = mediaclock::PtpMediaClock::rtp_timestamp(at.index, 0),
+        .packet_count = state.packets,
+        .octet_count = state.octets,
+    };
+    refresh_info_block(at.measured_rate);
     writer.sender_report(state.ssrc, info, {}, info_block_);
     sent_[sent_next_] = {.lsr = rtp::lsr_of(truncated.seconds, truncated.nanoseconds), .sent_ns = now_ns};
     sent_next_ = (sent_next_ + 1) % SR_HISTORY;
-    return Report::sr;
 }
 
 void RtcpSession::refresh_info_block(uint32_t const measured_sample_rate)
@@ -279,26 +341,19 @@ void RtcpSession::refresh_info_block(uint32_t const measured_sample_rate)
     }
     info_block_version_ = sender_->info_block_version();
     info_block_rate_ = measured_sample_rate;
-    StreamFormat const& format = sender_->format();
-    std::string ts_refclk;
-    if (auto const& grandmaster = sender_->grandmaster()) {
-        ts_refclk = sdp::ts_refclk_value(sdp::PtpReference{.grandmaster = grandmaster->identity, .domain = grandmaster->domain});
-    }
+    rebuild_info_block(static_cast<uint8_t>(sender_->info_block_version() + rate_changes_), measured_sample_rate);
+}
+
+void RtcpSession::rebuild_info_block(uint8_t const version, uint32_t const measured_sample_rate)
+{
+    std::string const ts_refclk = ts_refclk_of(sender_->grandmaster());
     std::string const mediaclk = sdp::media_clock_value(sender_->media_clock());
     std::string const order = sender_->channel_order();
     rtp::IpmxInfoBlock const block{
-        .version = static_cast<uint8_t>(*info_block_version_ + rate_changes_),
+        .version = version,
         .ts_refclk = ts_refclk,
         .mediaclk = mediaclk,
-        .pcm =
-            rtp::IpmxPcmMediaInfo{
-                .sampling_rate = format.sample_rate,
-                .sample_size = static_cast<uint8_t>(sdp::bytes_per_sample(format.encoding) * 8),
-                .channel_count = static_cast<uint8_t>(std::min<uint16_t>(format.channels, 255)),
-                .packet_time_us = static_cast<uint16_t>(format.packet_time_us()),
-                .measured_sample_rate = measured_sample_rate,  // the nominal rate in PTP time
-                .channel_order = order,
-            },
+        .pcm = pcm_media_info(sender_->format(), order, measured_sample_rate),
     };
     info_block_.assign(rtp::ipmx_info_block_size(block), 0);
     if (!rtp::serialize_ipmx_info_block(block, info_block_)) {
@@ -313,31 +368,41 @@ void RtcpSession::write_receiver_report(rtp::RtcpWriter& writer, uint64_t const 
         writer.receiver_report(own_ssrc_);
         return;
     }
-    if (state.ssrc != reported_ssrc_ || state.expected < prior_expected_ || state.received < prior_received_) {
+    rtp::ReportBlock const block = report_block(state, now_ns);
+    writer.receiver_report(own_ssrc_, std::span{&block, 1});
+}
+
+auto RtcpSession::report_block(ReceiveState const& state, uint64_t const now_ns) noexcept -> rtp::ReportBlock
+{
+    int64_t const cumulative = static_cast<int64_t>(state.expected) - static_cast<int64_t>(state.received);
+    rtp::ReportBlock block{
+        .ssrc = state.ssrc,
+        .loss = {},
+        .extended_highest_seq = state.extended_max,
+        .jitter = state.jitter_x16 >> 4U,
+        .lsr = {},
+        .dlsr = {},
+    };
+    block.set_loss(take_fraction_lost(state), static_cast<int32_t>(std::clamp<int64_t>(cumulative, -0x80'0000, 0x7F'FFFF)));
+    if (last_sr_ && last_sr_->ssrc == state.ssrc && now_ns >= last_sr_->arrival_ns) {
+        block.lsr = last_sr_->lsr;
+        block.dlsr = rtp::dlsr_from_ns(now_ns - last_sr_->arrival_ns);
+    }
+    return block;
+}
+
+auto RtcpSession::take_fraction_lost(ReceiveState const& state) noexcept -> uint8_t
+{
+    if (state.ssrc != reported_ssrc_ || state.expected < prior_.expected || state.received < prior_.received) {
         reported_ssrc_ = state.ssrc;  // a new source, or its sequence restarted
-        prior_expected_ = 0;
-        prior_received_ = 0;
+        prior_ = {};
     }
     // RFC 3550 Section 6.4.1 and Appendix A.3, from the receiver's cumulative figures.
-    uint32_t const expected_interval = state.expected - prior_expected_;
-    uint32_t const received_interval = state.received - prior_received_;
-    prior_expected_ = state.expected;
-    prior_received_ = state.received;
+    uint32_t const expected_interval = state.expected - prior_.expected;
+    uint32_t const received_interval = state.received - prior_.received;
+    prior_ = {.expected = state.expected, .received = state.received};
     int64_t const lost_interval = static_cast<int64_t>(expected_interval) - static_cast<int64_t>(received_interval);
-    uint8_t const fraction =
-        (expected_interval == 0 || lost_interval <= 0) ? 0 : static_cast<uint8_t>((lost_interval << 8) / expected_interval);
-    int64_t const cumulative = static_cast<int64_t>(state.expected) - static_cast<int64_t>(state.received);
-
-    rtp::ReportBlock block{};
-    block.ssrc = state.ssrc;
-    block.set_loss(fraction, static_cast<int32_t>(std::clamp<int64_t>(cumulative, -0x80'0000, 0x7F'FFFF)));
-    block.extended_highest_seq = state.extended_max;
-    block.jitter = state.jitter_x16 >> 4U;
-    if (last_sr_lsr_ && last_sr_ssrc_ == state.ssrc && now_ns >= last_sr_arrival_ns_) {
-        block.lsr = *last_sr_lsr_;
-        block.dlsr = rtp::dlsr_from_ns(now_ns - last_sr_arrival_ns_);
-    }
-    writer.receiver_report(own_ssrc_, std::span{&block, 1});
+    return (expected_interval == 0 || lost_interval <= 0) ? 0 : static_cast<uint8_t>((lost_interval << 8) / expected_interval);
 }
 
 void RtcpSession::on_ready(uint64_t const now_ns) noexcept
@@ -408,40 +473,53 @@ void RtcpSession::take_report_block(rtp::ReportBlock const& block, uint64_t cons
     stats_.remote_jitter = block.jitter.get();
     stats_.remote_jitter_us = static_cast<uint32_t>((uint64_t{block.jitter.get()} * 1'000'000) / sample_rate_);
     stats_.remote_bye = false;
+    if (auto const rtt = round_trip_ns(block, now_ns)) {
+        stats_.rtt_ns = rtt;
+    }
+}
+
+auto RtcpSession::round_trip_ns(rtp::ReportBlock const& block, uint64_t const now_ns) const noexcept -> std::optional<uint64_t>
+{
     uint32_t const lsr = block.lsr.get();
     if (lsr == 0) {
-        return;  // the receiver has heard no SR yet
+        return std::nullopt;  // the receiver has heard no SR yet
     }
     for (auto const& sent : sent_) {
         if (sent.sent_ns != 0 && sent.lsr == lsr) {
-            stats_.rtt_ns = rtp::rtt_ns(now_ns, sent.sent_ns, block.dlsr.get());
-            return;
+            return rtp::rtt_ns(now_ns, sent.sent_ns, block.dlsr.get());
         }
     }
+    return std::nullopt;
 }
 
 void RtcpSession::handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t const now_ns) noexcept
 {
     ReceiveState const state = receiver_->receive_state();
-    if (compound.sr) {
-        // Before the stream's first packet any SR on its RTCP endpoint is the sender's.
-        if (!state.valid || compound.sr->ssrc == state.ssrc) {
-            ++stats_.sr_received;
-            last_sr_lsr_ = rtp::lsr_of(compound.sr->info.ntp_msw.get(), compound.sr->info.ntp_lsw.get());
-            last_sr_ssrc_ = compound.sr->ssrc;
-            last_sr_arrival_ns_ = now_ns;
-            stats_.remote_ssrc = compound.sr->ssrc;
-            stats_.remote_bye = false;
-            take_sender_report(*compound.sr, now_ns);
-        }
+    // Before the stream's first packet any SR on its RTCP endpoint is the sender's.
+    if (compound.sr && (!state.valid || compound.sr->ssrc == state.ssrc)) {
+        take_stream_sr(*compound.sr, now_ns);
     }
     if (compound.rr) {
         ++stats_.rr_received;
     }
     uint32_t const remote = state.valid ? state.ssrc : stats_.remote_ssrc;
-    if (remote == 0) {
-        return;
+    if (remote != 0) {
+        note_remote(compound, remote);
     }
+}
+
+void RtcpSession::take_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
+{
+    ++stats_.sr_received;
+    last_sr_ =
+        LastSenderReport{.lsr = rtp::lsr_of(sr.info.ntp_msw.get(), sr.info.ntp_lsw.get()), .ssrc = sr.ssrc, .arrival_ns = now_ns};
+    stats_.remote_ssrc = sr.ssrc;
+    stats_.remote_bye = false;
+    take_sender_report(sr, now_ns);
+}
+
+void RtcpSession::note_remote(rtp::RtcpCompound const& compound, uint32_t const remote)
+{
     if (compound.sdes && compound.sdes->ssrc == remote) {
         stats_.remote_cname.assign(compound.sdes->cname);
     }

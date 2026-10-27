@@ -19,30 +19,61 @@
 
 namespace statusbar::aes67 {
 
-auto parse_grandmaster(std::string_view const text) -> std::optional<Grandmaster>
+namespace {
+
+/// A grandmaster's text split: an EUI-64 of 23 characters with separators (which may be ':') or 16
+/// without, then any `:<domain>`.
+struct GrandmasterText
 {
-    Grandmaster grandmaster{};
-    std::string_view eui = text;
-    // An EUI-64 is 23 characters with separators (which may be ':') or 16 without.
+    std::string_view eui;
+    std::optional<std::string_view> domain;
+};
+
+[[nodiscard]] auto split_grandmaster(std::string_view const text) noexcept -> GrandmasterText
+{
     for (size_t const length : {size_t{23}, size_t{16}}) {
         if (text.size() > length && text[length] == ':') {
-            std::string_view const domain = text.substr(length + 1);
-            unsigned value = 0;
-            auto const [end, ec] = std::from_chars(domain.data(), domain.data() + domain.size(), value);
-            if (ec != std::errc{} || end != domain.data() + domain.size() || value > 127) {
-                return std::nullopt;
-            }
-            grandmaster.domain = static_cast<uint8_t>(value);
-            eui = text.substr(0, length);
-            break;
+            return {.eui = text.substr(0, length), .domain = text.substr(length + 1)};
         }
     }
-    auto const identity = ieee::eui64_from_string(eui);
-    if (!identity) {
+    return {.eui = text, .domain = std::nullopt};
+}
+
+/// A PTP domain number, 0 to 127; std::nullopt otherwise.
+[[nodiscard]] auto parse_domain(std::string_view const text) noexcept -> std::optional<uint8_t>
+{
+    unsigned value = 0;
+    auto const [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (ec != std::errc{} || end != text.data() + text.size() || value > 127) {
         return std::nullopt;
     }
-    grandmaster.identity = *identity;
-    return grandmaster;
+    return static_cast<uint8_t>(value);
+}
+
+/// Fails unsupported_format unless the media clock supports the rate and a packet holds frames,
+/// packet_too_large when a packet would not fit.
+[[nodiscard]] auto check_send_format(StreamFormat const& format) noexcept -> Status
+{
+    if (!mediaclock::PtpMediaClock::supports(format.sample_rate) || format.frames_per_packet == 0 || format.channels == 0) {
+        return failure(Aes67Error::unsupported_format);
+    }
+    if (format.bytes_per_packet() > Sender::MAX_PAYLOAD) {
+        return failure(Aes67Error::packet_too_large);
+    }
+    return success();
+}
+
+}  // namespace
+
+auto parse_grandmaster(std::string_view const text) -> std::optional<Grandmaster>
+{
+    auto const [eui, domain_text] = split_grandmaster(text);
+    auto const identity = ieee::eui64_from_string(eui);
+    auto const domain = domain_text ? parse_domain(*domain_text) : std::optional<uint8_t>{0};
+    if (!identity || !domain) {
+        return std::nullopt;
+    }
+    return Grandmaster{.identity = *identity, .domain = *domain};
 }
 
 Sender::Sender(StreamFormat const& format, FrameProvider provider, Transport& transport, std::string name)
@@ -55,12 +86,41 @@ Sender::Sender(StreamFormat const& format, FrameProvider provider, Transport& tr
 
 auto Sender::configure(Destination const& destination) -> Status
 {
-    if (!mediaclock::PtpMediaClock::supports(format_.sample_rate) || format_.frames_per_packet == 0 || format_.channels == 0) {
-        return failure(Aes67Error::unsupported_format);
+    if (auto const checked = check_send_format(format_); !checked) {
+        return checked;
     }
-    if (format_.bytes_per_packet() > MAX_PAYLOAD) {
-        return failure(Aes67Error::packet_too_large);
+    if (auto const opened = open_port(destination); !opened) {
+        return opened;
     }
+    seed_run();
+    renew_session();
+    become_ready();
+    return success();
+}
+
+auto Sender::configure(sdp::Session const& session) -> Status
+{
+    auto const media = select_media(session, 0, format_.encoding);
+    if (!media) {
+        return forward_failure(media);
+    }
+    auto const connection = session.effective_connection(*media);
+    if (!connection) {
+        return failure(Aes67Error::no_connection);
+    }
+    if (auto const matched = check_media_format(*media, format_); !matched) {
+        return matched;
+    }
+    return configure(Destination{
+        .address = connection->address,
+        .port = media->port,
+        .payload_type = media->payload_type,
+        .ttl = connection->ttl != 0 ? connection->ttl : sdp::Connection::DEFAULT_MULTICAST_TTL,
+    });
+}
+
+auto Sender::open_port(Destination const& destination) -> Status
+{
     clear();
     auto port = transport_.open_send(
         {.destination = {.address = destination.address, .port = destination.port}, .ttl = destination.ttl, .dscp = dscp_});
@@ -71,53 +131,35 @@ auto Sender::configure(Destination const& destination) -> Status
     }
     port_ = std::move(*port);
     destination_ = destination;
-    payload_.assign(format_.bytes_per_packet(), 0);
-
-    std::random_device random;
-    ssrc_.store(random(), std::memory_order_relaxed);
-    rng_ = ((uint64_t{random()} << 32U) | random()) | 1U;
-    paused_ = false;
-    sequence_ = static_cast<uint16_t>(random());
-    if (session_id_ == 0) {
-        std::string key = ip::to_string(transport_.local_address());
-        key += '/';
-        key += name_;
-        session_id_ = stable_session_id(key);
-    }
-    bump_session_version();
-    ++info_block_version_;
-    rtcp_packets_ = 0;
-    rtcp_octets_ = 0;
-    send_state_.store({});  // not ticked while configured, so tick() is not storing too
-    started_ = false;
-    state_ = State::ready;
-    error_.clear();
     return success();
 }
 
-auto Sender::configure(sdp::Session const& session) -> Status
+void Sender::seed_run()
 {
-    if (session.media.empty()) {
-        return failure(Aes67Error::no_media);
+    std::random_device random;
+    payload_.assign(format_.bytes_per_packet(), 0);
+    ssrc_.store(random(), std::memory_order_relaxed);
+    rng_ = ((uint64_t{random()} << 32U) | random()) | 1U;
+    sequence_ = static_cast<uint16_t>(random());
+    rtcp_counts_ = {};
+}
+
+void Sender::renew_session()
+{
+    if (session_id_ == 0) {
+        session_id_ = stable_session_id(std::format("{}/{}", ip::to_string(transport_.local_address()), name_));
     }
-    auto media = session.media.front();
-    (void)media.prefer(format_.encoding);  // else the primary, refused below
-    auto const connection = session.effective_connection(media);
-    if (!connection) {
-        return failure(Aes67Error::no_connection);
-    }
-    if (media.encoding != format_.encoding) {
-        return failure(Aes67Error::encoding_mismatch);
-    }
-    if (media.channels != format_.channels || media.sample_rate != format_.sample_rate) {
-        return failure(Aes67Error::format_mismatch);
-    }
-    return configure(Destination{
-        .address = connection->address,
-        .port = media.port,
-        .payload_type = media.payload_type,
-        .ttl = connection->ttl != 0 ? connection->ttl : sdp::Connection::DEFAULT_MULTICAST_TTL,
-    });
+    bump_session_version();
+    ++info_block_version_;
+}
+
+void Sender::become_ready() noexcept
+{
+    send_state_.store({});  // not ticked while configured, so tick() is not storing too
+    paused_ = false;
+    started_ = false;
+    state_ = State::ready;
+    error_.clear();
 }
 
 void Sender::clear() noexcept
@@ -128,7 +170,7 @@ void Sender::clear() noexcept
 }
 
 void Sender::continue_from(Sender const& previous)
-{
+{  // NOLINT(statusbar-block-statements): the settings carried over, field by field
     read_delay_.store(previous.read_delay(), std::memory_order_relaxed);
     grandmaster_ = previous.grandmaster_;
     sender_clock_ = previous.sender_clock_;
@@ -223,17 +265,10 @@ void Sender::tick(uint64_t const now_index) noexcept
     if (paused_) {
         // A new run after a pause: a new SSRC and sequence (RFC 3550 Section 8), its SR counts afresh.
         paused_ = false;
-        uint32_t const old = ssrc();
-        uint32_t next = next_random();
-        while (next == 0 || next == old) {
-            next = next_random();
-        }
-        ssrc_.store(next, std::memory_order_relaxed);
+        ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);
         sequence_ = static_cast<uint16_t>(next_random());
-        rtcp_packets_ = 0;
-        rtcp_octets_ = 0;
+        rtcp_counts_ = {};
     }
-    uint32_t const run_ssrc = ssrc();
     // A transport that cannot get packets out puts the sender in error until it can.
     if (auto const send_error = transport_.send_error()) {
         state_ = State::error;
@@ -242,15 +277,27 @@ void Sender::tick(uint64_t const now_index) noexcept
         state_ = State::ready;
         error_.clear();
     }
+    if (auto const newest = newest_due(now_index)) {
+        send_until(*newest);
+    }
+}
+
+auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint64_t>
+{
     uint64_t const fpp = format_.frames_per_packet;
     uint64_t const read_delay = read_delay_.load(std::memory_order_relaxed);
     uint64_t const phase = phase_;
     if (now_index + 1 < read_delay + fpp + phase) {
-        return;  // no packet due yet (only near the epoch)
+        return std::nullopt;  // no packet due yet (only near the epoch)
     }
-    // The newest packet (on the grid shifted by the phase) whose last frame
-    // is read_delay or more behind now.
+    // The newest packet (on the grid shifted by the phase) whose last frame is read_delay or more behind now.
     uint64_t const newest = ((((now_index + 1 - read_delay - phase) / fpp) - 1) * fpp) + phase;
+    return resync(newest) ? std::optional{newest} : std::nullopt;
+}
+
+auto Sender::resync(uint64_t const newest) noexcept -> bool
+{
+    uint64_t const fpp = format_.frames_per_packet;
     if (!started_) {
         next_index_ = newest;
         started_ = true;
@@ -259,50 +306,68 @@ void Sender::tick(uint64_t const now_index) noexcept
         // until now catches up, so no index is sent twice); a large one,
         // more than MAX_BURST packets, resynchronises.
         if (next_index_ - (newest + fpp) <= uint64_t{MAX_BURST} * fpp) {
-            return;
+            return false;
         }
         next_index_ = newest;
     } else if (next_index_ + (uint64_t{MAX_BURST} * fpp) <= newest) {
         counters_.lost += newest - next_index_;  // too far behind: skip what cannot be sent in time
         next_index_ = newest;
     }
+    return true;
+}
 
+void Sender::send_until(uint64_t const newest) noexcept
+{
+    uint32_t const run_ssrc = ssrc();
     uint32_t queued = 0;
     while (next_index_ <= newest) {
         rtp::RtpHeader header{};
         header.init(destination_.payload_type, sequence_, mediaclock::PtpMediaClock::rtp_timestamp(next_index_, 0), run_ssrc);
-        // The provider writes straight into the transport's TX buffer; only
-        // when the transport has none to give (the packet is dropped) does it
-        // write the staging buffer, so its frames are still taken and counted.
-        std::optional<Supply> supply;
-        PayloadRenderer const render = [this, &supply](std::span<uint8_t> const payload) noexcept {
-            supply = render_payload(next_index_, payload);
-            return true;
-        };
-        if (port_->send_rendered(header, payload_.size(), render)) {
+        if (send_packet(header)) {
             ++queued;
         } else {
             ++counters_.dropped;
         }
-        if (!supply) {
-            supply = render_payload(next_index_, payload_);
-        }
-        if (*supply == Supply::missing) {
-            counters_.lost += fpp;
-        }
         ++sequence_;
-        next_index_ += fpp;
+        next_index_ += format_.frames_per_packet;
     }
-    size_t const refused = port_->flush();
-    counters_.dropped += refused;
-    counters_.packets += queued - refused;
-    rtcp_packets_ += static_cast<uint32_t>(queued - refused);
-    rtcp_octets_ += static_cast<uint32_t>((queued - refused) * payload_.size());
-    send_state_.store({.ssrc = run_ssrc, .packets = rtcp_packets_, .octets = rtcp_octets_});
-    counters_.frames += (queued - refused) * fpp;
-    if (queued > refused && state_ != State::error) {
+    flush(queued, run_ssrc);
+}
+
+auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool
+{
+    // The provider writes straight into the transport's TX buffer; only when the transport has none
+    // to give (the packet is dropped) does it write the staging buffer, so its frames are still counted.
+    std::optional<Supply> supply;
+    PayloadRenderer const render = [this, &supply](std::span<uint8_t> const payload) noexcept {
+        supply = render_payload(next_index_, payload);
+        return true;
+    };
+    bool const sent = port_->send_rendered(header, payload_.size(), render);
+    Supply const supplied = supply ? *supply : render_payload(next_index_, payload_);
+    if (supplied == Supply::missing) {
+        counters_.lost += format_.frames_per_packet;
+    }
+    return sent;
+}
+
+void Sender::flush(uint32_t const queued, uint32_t const run_ssrc) noexcept
+{
+    auto const sent = static_cast<uint32_t>(queued - port_->flush());
+    counters_.dropped += queued - sent;
+    counters_.packets += sent;
+    counters_.frames += uint64_t{sent} * format_.frames_per_packet;
+    report_sent(sent, run_ssrc);
+    if (sent > 0 && state_ != State::error) {
         state_ = State::running;
     }
+}
+
+void Sender::report_sent(uint32_t const packets, uint32_t const run_ssrc) noexcept
+{
+    rtcp_counts_.packets += packets;
+    rtcp_counts_.octets += static_cast<uint32_t>(packets * payload_.size());
+    send_state_.store({.ssrc = run_ssrc, .packets = rtcp_counts_.packets, .octets = rtcp_counts_.octets});
 }
 
 void Sender::pause() noexcept
@@ -332,6 +397,16 @@ auto Sender::next_random() noexcept -> uint32_t
     return static_cast<uint32_t>((rng_ * 0x2545'F491'4F6C'DD1DULL) >> 32U);
 }
 
+auto Sender::fresh_ssrc() noexcept -> uint32_t
+{
+    uint32_t const old = ssrc();
+    uint32_t next = next_random();
+    while (next == 0 || next == old) {
+        next = next_random();
+    }
+    return next;
+}
+
 auto Sender::render_payload(uint64_t const first_index, std::span<uint8_t> const payload) noexcept -> Supply
 {
     Supply const supply = provider_ ? provider_(first_index, format_.frames_per_packet, payload) : Supply::none;
@@ -348,33 +423,35 @@ auto Sender::session() const -> std::optional<sdp::Session>
     }
     ip::IPv4Address const origin = transport_.local_address();
     bool const multicast = destination_.address.is_multicast();
+    return sdp::Session{
+        .session_id = session_id_,
+        .session_version = session_version_,
+        .origin_address = ip::to_string(origin),
+        .name = name_.empty() ? std::string{"-"} : name_,
+        .connection = sdp::Connection{.address = destination_.address, .ttl = multicast ? destination_.ttl : uint8_t{0}},
+        .media = {media_description(origin, multicast)},
+    };
+}
 
-    sdp::Session session{};
-    session.session_id = session_id_;
-    session.session_version = session_version_;
-    session.origin_address = ip::to_string(origin);
-    session.name = name_.empty() ? std::string{"-"} : name_;
-    session.connection = sdp::Connection{.address = destination_.address, .ttl = multicast ? destination_.ttl : uint8_t{0}};
-
-    sdp::Media media{};
-    media.port = destination_.port;
-    media.payload_type = destination_.payload_type;
-    media.encoding = format_.encoding;
-    media.sample_rate = format_.sample_rate;
-    media.channels = format_.channels;
-    media.packet_time_us = format_.packet_time_us();
-    media.direction = sdp::Direction::recvonly;
-    if (grandmaster_) {
+auto Sender::media_description(ip::IPv4Address const& origin, bool const multicast) const -> sdp::Media
+{
+    return sdp::Media{
+        .port = destination_.port,
+        .payload_type = destination_.payload_type,
+        .encoding = format_.encoding,
+        .sample_rate = format_.sample_rate,
+        .channels = format_.channels,
+        .packet_time_us = format_.packet_time_us(),
+        .direction = sdp::Direction::recvonly,
         // Always PTPv2 (PtpReference's default version), whatever the AVB side runs.
-        media.clock = sdp::PtpReference{.grandmaster = grandmaster_->identity, .domain = grandmaster_->domain};
-        media.clock_domain = grandmaster_->domain;
-    }
-    media.media_clock = media_clock();
-    if (multicast) {
-        media.source_filter = sdp::SourceFilter{.destination = destination_.address, .source = origin};
-    }
-    session.media.push_back(std::move(media));
-    return session;
+        .clock = grandmaster_
+            ? std::optional{sdp::PtpReference{.grandmaster = grandmaster_->identity, .domain = grandmaster_->domain}}
+            : std::nullopt,
+        .media_clock = media_clock(),
+        .source_filter =
+            multicast ? std::optional{sdp::SourceFilter{.destination = destination_.address, .source = origin}} : std::nullopt,
+        .clock_domain = grandmaster_ ? std::optional{grandmaster_->domain} : std::nullopt,
+    };
 }
 
 }  // namespace statusbar::aes67
