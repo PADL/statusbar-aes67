@@ -34,6 +34,17 @@ TEST(aes67_xdp, ships_a_umem_sized_for_the_rings_and_the_tx_pool)
     EXPECT_TRUE(config.pin_path.empty());
 }
 
+TEST(aes67_xdp, a_whole_frame_fits_a_receive_buffer_sized_in_kib)
+{
+    // igb writes RX buffers in 1 KiB units below the UMEM frame less the kernel's
+    // 256-octet XDP headroom; a larger frame arrives cut to its first buffer.
+    constexpr size_t XDP_HEADROOM = 256;
+    constexpr size_t LARGEST_FRAME = 1522;  // 1500-octet MTU, VLAN tagged, FCS
+    auto const config = XdpTransport::config_for("eth0");
+    size_t const buffer = config.umem_frame_size - config.umem_headroom - XDP_HEADROOM;
+    EXPECT_TRUE((buffer / 1024 * 1024) >= LARGEST_FRAME);
+}
+
 TEST(aes67_xdp, passes_the_attach_mode_and_pin_path_through)
 {
     XdpTransport::Options const options{

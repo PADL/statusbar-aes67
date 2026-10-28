@@ -1069,6 +1069,46 @@ TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
     EXPECT_EQ(sink.blocks.back().first_index, later + FPP);
 }
 
+TEST(aes67_receiver, takes_an_eight_channel_stream_in_packets_of_any_whole_frame_count)
+{
+    // One sender's announcement: source port = destination port, a large media clock offset.
+    constexpr char const* SDP_TEXT =
+        "v=0\r\no=dmixv2 37878419 1793158514 IN IP4 10.10.32.163\r\ns=dmixv2_01\r\nc=IN IP4 239.200.163.140/32\r\n"
+        "t=0 0\r\nm=audio 5004 RTP/AVP 99\r\ni=8 channels\r\na=recvonly\r\na=rtpmap:99 L24/48000/8\r\na=ptime:1\r\n"
+        "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-10-6C-16:0\r\na=mediaclk:direct=4045604396\r\n";
+    constexpr StreamFormat EIGHT_L24{.encoding = sdp::Encoding::l24, .channels = 8, .sample_rate = 48000, .frames_per_packet = FPP};
+    LoopTransport transport;
+    transport.source = {.address = IPv4Address{10, 10, 32, 163}, .port = 5004};
+    RecordingSink sink;
+    Receiver receiver{EIGHT_L24, sink.handler(), transport};
+    auto const session = sdp::parse(SDP_TEXT);
+    EXPECT_TRUE(session && receiver.configure(*session));
+    Endpoint const group{.address = IPv4Address{239, 200, 163, 140}, .port = 5004};
+
+    // 48 frames (a 1206-octet frame), then 24, then Sender::MAX_PAYLOAD's 60.
+    uint64_t const base = (1ULL << 40U) + 12345;
+    std::array<uint32_t, 3> const sizes{FPP, FPP / 2, Sender::MAX_PAYLOAD / 24};
+    uint64_t index = base;
+    for (uint16_t i = 0; i < sizes.size(); ++i) {
+        rtp::RtpHeader header{};
+        header.init(99, static_cast<uint16_t>(0xCA34 + i), static_cast<uint32_t>(index) + 4045604396U, 0x0241FA93);
+        std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + (size_t{sizes[i]} * 24));
+        (void)rtp::serialize_rtp_header(header, bytes.size() - rtp::RtpHeader::LENGTH, bytes);
+        transport.queue.push_back({group, std::move(bytes)});
+        index += sizes[i];
+    }
+    receiver.drain(index + 53);
+
+    EXPECT_EQ(sink.blocks.size(), sizes.size());
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{0});
+    index = base;
+    for (size_t i = 0; i < std::min(sizes.size(), sink.blocks.size()); ++i) {
+        EXPECT_EQ(sink.blocks[i].first_index, index);
+        EXPECT_EQ(sink.blocks[i].frames, sizes[i]);
+        index += sizes[i];
+    }
+}
+
 TEST(aes67_receiver, takes_late_packets_as_far_back_as_rtp_sequence_does)
 {
     LoopTransport transport;

@@ -50,6 +50,25 @@ void fix_checksum(std::vector<uint8_t>& frame, size_t const ip)
     frame[ip + 11] = static_cast<uint8_t>(sum);
 }
 
+/// An 8-channel L24 packet of 48 frames as one sender sends it: 10.10.32.163:5004 -> 239.200.163.140:5004,
+/// DSCP 34, TTL 128, DF, UDP checksum 0, PT 99; `payload` octets of silence (1152 for 48 frames).
+auto eight_channel_frame(size_t const payload) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> frame{0x01, 0x00, 0x5E, 0x48, 0xA3, 0x8C, 0x00, 0x50, 0xC2, 0xAC, 0x0A, 0x64, 0x08, 0x00,  // Ethernet
+                               0x45, 0x88, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x80, 0x11, 0x00, 0x00,              // IPv4
+                               0x0A, 0x0A, 0x20, 0xA3, 0xEF, 0xC8, 0xA3, 0x8C,                                      //
+                               0x13, 0x8C, 0x13, 0x8C, 0x00, 0x00, 0x00, 0x00,                                      // UDP
+                               0x80, 0x63, 0xCA, 0x34, 0x07, 0xAE, 0x9C, 0x40, 0x02, 0x41, 0xFA, 0x93};             // RTP
+    frame.resize(frame.size() + payload, 0);
+    size_t const udp_length = frame.size() - IP - 20;
+    frame[IP + 2] = static_cast<uint8_t>((udp_length + 20) >> 8U);
+    frame[IP + 3] = static_cast<uint8_t>(udp_length + 20);
+    frame[IP + 24] = static_cast<uint8_t>(udp_length >> 8U);
+    frame[IP + 25] = static_cast<uint8_t>(udp_length);
+    fix_checksum(frame, IP);
+    return frame;
+}
+
 }  // namespace
 
 TEST(rtp_frame, parses_a_hand_assembled_frame)
@@ -242,6 +261,31 @@ TEST(rtp_frame, refuses_a_buffer_too_small)
     std::vector<uint8_t> const huge(65536 - 40);
     std::vector<uint8_t> big(70000);
     EXPECT_FALSE(serialize_rtp_frame(parsed->addressing, parsed->packet.header, huge, big).has_value());
+}
+
+TEST(rtp_frame, parses_an_eight_channel_packet_of_48_frames)
+{
+    auto const frame = eight_channel_frame(1152);
+    EXPECT_EQ(frame.size(), size_t{1206});
+    auto const parsed = parse_rtp_frame(frame);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed && parsed->addressing.destination_address == (ip::IPv4Address{239, 200, 163, 140}));
+    EXPECT_TRUE(parsed && parsed->addressing.source_port == 5004 && parsed->addressing.destination_port == 5004);
+    EXPECT_TRUE(parsed && parsed->packet.header.payload_type() == 99 && parsed->packet.payload.size() == 1152);
+}
+
+TEST(rtp_frame, parses_a_packet_of_the_largest_payload_a_frame_carries)
+{
+    auto const parsed = parse_rtp_frame(eight_channel_frame(1500 - 20 - 8 - RtpHeader::LENGTH));
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed && parsed->packet.payload.size() == size_t{1460});
+}
+
+TEST(rtp_frame, refuses_a_frame_cut_short_by_a_one_kib_receive_buffer)
+{
+    // What a NIC writing 1 KiB buffers hands an AF_XDP socket of a larger frame: its first KiB.
+    auto const frame = eight_channel_frame(1152);
+    EXPECT_FALSE(parse_udp_frame(std::span{frame}.first(1024)).has_value());
 }
 
 TEST_MAIN(statusbar_rtp, rtp_frame_test)

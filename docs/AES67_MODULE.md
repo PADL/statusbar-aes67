@@ -345,6 +345,11 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   abandoned, goes back to the pool (never to the kernel), and one the full TX ring refuses
   is freed to the UMEM. The rest of the UMEM backs the fill ring (`FILL_RING` entries) and
   the frames in flight.
+- UMEM frames are `net::XdpConfig`'s default 4096 octets. The kernel keeps 256 octets of XDP
+  headroom in each, and igb sizes its receive buffers in 1 KiB units below what is left:
+  2048-octet frames give 1 KiB buffers, and igb hands the socket a longer frame cut to its
+  first KiB, which `parse_udp_frame()` refuses (an 8-channel L24 1 ms packet is 1206
+  octets). 4096 leaves 3 KiB buffers. Check a NIC's queue with `ethtool -d` (SRRCTL).
 - Refused kicks: each `end_tick()` kick the kernel refuses is counted with its errno
   (`tx_flush_failures()`, `tx_flush_error()`); `TX_FAILING_AFTER` (8, 1 ms of ticks) in a
   row set `send_error()`, which every sender reports as its error, until a kick goes
