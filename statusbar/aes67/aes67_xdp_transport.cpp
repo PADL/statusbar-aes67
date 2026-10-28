@@ -545,8 +545,23 @@ enum class Offered : uint8_t
 {
     kept,       ///< a port kept it
     unmatched,  ///< no port has its destination
-    refused,    ///< a port has it, and refused it (counted)
+    refused,    ///< ports have it, and none kept it
 };
+
+/// What became of a datagram for `matched` ports, `kept` by one or not: a refusal counted once per frame,
+/// none for the stream's own RTCP on its RTP port (RFC 5761).
+auto outcome(
+    bool const matched, bool const kept, std::span<uint8_t const> const payload, bool const rtp, RefusalCounter& refusals) noexcept
+    -> Offered
+{
+    if (!matched || kept) {
+        return matched ? Offered::kept : Offered::unmatched;
+    }
+    if (!is_multiplexed_rtcp(payload)) {
+        refusals.count(rtp ? Refusal::port_full : Refusal::not_rtp);
+    }
+    return Offered::refused;
+}
 
 /// Offers an RTP datagram to the receive ports of `destination`; several receivers of one stream share it.
 auto offer_to_ports(
@@ -555,23 +570,16 @@ auto offer_to_ports(
     Datagram const& datagram,
     RefusalCounter& refusals) noexcept -> Offered
 {
-    Offered offered = Offered::unmatched;
-    std::optional<bool> rtp;  // parsed only for a receive port's destination
+    bool const rtp = !is_multiplexed_rtcp(datagram.payload) && rtp::parse_rtp(datagram.payload).has_value();
+    bool matched = false;
+    bool kept = false;
     for (auto* const port : ports) {
-        if (port->destination != destination || port->closed.load(std::memory_order_relaxed)) {
-            continue;
+        if (port->destination == destination && !port->closed.load(std::memory_order_relaxed)) {
+            matched = true;
+            kept = (rtp && port->offer(datagram)) || kept;
         }
-        if (!rtp) {
-            rtp = rtp::parse_rtp(datagram.payload).has_value();
-        }
-        if (!*rtp || !port->offer(datagram)) {
-            refusals.count(*rtp ? Refusal::port_full : Refusal::not_rtp);
-            offered = offered == Offered::kept ? Offered::kept : Offered::refused;
-            continue;
-        }
-        offered = Offered::kept;
     }
-    return offered;
+    return outcome(matched, kept, datagram.payload, rtp, refusals);
 }
 
 /// Copies a datagram to the RTCP pipes of `destination`; true when one has it.

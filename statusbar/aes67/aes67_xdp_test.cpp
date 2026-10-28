@@ -334,6 +334,30 @@ TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
     EXPECT_EQ(pipe.dropped(), uint64_t{0});
 }
 
+TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps_it)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    XdpTransport::PortState full{stream, net::FileDescriptor{}};
+    XdpTransport::PortState open{stream, net::FileDescriptor{}};
+    full.pending_count = XdpTransport::PORT_BATCH;
+    std::array<XdpTransport::PortState*, 2> const ports{&full, &open};
+    RefusalCounter refusals;
+    auto const whole = rtp_frame_to(stream);
+    EXPECT_TRUE(XdpTransport::dispatch_frame(whole, ports, {}, refusals));  // the open port keeps it
+    auto not_rtp = whole;
+    not_rtp[rtp::rtp_frame_overhead(false)] = 0x00;
+    EXPECT_FALSE(XdpTransport::dispatch_frame(not_rtp, ports, {}, refusals));
+    auto rtcp = whole;
+    rtcp[rtp::rtp_frame_overhead(false) + 1] = 200;  // the stream's own SR on its RTP port (RFC 5761)
+    EXPECT_FALSE(XdpTransport::dispatch_frame(rtcp, ports, {}, refusals));
+    open.pending_count = XdpTransport::PORT_BATCH;
+    EXPECT_FALSE(XdpTransport::dispatch_frame(whole, ports, {}, refusals));
+    auto const counted = refusals.load();
+    EXPECT_EQ(counted.not_rtp, uint64_t{1});
+    EXPECT_EQ(counted.port_full, uint64_t{1});
+    EXPECT_EQ(counted.unmatched + counted.malformed, uint64_t{0});
+}
+
 TEST(aes67_xdp, a_closed_port_takes_nothing_and_its_frames_are_unmatched)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};

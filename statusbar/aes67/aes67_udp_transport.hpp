@@ -46,7 +46,8 @@ class UdpTransport final : public Transport
     /// with RtcpOptions::dscp; multicast loops back, so a session sees its own reports.
     [[nodiscard]] auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>> override;
 
-    /// Truncated datagrams (malformed) and datagrams for another address or interface (unmatched).
+    /// Truncated datagrams (malformed); the receivers judge the rest, and another group's datagrams on a
+    /// shared port are not refusals.
     [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals_.load(); }
 
     /// A receive port closing (its destructor, on the control thread).

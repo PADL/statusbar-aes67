@@ -1083,10 +1083,11 @@ TEST(aes67_receiver, each_refused_packet_is_counted_under_its_reason)
     };
     send(0);
     send(1);
-    send(1);                                           // sequence: a duplicate
-    send(2, 0x9999);                                   // ssrc: another source while 0x1234 is live
-    send(2, 0x1234, 96);                               // payload type
-    transport.queue.push_back({group, {0x80, 0x61}});  // not RTP
+    send(1);                                                                        // sequence: a duplicate
+    send(2, 0x9999);                                                                // ssrc: another source while 0x1234 is live
+    send(2, 0x1234, 96);                                                            // payload type
+    transport.queue.push_back({group, {0x80, 0x61}});                               // not RTP
+    transport.queue.push_back({group, {0x80, 200, 0x00, 0x06, 0, 0, 0x12, 0x34}});  // RTCP SR (RFC 5761): not refused
     auto empty = rtp_packet(2, static_cast<uint32_t>(base + (uint64_t{2} * FPP)));
     empty.resize(rtp::RtpHeader::LENGTH);
     transport.queue.push_back({group, empty});  // size: no frames

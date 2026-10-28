@@ -316,8 +316,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   user and network namespace:
   `unshare -rn sh -c 'ip link set lo up; build/statusbar_test statusbar/aes67/aes67_veth_test'`.
 - `receive_refusals()` counts a truncated datagram (longer than `MAX_DATAGRAM`) as
-  `malformed` and one `IP_PKTINFO` puts on another address or interface as `unmatched`;
-  the receiver judges the rest (`Counters::drops`).
+  `malformed`; one `IP_PKTINFO` puts on another address or interface (another group's on a
+  shared port) is skipped uncounted, and the receiver judges the rest (`Counters::drops`).
 - A sender's socket is unconnected and every message names the destination, so a unicast
   receiver's ICMP port-unreachable never fails a send. Multicast goes out of the
   interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, from
@@ -356,7 +356,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   headroom in each, and igb sizes its receive buffers in 1 KiB units below what is left:
   2048-octet frames give 1 KiB buffers, and igb hands the socket a longer frame cut to its
   first KiB, which `parse_udp_frame()` refuses (an 8-channel L24 1 ms packet is 1206
-  octets). 4096 leaves 3 KiB buffers. Check a NIC's queue with `ethtool -d` (SRRCTL).
+  octets). 4096 leaves 3 KiB buffers. Check a NIC's queue with `ethtool -d` (SRRCTL). The
+  UMEM is then 8 MiB locked (`UMEM_FRAMES` × 4096), a default `RLIMIT_MEMLOCK`'s whole 8 MiB:
+  the process needs `CAP_IPC_LOCK` or a raised limit.
 - Refused kicks: each `end_tick()` kick the kernel refuses is counted with its errno
   (`tx_flush_failures()`, `tx_flush_error()`); `TX_FAILING_AFTER` (8, 1 ms of ticks) in a
   row set `send_error()`, which every sender reports as its error, until a kick goes
@@ -369,8 +371,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `Refusal`: `malformed` (`parse_udp_frame()` refused it: cut short, as a NIC buffer
   smaller than the frame leaves it, or lengths past its end), `unmatched` (a joined
   group's frame to a port no receive or RTCP port has, such as RTCP while no session
-  runs), `not_rtp` (to a receive port, but not RTP) and `port_full` (a port already held
-  `PORT_BATCH` datagrams this tick; counted per port). Relaxed atomics, written by
+  runs), `not_rtp` (to a receive port, but not RTP) and `port_full` (every port for it already
+  held `PORT_BATCH` datagrams this tick). A frame counts once, and only when no port kept it;
+  the stream's own RTCP on its RTP port (`is_multiplexed_rtcp()`, RFC 5761 Section 4) is
+  ignored uncounted, by the transport and by the receiver alike. Relaxed atomics, written by
   `begin_tick()`, read from any thread. `dispatch_frame()` is that per-frame step.
 - Limits: multicast destinations only, both ways (a unicast receiver would need a rule
   stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups

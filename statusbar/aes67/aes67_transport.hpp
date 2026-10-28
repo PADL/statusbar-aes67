@@ -47,11 +47,18 @@ struct Datagram
     Endpoint source;
 };
 
+/// True when `datagram` is RTCP, as on a port carrying RTP and RTCP alike: version 2 and a packet type
+/// of 192 to 223, which RTP payload types never take there (RFC 5761 Section 4).
+[[nodiscard]] constexpr auto is_multiplexed_rtcp(std::span<uint8_t const> const datagram) noexcept -> bool
+{
+    return datagram.size() >= 2 && (datagram[0] >> 6U) == 2 && datagram[1] >= 192 && datagram[1] <= 223;
+}
+
 /// Why a transport refused a received frame before any receiver saw it.
 enum class Refusal : uint8_t
 {
     malformed,  ///< not a whole IPv4/UDP frame (cut short, or lengths past its end), or truncated
-    unmatched,  ///< no receive port or RTCP port for its destination address and port
+    unmatched,  ///< no receive port or RTCP port for its destination address and port (AF_XDP)
     not_rtp,    ///< for a receive port's destination, but not an RTP packet
     port_full,  ///< a receive port already held as many datagrams as it keeps for one tick
 };

@@ -225,7 +225,9 @@ auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
             if (sender_clock_) {
                 offset = offset_.load(std::memory_order_acquire);  // set, or cleared by a new source
             }
-            accept(batch[i], now_index, offset);
+            if (!is_multiplexed_rtcp(batch[i].payload)) {
+                accept(batch[i], now_index, offset);  // the stream's own RTCP is not a refused packet
+            }
         }
         if (n < batch.size()) {
             return false;
