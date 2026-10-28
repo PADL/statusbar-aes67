@@ -9,6 +9,7 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <optional>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -72,9 +73,9 @@ class UdpReceivePort final : public ReceivePort
     {
         size_t written = 0;
         for (size_t i = 0; i < got; ++i) {
-            if ((messages_[i].msg_hdr.msg_flags & MSG_TRUNC) != 0 ||
-                !destined_for(messages_[i].msg_hdr, destination_.address, interface_index_)) {
-                continue;  // larger than any AES67 packet, or another address's or interface's
+            if (auto const refusal = refusal_of(messages_[i].msg_hdr)) {
+                transport_.refused(*refusal);
+                continue;
             }
             out[written++] = {
                 .payload = std::span<uint8_t const>{buffers_[i]}.first(messages_[i].msg_len),
@@ -82,6 +83,18 @@ class UdpReceivePort final : public ReceivePort
             };
         }
         return written;
+    }
+
+    /// Why a received datagram is not this port's: larger than any AES67 packet, or another address's or interface's.
+    [[nodiscard]] auto refusal_of(msghdr& header) const noexcept -> std::optional<Refusal>
+    {
+        if ((header.msg_flags & MSG_TRUNC) != 0) {
+            return Refusal::malformed;
+        }
+        if (!destined_for(header, destination_.address, interface_index_)) {
+            return Refusal::unmatched;
+        }
+        return std::nullopt;
     }
 
     UdpTransport& transport_;

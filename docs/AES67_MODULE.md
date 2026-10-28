@@ -31,8 +31,8 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `FrameHandler` / `FrameProvider` — the real-time callbacks, `sg14::inplace_function`s with 64 bytes of capture; `Supply` is what a provider gave.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
 - `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`.
-- `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures.
-- `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it.
+- `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
+- `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`).
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
 - `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, SR interval, receiver DSCP, cadence, `on_sender_report`), `RtcpStats`.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
@@ -220,8 +220,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   there is no gate. `polls()` and `skipped_polls()` count the calls made and skipped.
 - Counters: `packets` and `frames` handed on; `lost`, frames in sequence gaps not (yet)
   filled; `late`, frames that arrived out of order (after a later packet), still handed
-  on; `dropped`, packets refused (malformed, wrong payload type, source or size,
-  duplicates, or too old to place).
+  on; `dropped`, packets refused, and `drops` the same by `DropReason`: `not_rtp` (no RTP
+  header), `payload_type` (not the SDP's), `size` (empty, or not whole frames), `source`
+  (not the source filter's, RFC 4570), `ssrc` (another source while the learnt one is
+  live), `sequence` (a duplicate, or a jump RFC 3550 Appendix A.1 has not confirmed) and
+  `no_offset` (a sender-clocked stream before `set_offset()`). Checked in that order; a
+  packet counts once, under the first reason that refuses it.
 
 ### RTCP
 
@@ -311,6 +315,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `aes67_veth_test` proves it on two veth pairs; it needs root, or runs unprivileged in a
   user and network namespace:
   `unshare -rn sh -c 'ip link set lo up; build/statusbar_test statusbar/aes67/aes67_veth_test'`.
+- `receive_refusals()` counts a truncated datagram (longer than `MAX_DATAGRAM`) as
+  `malformed` and one `IP_PKTINFO` puts on another address or interface as `unmatched`;
+  the receiver judges the rest (`Counters::drops`).
 - A sender's socket is unconnected and every message names the destination, so a unicast
   receiver's ICMP port-unreachable never fails a send. Multicast goes out of the
   interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, from
@@ -358,6 +365,13 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `end_tick()` (frames received and sent, ring-full, UMEM-exhausted, kicks made, skipped
   and transient), and `tx_pool_empty_count()` the sends that found the TX pool empty;
   both may be read from any thread.
+- Refusals: `receive_refusals()` counts the redirected frames no receive port kept, by
+  `Refusal`: `malformed` (`parse_udp_frame()` refused it: cut short, as a NIC buffer
+  smaller than the frame leaves it, or lengths past its end), `unmatched` (a joined
+  group's frame to a port no receive or RTCP port has, such as RTCP while no session
+  runs), `not_rtp` (to a receive port, but not RTP) and `port_full` (a port already held
+  `PORT_BATCH` datagrams this tick; counted per port). Relaxed atomics, written by
+  `begin_tick()`, read from any thread. `dispatch_frame()` is that per-frame step.
 - Limits: multicast destinations only, both ways (a unicast receiver would need a rule
   stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups
   (the BPF program's TCAM holds 16 rules); a joined group's frames to ports no receiver

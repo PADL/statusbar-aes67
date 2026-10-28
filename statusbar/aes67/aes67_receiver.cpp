@@ -254,54 +254,76 @@ void Receiver::set_gate(uint64_t const now_index, bool const backlog) noexcept
 void Receiver::accept(Datagram const& datagram, uint64_t const now_index, uint64_t const offset) noexcept
 {
     auto const packet = rtp::parse_rtp(datagram.payload);
-    auto const frames = packet ? admit(*packet, datagram.source.address, now_index) : std::nullopt;
-    if (!frames) {
-        ++counters_.dropped;
+    auto const frames = packet ? admit(*packet, datagram.source.address, now_index) : std::unexpected{DropReason::not_rtp};
+    if (!packet || !frames) {
+        drop(frames.error());
         return;
     }
     note_arrival(packet->header.timestamp.get(), now_index);
     if ((offset & OFFSET_SET) == 0) {
-        ++counters_.dropped;  // learnt, but not placed before the sender's first report
+        drop(DropReason::no_offset);  // learnt, but not placed before the sender's first report
         return;
     }
     deliver(*packet, *frames, offset, now_index);
 }
 
-auto Receiver::admit(rtp::RtpPacket const& packet, ip::IPv4Address const& source, uint64_t const now_index) noexcept
-    -> std::optional<uint32_t>
+void Receiver::drop(DropReason const reason) noexcept
 {
-    uint32_t const frame_bytes = format_.bytes_per_frame();
-    if (packet.header.payload_type() != payload_type_ || packet.payload.empty() || packet.payload.size() % frame_bytes != 0 ||
-        (source_filter_ && source != *source_filter_) || !admit_source(packet.header.ssrc.get(), now_index)) {
-        return std::nullopt;
+    ++counters_.dropped;
+    ++counters_.drops[reason];
+}
+
+auto Receiver::admit(rtp::RtpPacket const& packet, ip::IPv4Address const& source, uint64_t const now_index) noexcept
+    -> std::expected<uint32_t, DropReason>
+{
+    if (auto const refused = check_payload(packet, source)) {
+        return std::unexpected{*refused};
     }
-    auto const frames = static_cast<uint32_t>(packet.payload.size() / frame_bytes);
+    if (auto const admitted = admit_source(packet.header.ssrc.get(), now_index); !admitted) {
+        return std::unexpected{admitted.error()};
+    }
+    auto const frames = static_cast<uint32_t>(packet.payload.size() / format_.bytes_per_frame());
     if (!admit_sequence(packet.header.sequence.get(), frames)) {
-        return std::nullopt;
+        return std::unexpected{DropReason::sequence};
     }
     return frames;
 }
 
-auto Receiver::admit_source(uint32_t const ssrc, uint64_t const now_index) noexcept -> bool
+auto Receiver::check_payload(rtp::RtpPacket const& packet, ip::IPv4Address const& source) const noexcept
+    -> std::optional<DropReason>
+{
+    if (packet.header.payload_type() != payload_type_) {
+        return DropReason::payload_type;
+    }
+    if (packet.payload.empty() || packet.payload.size() % format_.bytes_per_frame() != 0) {
+        return DropReason::size;
+    }
+    if (source_filter_ && source != *source_filter_) {
+        return DropReason::source;
+    }
+    return std::nullopt;
+}
+
+auto Receiver::admit_source(uint32_t const ssrc, uint64_t const now_index) noexcept -> std::expected<void, DropReason>
 {
     if (ssrc_ && *ssrc_ != ssrc) {
         // Another source: refused while the learnt one is live, adopted once it
         // has been silent for a second (the sender restarted with a new SSRC).
         // Signed: after a PTP step backwards the learnt source still counts as live.
         if (static_cast<int64_t>(now_index - last_index_) < static_cast<int64_t>(format_.sample_rate)) {
-            return false;
+            return std::unexpected{DropReason::ssrc};
         }
         reset_stream();
         if (sender_clock_) {
             offset_.store(0, std::memory_order_release);  // the new source's reports give its own
-            return false;
+            return std::unexpected{DropReason::no_offset};
         }
     }
     if (!ssrc_) {
         ssrc_ = ssrc;
     }
     last_index_ = now_index;
-    return true;
+    return {};
 }
 
 auto Receiver::admit_sequence(uint16_t const seq, uint32_t const frames) noexcept -> bool

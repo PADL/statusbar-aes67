@@ -275,6 +275,77 @@ TEST(aes67_xdp, group_rules_pin_the_whole_address)
 // These need AF_XDP, libxdp and root; without them open() must fail cleanly
 // and the tests end there.
 
+namespace {
+
+/// An untagged RTP frame to `destination` from 10.0.0.2 with a 288-octet payload.
+auto rtp_frame_to(Endpoint const& destination) -> std::vector<uint8_t>
+{
+    rtp::FrameAddressing const addressing{
+        .destination_mac = rtp::multicast_mac(destination.address),
+        .source_mac = {},
+        .vlan = std::nullopt,
+        .source_address = IPv4Address{10, 0, 0, 2},
+        .destination_address = destination.address,
+        .source_port = destination.port,
+        .destination_port = destination.port,
+    };
+    rtp::RtpHeader header{};
+    header.init(97, 1, 2, 3);
+    std::array<uint8_t, 288> const payload{};
+    std::vector<uint8_t> frame(1514);
+    auto const length = rtp::serialize_rtp_frame(addressing, header, payload, frame);
+    frame.resize(length.value_or(0));
+    return frame;
+}
+
+}  // namespace
+
+TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    XdpTransport::RtcpPipe pipe{rtcp_endpoint_of(stream)};
+    std::array<XdpTransport::PortState*, 1> const ports{&port};
+    std::array<XdpTransport::RtcpPipe*, 1> const pipes{&pipe};
+    RefusalCounter refusals;
+    auto const offer = [&](std::vector<uint8_t> const& frame) {
+        return XdpTransport::dispatch_frame(frame, ports, pipes, refusals);
+    };
+
+    auto const whole = rtp_frame_to(stream);
+    EXPECT_TRUE(offer(whole));
+    EXPECT_FALSE(offer(std::vector<uint8_t>(whole.begin(), whole.begin() + 100)));  // malformed: cut short
+    EXPECT_FALSE(offer(rtp_frame_to({.address = stream.address, .port = 5008})));   // unmatched: no port
+    EXPECT_FALSE(offer(rtp_frame_to(rtcp_endpoint_of(stream))));                    // the RTCP pipe's: not refused
+    auto not_rtp = whole;
+    not_rtp[rtp::rtp_frame_overhead(false)] = 0x00;  // RTP version 0
+    EXPECT_FALSE(offer(not_rtp));
+    for (size_t i = 1; i < XdpTransport::PORT_BATCH; ++i) {
+        EXPECT_TRUE(offer(whole));
+    }
+    EXPECT_FALSE(offer(whole));  // port full
+
+    auto const counted = refusals.load();
+    EXPECT_EQ(counted.malformed, uint64_t{1});
+    EXPECT_EQ(counted.unmatched, uint64_t{1});
+    EXPECT_EQ(counted.not_rtp, uint64_t{1});
+    EXPECT_EQ(counted.port_full, uint64_t{1});
+    EXPECT_EQ(port.pending_count, XdpTransport::PORT_BATCH);
+    EXPECT_EQ(pipe.dropped(), uint64_t{0});
+}
+
+TEST(aes67_xdp, a_closed_port_takes_nothing_and_its_frames_are_unmatched)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    port.closed.store(true);
+    std::array<XdpTransport::PortState*, 1> const ports{&port};
+    RefusalCounter refusals;
+    EXPECT_FALSE(XdpTransport::dispatch_frame(rtp_frame_to(stream), ports, {}, refusals));
+    EXPECT_EQ(refusals.load().unmatched, uint64_t{1});
+    EXPECT_EQ(port.pending_count, size_t{0});
+}
+
 TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
 {
     EXPECT_FALSE(XdpTransport::open("no-such-interface0").has_value());

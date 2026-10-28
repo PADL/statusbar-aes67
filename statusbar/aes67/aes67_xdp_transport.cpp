@@ -11,33 +11,6 @@
 
 namespace statusbar::aes67 {
 
-/// A receive port's state: made on the control thread, used on the real-time
-/// thread from the tick that takes it until the tick that retires it, freed on
-/// the control thread.
-struct XdpTransport::PortState
-{
-    PortState(Endpoint const& d, net::FileDescriptor m) noexcept
-        : destination{d}
-        , membership{std::move(m)}
-    {}
-
-    Endpoint destination;
-    net::FileDescriptor membership;  ///< keeps the kernel (and the NIC filter) joined
-    std::array<Datagram, PORT_BATCH> pending{};
-    size_t pending_count{0};
-    std::atomic<bool> closed{false};  ///< set by the handle's destructor
-
-    /// From begin_tick(): false when full.
-    auto offer(Datagram const& datagram) noexcept -> bool
-    {
-        if (pending_count == PORT_BATCH) {
-            return false;
-        }
-        pending[pending_count++] = datagram;
-        return true;
-    }
-};
-
 /// The handle a receiver owns. receive() runs on the real-time thread; the
 /// destructor on the control thread, once the receiver is no longer drained.
 class XdpTransport::Port final : public ReceivePort
@@ -549,13 +522,15 @@ void XdpTransport::start_cycle() noexcept
 
 void XdpTransport::receive_frames() noexcept
 {
+    auto const ports = std::span<PortState* const>{ports_}.first(port_count_);
+    auto const pipes = std::span<RtcpPipe* const>{rtcp_pipes_}.first(rtcp_count_);
     while (held_count_ < RECEIVE_BATCH) {
         auto slot = context_.rx_start();
         if (!slot || !*slot) {
             break;
         }
         auto const& rx = **slot;
-        if (auto const frame = rtp::parse_udp_frame(rx.buffer); frame && dispatch(*frame)) {
+        if (dispatch_frame(rx.buffer, ports, pipes, refusals_)) {
             held_[held_count_++] = rx.handle;
         } else {
             (void)context_.rx_release(rx.handle);
@@ -563,43 +538,85 @@ void XdpTransport::receive_frames() noexcept
     }
 }
 
-auto XdpTransport::dispatch(rtp::UdpFrame const& frame) noexcept -> bool
-{
-    Endpoint const destination{.address = frame.addressing.destination_address, .port = frame.addressing.destination_port};
-    Datagram const datagram{
-        .payload = frame.datagram, .source = {.address = frame.addressing.source_address, .port = frame.addressing.source_port}};
-    bool const kept = offer_to_ports(destination, datagram);
-    offer_to_rtcp(destination, datagram);
-    return kept;
-}
+namespace {
 
-auto XdpTransport::offer_to_ports(Endpoint const& destination, Datagram const& datagram) noexcept -> bool
+/// What offer_to_ports() did with a datagram.
+enum class Offered : uint8_t
 {
-    bool kept = false;
+    kept,       ///< a port kept it
+    unmatched,  ///< no port has its destination
+    refused,    ///< a port has it, and refused it (counted)
+};
+
+/// Offers an RTP datagram to the receive ports of `destination`; several receivers of one stream share it.
+auto offer_to_ports(
+    std::span<XdpTransport::PortState* const> const ports,
+    Endpoint const& destination,
+    Datagram const& datagram,
+    RefusalCounter& refusals) noexcept -> Offered
+{
+    Offered offered = Offered::unmatched;
     std::optional<bool> rtp;  // parsed only for a receive port's destination
-    for (size_t i = 0; i < port_count_; ++i) {
-        auto& port = *ports_[i];
-        if (port.destination != destination || port.closed.load(std::memory_order_relaxed)) {
+    for (auto* const port : ports) {
+        if (port->destination != destination || port->closed.load(std::memory_order_relaxed)) {
             continue;
         }
         if (!rtp) {
             rtp = rtp::parse_rtp(datagram.payload).has_value();
         }
-        if (*rtp && port.offer(datagram)) {
-            kept = true;  // several receivers of one stream share the frame
+        if (!*rtp || !port->offer(datagram)) {
+            refusals.count(*rtp ? Refusal::port_full : Refusal::not_rtp);
+            offered = offered == Offered::kept ? Offered::kept : Offered::refused;
+            continue;
         }
+        offered = Offered::kept;
     }
-    return kept;
+    return offered;
 }
 
-void XdpTransport::offer_to_rtcp(Endpoint const& destination, Datagram const& datagram) noexcept
+/// Copies a datagram to the RTCP pipes of `destination`; true when one has it.
+auto offer_to_rtcp(
+    std::span<XdpTransport::RtcpPipe* const> const pipes, Endpoint const& destination, Datagram const& datagram) noexcept -> bool
 {
-    for (size_t i = 0; i < rtcp_count_; ++i) {
-        auto& pipe = *rtcp_pipes_[i];
-        if (pipe.destination() == destination && !pipe.closed.load(std::memory_order_relaxed)) {
-            (void)pipe.offer(datagram);  // copied: the frame need not be held
+    bool matched = false;
+    for (auto* const pipe : pipes) {
+        if (pipe->destination() == destination && !pipe->closed.load(std::memory_order_relaxed)) {
+            (void)pipe->offer(datagram);  // copied: the frame need not be held
+            matched = true;
         }
     }
+    return matched;
+}
+
+/// A frame's destination, and its datagram with its source.
+auto addressed(rtp::UdpFrame const& frame) noexcept -> std::pair<Endpoint, Datagram>
+{
+    auto const& a = frame.addressing;
+    return {
+        Endpoint{.address = a.destination_address, .port = a.destination_port},
+        Datagram{.payload = frame.datagram, .source = {.address = a.source_address, .port = a.source_port}},
+    };
+}
+
+}  // namespace
+
+auto XdpTransport::dispatch_frame(
+    std::span<uint8_t const> const frame,
+    std::span<PortState* const> const ports,
+    std::span<RtcpPipe* const> const pipes,
+    RefusalCounter& refusals) noexcept -> bool
+{
+    auto const udp = rtp::parse_udp_frame(frame);
+    if (!udp) {
+        refusals.count(Refusal::malformed);
+        return false;
+    }
+    auto const [destination, datagram] = addressed(*udp);
+    auto const offered = offer_to_ports(ports, destination, datagram, refusals);
+    if (!offer_to_rtcp(pipes, destination, datagram) && offered == Offered::unmatched) {
+        refusals.count(Refusal::unmatched);
+    }
+    return offered == Offered::kept;
 }
 
 void XdpTransport::end_tick() noexcept

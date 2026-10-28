@@ -46,8 +46,13 @@ class UdpTransport final : public Transport
     /// with RtcpOptions::dscp; multicast loops back, so a session sees its own reports.
     [[nodiscard]] auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>> override;
 
+    /// Truncated datagrams (malformed) and datagrams for another address or interface (unmatched).
+    [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals_.load(); }
+
     /// A receive port closing (its destructor, on the control thread).
     void release(Endpoint const& destination) noexcept;
+    /// A receive port refused a datagram (real-time thread).
+    void refused(Refusal const refusal) noexcept { refusals_.count(refusal); }
 
   private:
     /// Counts a new receive port, and claims a unicast destination for it.
@@ -56,6 +61,7 @@ class UdpTransport final : public Transport
     InterfaceInfo interface_;
     std::vector<Endpoint> unicast_;  ///< destinations of the unicast receive ports (control thread)
     size_t live_ports_{0};           ///< receive ports not yet destroyed (control thread)
+    RefusalCounter refusals_;
 };
 
 }  // namespace statusbar::aes67

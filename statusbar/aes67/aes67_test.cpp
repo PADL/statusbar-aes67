@@ -1069,6 +1069,69 @@ TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
     EXPECT_EQ(sink.blocks.back().first_index, later + FPP);
 }
 
+TEST(aes67_receiver, each_refused_packet_is_counted_under_its_reason)
+{
+    LoopTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    auto session = stream_session(group);
+    session.source_filter = sdp::SourceFilter{.destination = std::nullopt, .source = transport.source.address};
+    EXPECT_TRUE(receiver.configure(session));
+    uint64_t const base = 48'000ULL * 4000;
+    auto send = [&](uint16_t const n, uint32_t const ssrc = 0x1234, uint8_t const pt = 97) {
+        transport.queue.push_back({group, rtp_packet(n, static_cast<uint32_t>(base + (uint64_t{n} * FPP)), ssrc, pt)});
+    };
+    send(0);
+    send(1);
+    send(1);                                           // sequence: a duplicate
+    send(2, 0x9999);                                   // ssrc: another source while 0x1234 is live
+    send(2, 0x1234, 96);                               // payload type
+    transport.queue.push_back({group, {0x80, 0x61}});  // not RTP
+    auto empty = rtp_packet(2, static_cast<uint32_t>(base + (uint64_t{2} * FPP)));
+    empty.resize(rtp::RtpHeader::LENGTH);
+    transport.queue.push_back({group, empty});  // size: no frames
+    auto ragged = rtp_packet(2, static_cast<uint32_t>(base + (uint64_t{2} * FPP)));
+    ragged.pop_back();
+    transport.queue.push_back({group, ragged});  // size: not whole frames
+    receiver.drain(base + (uint64_t{2} * FPP));
+    transport.source.address = IPv4Address{192, 168, 1, 99};
+    send(2);  // source: not the filter's
+    receiver.drain(base + (uint64_t{3} * FPP));
+
+    auto const& c = receiver.counters();
+    EXPECT_EQ(c.packets, uint64_t{2});
+    EXPECT_EQ(c.drops.sequence, uint64_t{1});
+    EXPECT_EQ(c.drops.ssrc, uint64_t{1});
+    EXPECT_EQ(c.drops.payload_type, uint64_t{1});
+    EXPECT_EQ(c.drops.not_rtp, uint64_t{1});
+    EXPECT_EQ(c.drops.size, uint64_t{2});
+    EXPECT_EQ(c.drops.source, uint64_t{1});
+    EXPECT_EQ(c.drops.no_offset, uint64_t{0});
+    EXPECT_EQ(c.dropped, uint64_t{7});
+}
+
+TEST(aes67_receiver, a_sender_clocked_stream_counts_packets_before_its_offset_as_no_offset)
+{
+    LoopTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    receiver.set_sender_clock(true);
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    auto session = stream_session(group, std::nullopt);
+    session.media[0].media_clock = sdp::MediaClock::sender();
+    EXPECT_TRUE(receiver.configure(session));
+    uint64_t const base = 48'000ULL * 5000;
+    transport.queue.push_back({group, rtp_packet(0, static_cast<uint32_t>(base))});
+    transport.queue.push_back({group, rtp_packet(1, static_cast<uint32_t>(base + FPP))});
+    receiver.drain(base + FPP);
+    EXPECT_EQ(receiver.counters().drops.no_offset, uint64_t{2});
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{2});
+    receiver.set_offset(0);
+    transport.queue.push_back({group, rtp_packet(2, static_cast<uint32_t>(base + (uint64_t{2} * FPP)))});
+    receiver.drain(base + (uint64_t{2} * FPP));
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{2});
+}
+
 TEST(aes67_receiver, takes_an_eight_channel_stream_in_packets_of_any_whole_frame_count)
 {
     // One sender's announcement: source port = destination port, a large media clock offset.
@@ -1355,6 +1418,31 @@ TEST(aes67_udp, counts_loss_and_reorder_from_the_wire)
     EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});  // 5
     EXPECT_EQ(sink.blocks.back().first_index, base + (7 * FPP));
     expect_pattern(sink.blocks.back());
+}
+
+TEST(aes67_udp, a_truncated_datagram_is_counted_malformed)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    Endpoint const unicast{.address = own_loopback(), .port = 45012};
+    auto port = (*transport)->open_receive(unicast);
+    EXPECT_TRUE(port.has_value());
+    auto socket = net::make_udp_socket();
+    EXPECT_TRUE(socket.has_value());
+    std::vector<uint8_t> const oversized(UdpTransport::MAX_DATAGRAM + 100, uint8_t{0x80});
+    sockaddr_in const address = to_sockaddr(unicast);
+    EXPECT_TRUE(
+        ::sendto(
+            socket->get(), oversized.data(), oversized.size(), 0, reinterpret_cast<sockaddr const*>(&address), sizeof(address)) >
+        0);
+    std::array<Datagram, 4> out{};
+    for (int tries = 0; tries < 200 && (*transport)->receive_refusals().malformed == 0; ++tries) {
+        EXPECT_EQ((*port)->receive(out), size_t{0});
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    EXPECT_EQ((*transport)->receive_refusals().malformed, uint64_t{1});
+    EXPECT_EQ((*transport)->receive_refusals().unmatched, uint64_t{0});
+    port->reset();
 }
 
 TEST(aes67_udp, multicast_over_loopback_when_the_host_allows)

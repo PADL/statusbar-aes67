@@ -19,6 +19,7 @@
 #include <atomic>
 #include <bitset>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <system_error>
@@ -105,11 +106,16 @@ class Receiver
     [[nodiscard]] auto receive_batches(uint64_t now_index) noexcept -> bool;
     /// Sets the due-tick gate after a drain: open after a backlog, else a tick before the next packet is due.
     void set_gate(uint64_t now_index, bool backlog) noexcept;
-    /// The packet's frames when it is this stream's, from its source and in sequence; nullopt to drop it.
+    /// Counts a refused packet: dropped, and its reason.
+    void drop(DropReason reason) noexcept;
+    /// The packet's frames when it is this stream's, from its source and in sequence; else why not.
     [[nodiscard]] auto admit(rtp::RtpPacket const& packet, ip::IPv4Address const& source, uint64_t now_index) noexcept
-        -> std::optional<uint32_t>;
-    /// Learns the SSRC, or adopts a new one after the learnt source fell silent; false to drop the packet.
-    [[nodiscard]] auto admit_source(uint32_t ssrc, uint64_t now_index) noexcept -> bool;
+        -> std::expected<uint32_t, DropReason>;
+    /// Why the packet's payload type, size or source is not this stream's; nullopt when it is.
+    [[nodiscard]] auto check_payload(rtp::RtpPacket const& packet, ip::IPv4Address const& source) const noexcept
+        -> std::optional<DropReason>;
+    /// Learns the SSRC, or adopts a new one after the learnt source fell silent; else why the packet is dropped.
+    [[nodiscard]] auto admit_source(uint32_t ssrc, uint64_t now_index) noexcept -> std::expected<void, DropReason>;
     /// Validates the sequence number (RFC 3550 Appendix A.1) and places it; false to drop the packet.
     [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames) noexcept -> bool;
     /// Notes an accepted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.

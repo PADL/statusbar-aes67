@@ -137,6 +137,54 @@ enum class State : uint8_t
     error,    ///< the transport refused the last configure(), or (a sender) refuses to send: Transport::send_error()
 };
 
+/// Why a receiver refused a packet.
+enum class DropReason : uint8_t
+{
+    not_rtp,       ///< not an RTP packet (RFC 3550 Section 5.1)
+    payload_type,  ///< not the SDP's payload type
+    size,          ///< an empty payload, or not whole frames of the format
+    source,        ///< not from the source the SDP's source filter names (RFC 4570)
+    ssrc,          ///< another SSRC while the learnt one is live
+    sequence,      ///< a duplicate, or a sequence jump not yet confirmed (RFC 3550 Appendix A.1)
+    no_offset,     ///< a sender-clocked stream's, before its offset is known
+};
+
+/// A receiver's refused packets by DropReason; Counters::dropped is their sum.
+struct DropCounts
+{
+    uint64_t not_rtp{0};
+    uint64_t payload_type{0};
+    uint64_t size{0};
+    uint64_t source{0};
+    uint64_t ssrc{0};
+    uint64_t sequence{0};
+    uint64_t no_offset{0};
+
+    /// The count for `reason`.
+    [[nodiscard]] constexpr auto operator[](DropReason const reason) noexcept -> uint64_t&
+    {
+        switch (reason) {
+            case DropReason::not_rtp:
+                return not_rtp;
+            case DropReason::payload_type:
+                return payload_type;
+            case DropReason::size:
+                return size;
+            case DropReason::source:
+                return source;
+            case DropReason::ssrc:
+                return ssrc;
+            case DropReason::sequence:
+                return sequence;
+            case DropReason::no_offset:
+                break;
+        }
+        return no_offset;
+    }
+
+    auto operator==(DropCounts const&) const noexcept -> bool = default;
+};
+
 struct Counters
 {
     uint64_t packets{0};  ///< packets handed on (receiver) or sent (sender)
@@ -144,6 +192,7 @@ struct Counters
     uint64_t lost{0};     ///< receiver: frames in sequence gaps not yet filled; sender: frames the source lacked, or skipped
     uint64_t late{0};     ///< receiver: frames that arrived out of order (still handed on)
     uint64_t dropped{0};  ///< packets refused (receiver) or not sent (sender)
+    DropCounts drops;     ///< receiver: `dropped` by reason
 
     auto operator==(Counters const&) const noexcept -> bool = default;
 };

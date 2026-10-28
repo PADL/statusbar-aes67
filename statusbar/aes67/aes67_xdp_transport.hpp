@@ -262,6 +262,8 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats { return socket_stats_.load(); }
     /// Sends that found no pooled TX frame. Any thread.
     [[nodiscard]] auto tx_pool_empty_count() const noexcept -> uint64_t { return tx_pool_.empty_count(); }
+    /// Redirected frames no receive port kept, by reason (RTCP pipes' drops are theirs). Any thread.
+    [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals_.load(); }
     /// A port's datagrams last only the tick they arrived in.
     [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return true; }
     /// Fails with too_many_filter_rules past MAX_GROUPS groups, and with
@@ -279,9 +281,17 @@ class XdpTransport final : public Transport
     /// The last rule installation's result (made by begin_tick()); any thread.
     [[nodiscard]] auto rules_status() const noexcept -> Status;
 
-    struct PortState;  ///< a receive port's state (internal)
+    struct PortState;  ///< a receive port's state (internal; public for tests)
     class Port;        ///< a receive port (internal)
     class Sender;      ///< a send port (internal)
+
+    /// Offers one received Ethernet frame to `ports` and `pipes`, as begin_tick() does, counting a
+    /// refusal in `refusals`; true when a port kept it, to be held until the next tick (internal; public for tests).
+    [[nodiscard]] static auto dispatch_frame(
+        std::span<uint8_t const> frame,
+        std::span<PortState* const> ports,
+        std::span<RtcpPipe* const> pipes,
+        RefusalCounter& refusals) noexcept -> bool;
 
   private:
     friend class Port;
@@ -320,12 +330,6 @@ class XdpTransport final : public Transport
     void start_cycle() noexcept;
     /// Real-time thread: take the received frames, holding those a receive port kept.
     void receive_frames() noexcept;
-    /// Real-time thread: offers a frame to its ports and RTCP pipes; true when a port kept it.
-    [[nodiscard]] auto dispatch(rtp::UdpFrame const& frame) noexcept -> bool;
-    /// Real-time thread: offers an RTP datagram to the receive ports of `destination`; true when one kept it.
-    [[nodiscard]] auto offer_to_ports(Endpoint const& destination, Datagram const& datagram) noexcept -> bool;
-    /// Real-time thread: copies a datagram to the RTCP pipes of `destination`.
-    void offer_to_rtcp(Endpoint const& destination, Datagram const& datagram) noexcept;
 
     InterfaceInfo interface_;
     net::XdpContext context_;
@@ -354,6 +358,33 @@ class XdpTransport final : public Transport
     TxPool tx_pool_;
     std::array<net::CompiledRule<32>, MAX_GROUPS> rules_{};
     TxHealth tx_health_;
+    RefusalCounter refusals_;  ///< real-time -> any
+};
+
+/// A receive port's state: made on the control thread, used on the real-time thread from the
+/// tick that takes it until the tick that retires it, freed on the control thread.
+struct XdpTransport::PortState
+{
+    PortState(Endpoint const& d, net::FileDescriptor m) noexcept
+        : destination{d}
+        , membership{std::move(m)}
+    {}
+
+    Endpoint destination;
+    net::FileDescriptor membership;  ///< keeps the kernel (and the NIC filter) joined
+    std::array<Datagram, PORT_BATCH> pending{};
+    size_t pending_count{0};
+    std::atomic<bool> closed{false};  ///< set by the handle's destructor
+
+    /// From begin_tick(): false when full.
+    auto offer(Datagram const& datagram) noexcept -> bool
+    {
+        if (pending_count == PORT_BATCH) {
+            return false;
+        }
+        pending[pending_count++] = datagram;
+        return true;
+    }
 };
 
 }  // namespace statusbar::aes67

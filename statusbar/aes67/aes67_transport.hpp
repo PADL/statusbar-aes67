@@ -13,11 +13,14 @@
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <system_error>
+#include <utility>
 
 namespace statusbar::aes67 {
 
@@ -42,6 +45,45 @@ struct Datagram
 {
     std::span<uint8_t const> payload;
     Endpoint source;
+};
+
+/// Why a transport refused a received frame before any receiver saw it.
+enum class Refusal : uint8_t
+{
+    malformed,  ///< not a whole IPv4/UDP frame (cut short, or lengths past its end), or truncated
+    unmatched,  ///< no receive port or RTCP port for its destination address and port
+    not_rtp,    ///< for a receive port's destination, but not an RTP packet
+    port_full,  ///< a receive port already held as many datagrams as it keeps for one tick
+};
+
+/// A transport's refused frames by Refusal, since it opened.
+struct ReceiveRefusals
+{
+    uint64_t malformed{0};
+    uint64_t unmatched{0};
+    uint64_t not_rtp{0};
+    uint64_t port_full{0};
+
+    auto operator==(ReceiveRefusals const&) const noexcept -> bool = default;
+};
+
+/// Counts refusals: count() on the real-time thread, load() from any thread (relaxed atomics).
+class RefusalCounter
+{
+  public:
+    void count(Refusal const refusal) noexcept { counts_[std::to_underlying(refusal)].fetch_add(1, std::memory_order_relaxed); }
+    [[nodiscard]] auto load() const noexcept -> ReceiveRefusals
+    {
+        return {
+            .malformed = counts_[0].load(std::memory_order_relaxed),
+            .unmatched = counts_[1].load(std::memory_order_relaxed),
+            .not_rtp = counts_[2].load(std::memory_order_relaxed),
+            .port_full = counts_[3].load(std::memory_order_relaxed),
+        };
+    }
+
+  private:
+    std::array<std::atomic<uint64_t>, 4> counts_{};
 };
 
 /// Datagrams addressed to one receiver's destination.
@@ -144,6 +186,8 @@ class Transport
     /// kick the kernel keeps refusing), or none. Senders report it as their
     /// error. Real-time safe; any thread.
     [[nodiscard]] virtual auto send_error() const noexcept -> std::error_code { return {}; }
+    /// Received frames refused before any receiver saw them, by reason. Any thread.
+    [[nodiscard]] virtual auto receive_refusals() const noexcept -> ReceiveRefusals { return {}; }
 };
 
 }  // namespace statusbar::aes67
