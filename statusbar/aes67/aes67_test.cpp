@@ -291,9 +291,9 @@ TEST(aes67_sender, a_packet_departs_at_the_time_of_the_tick_that_sends_it)
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};  // 48 frames a packet at 48 kHz
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 98}));
-    EXPECT_EQ(sender.read_delay(), uint32_t{6});
+    EXPECT_EQ(sender.send_offset(), uint32_t{6});
     constexpr uint64_t T0 = 1'700'000'000'000'000'000ULL;
-    sender.tick(54, T0 + 1'125'000);  // the tick that sends packet 0 (last frame 47, read delay 6)
+    sender.tick(54, T0 + 1'125'000);  // the tick that sends packet 0 (last frame 47, send offset 6)
     sender.tick(60, T0 + 1'250'000);  // nothing due
     sender.tick(102, T0 + 2'125'000);
     EXPECT_TRUE((transport.departures == std::vector<uint64_t>{T0 + 1'125'000, T0 + 2'125'000}));
@@ -325,7 +325,7 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);  // these tests time packets by their last frame
+    sender.set_send_offset(0);  // these tests time packets by their last frame
     EXPECT_FALSE(sender.session().has_value());
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 98}));
     sender.set_grandmaster(GRANDMASTER);
@@ -457,7 +457,7 @@ TEST(aes67_sender, sends_packets_on_the_grid_when_due)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);  // these tests time packets by their last frame
+    sender.set_send_offset(0);  // these tests time packets by their last frame
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 48'000ULL * 1'000'000;  // some PTP time well past the epoch
@@ -508,7 +508,7 @@ TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);  // these tests time packets by their last frame
+    sender.set_send_offset(0);  // these tests time packets by their last frame
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 4800 * 48;
@@ -566,17 +566,17 @@ TEST(aes67_sender, keeps_its_session_id_across_restarts)
     EXPECT_NE(Sender::stable_session_id("aes67-out-0"), Sender::stable_session_id("aes67-out-1"));
 }
 
-TEST(aes67_sender, waits_out_the_read_delay)
+TEST(aes67_sender, waits_out_the_send_offset)
 {
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    EXPECT_EQ(sender.read_delay(), uint32_t{6});  // the default: one 125 us tick
-    EXPECT_EQ(Sender::default_read_delay(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 44100}), uint32_t{6});
-    EXPECT_EQ(Sender::default_read_delay(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 96000}), uint32_t{12});
-    EXPECT_EQ(Sender::relay_read_delay(STEREO_L24), FPP + 12);  // a packet and two ticks
+    EXPECT_EQ(sender.send_offset(), uint32_t{6});  // the default: one 125 us tick
+    EXPECT_EQ(Sender::default_send_offset(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 44100}), uint32_t{6});
+    EXPECT_EQ(Sender::default_send_offset(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 96000}), uint32_t{12});
+    EXPECT_EQ(Sender::relay_send_offset(STEREO_L24), FPP + 12);  // a packet and two ticks
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
-    sender.set_read_delay(100);
+    sender.set_send_offset(100);
 
     uint64_t const base = 48'000ULL * 1000;  // a multiple of 48
     sender.tick(base + 47 + 99, 0);          // [base, base + 48) is one frame short of due
@@ -590,7 +590,7 @@ TEST(aes67_sender, sends_uncounted_silence_with_no_provider)
 {
     LoopTransport transport;
     Sender sender{STEREO_L24, FrameProvider{}, transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     sender.tick(48'000ULL * 1000 + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
@@ -604,7 +604,7 @@ TEST(aes67_sender, a_paused_sender_sends_nothing_and_resumes_on_the_grid_as_a_ne
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
     uint64_t const base = 48'000ULL * 1'000'000;
     sender.tick(base + 47, 0);
@@ -639,7 +639,7 @@ TEST(aes67_sender, a_paused_sender_whose_transport_fails_reports_error)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
     uint64_t const base = 48'000ULL * 1'000'000;
     sender.tick(base + 47, 0);
@@ -702,7 +702,7 @@ TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
     // No provider: uncounted silence, every channel's sample the MBLA word.
     LoopTransport transport;
     Sender idle{AM824, FrameProvider{}, transport, "Test"};
-    idle.set_read_delay(0);
+    idle.set_send_offset(0);
     EXPECT_TRUE(idle.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     idle.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
@@ -718,7 +718,7 @@ TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
         return Supply::missing;
     };
     Sender sender{AM824, std::move(partial), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 3}}));
     sender.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
@@ -732,7 +732,7 @@ TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
         return Supply::missing;
     };
     Sender l24{STEREO_L24, std::move(partial_l24), transport, "Test"};
-    l24.set_read_delay(0);
+    l24.set_send_offset(0);
     EXPECT_TRUE(l24.configure(Destination{.address = IPv4Address{239, 69, 1, 4}}));
     l24.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
@@ -744,7 +744,7 @@ TEST(aes67_sender, waits_out_a_small_backward_step)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     uint64_t const base = 48'000ULL * 1000;
     for (uint64_t k = 0; k < 4; ++k) {
@@ -769,7 +769,7 @@ TEST(aes67_sender, resynchronises_after_a_large_backward_step)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     uint64_t const base = 48'000ULL * 1000;
     sender.tick(base + 47, 0);
@@ -785,7 +785,7 @@ TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_take)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 4800 * 48;
@@ -808,7 +808,7 @@ TEST(aes67_sender, a_packet_phase_moves_the_send_tick_not_the_timestamps)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     sender.set_packet_phase(18);
     EXPECT_EQ(sender.packet_phase(), uint32_t{18});
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
@@ -860,7 +860,7 @@ TEST(aes67_sender, reports_the_transports_send_error)
     LoopTransport transport;
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
     uint64_t const base = 4800 * 48;
     sender.tick(base - 1, 0);
@@ -1375,7 +1375,7 @@ TEST(aes67_udp, sender_to_receiver_over_loopback)
     Endpoint const destination{.address = own_loopback(), .port = 45004};
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
-    sender.set_read_delay(0);  // these tests time packets by their last frame
+    sender.set_send_offset(0);  // these tests time packets by their last frame
     EXPECT_TRUE(sender.configure(Destination{.address = destination.address, .port = destination.port, .payload_type = 97}));
     sender.set_grandmaster(GRANDMASTER);
 
@@ -1418,7 +1418,7 @@ TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)
     EXPECT_TRUE(transport.has_value());
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     // Nothing listens on this port: each datagram draws an ICMP port-unreachable.
     EXPECT_TRUE(sender.configure(Destination{.address = own_loopback(), .port = 45010}));
     uint64_t now = 48'000ULL * 900 + 47;
@@ -1517,7 +1517,7 @@ TEST(aes67_udp, multicast_over_loopback_when_the_host_allows)
     }
     PatternSource source{6};
     Sender sender{STEREO_L24, source.provider(), **transport, "Test"};
-    sender.set_read_delay(0);  // these tests time packets by their last frame
+    sender.set_send_offset(0);  // these tests time packets by their last frame
     EXPECT_TRUE(sender.configure(Destination{.address = group.address, .port = group.port, .payload_type = 97}));
     uint64_t now = 48000ULL * 7200 + 47;
     for (int step = 0; step < 5; ++step, now += FPP) {
@@ -1785,7 +1785,7 @@ TEST(aes67_udp, sender_renders_each_payload_once_straight_into_the_batch)
             return Supply::frames;
         };
         Sender sender{format, std::move(provider), **transport, "Test"};
-        sender.set_read_delay(0);
+        sender.set_send_offset(0);
         EXPECT_TRUE(sender.configure(Destination{.address = destination.address, .port = destination.port, .payload_type = 98}));
 
         uint64_t const base = 48'000ULL * 2000;

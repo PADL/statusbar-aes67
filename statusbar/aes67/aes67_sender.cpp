@@ -81,7 +81,7 @@ Sender::Sender(StreamFormat const& format, FrameProvider provider, Transport& tr
     , provider_{std::move(provider)}
     , transport_{transport}
     , name_{std::move(name)}
-    , read_delay_{default_read_delay(format)}
+    , send_offset_{default_send_offset(format)}
 {}
 
 auto Sender::configure(Destination const& destination) -> Status
@@ -171,7 +171,7 @@ void Sender::clear() noexcept
 
 void Sender::continue_from(Sender const& previous)
 {  // NOLINT(statusbar-block-statements): the settings carried over, field by field
-    read_delay_.store(previous.read_delay(), std::memory_order_relaxed);
+    send_offset_.store(previous.send_offset(), std::memory_order_relaxed);
     grandmaster_ = previous.grandmaster_;
     sender_clock_ = previous.sender_clock_;
     name_ = previous.name_;
@@ -286,13 +286,13 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
 auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint64_t>
 {
     uint64_t const fpp = format_.frames_per_packet;
-    uint64_t const read_delay = read_delay_.load(std::memory_order_relaxed);
+    uint64_t const send_offset = send_offset_.load(std::memory_order_relaxed);
     uint64_t const phase = phase_;
-    if (now_index + 1 < read_delay + fpp + phase) {
+    if (now_index + 1 < send_offset + fpp + phase) {
         return std::nullopt;  // no packet due yet (only near the epoch)
     }
-    // The newest packet (on the grid shifted by the phase) whose last frame is read_delay or more behind now.
-    uint64_t const newest = ((((now_index + 1 - read_delay - phase) / fpp) - 1) * fpp) + phase;
+    // The newest packet (on the grid shifted by the phase) whose last frame is send_offset or more behind now.
+    uint64_t const newest = ((((now_index + 1 - send_offset - phase) / fpp) - 1) * fpp) + phase;
     return resync(newest) ? std::optional{newest} : std::nullopt;
 }
 

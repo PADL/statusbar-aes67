@@ -53,20 +53,20 @@ class Sender
     /// Stop sending.
     void clear() noexcept;
 
-    /// The read delay (link offset) in frames: a packet is sent once its last frame is this far
-    /// behind now. Default: default_read_delay(). Any thread, real-time safe; the next tick takes it.
-    void set_read_delay(uint32_t const frames) noexcept { read_delay_.store(frames, std::memory_order_relaxed); }
-    [[nodiscard]] auto read_delay() const noexcept -> uint32_t { return read_delay_.load(std::memory_order_relaxed); }
+    /// The send offset in frames: a packet is sent once its last frame is this far
+    /// behind now. Default: default_send_offset(). Any thread, real-time safe; the next tick takes it.
+    void set_send_offset(uint32_t const frames) noexcept { send_offset_.store(frames, std::memory_order_relaxed); }
+    [[nodiscard]] auto send_offset() const noexcept -> uint32_t { return send_offset_.load(std::memory_order_relaxed); }
     /// One 125 us tick, rounded up (6 frames at 48 kHz): for a provider whose frames are there by
-    /// their index; a provider fed from the network wants relay_read_delay().
-    [[nodiscard]] static constexpr auto default_read_delay(StreamFormat const& format) noexcept -> uint32_t
+    /// their index; a provider fed from the network wants relay_send_offset().
+    [[nodiscard]] static constexpr auto default_send_offset(StreamFormat const& format) noexcept -> uint32_t
     {
         return (format.sample_rate + 7999) / 8000;
     }
     /// One packet of this stream plus two 125 us ticks: for a provider whose
     /// frames arrive over a network (an AES67 receiver's), a packet time plus
     /// arrival jitter after their index.
-    [[nodiscard]] static constexpr auto relay_read_delay(StreamFormat const& format) noexcept -> uint32_t
+    [[nodiscard]] static constexpr auto relay_send_offset(StreamFormat const& format) noexcept -> uint32_t
     {
         return format.frames_per_packet + (format.sample_rate / 4000);
     }
@@ -137,7 +137,7 @@ class Sender
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
 
-    /// Take `previous`'s read delay, grandmaster, media clock, name, SDP session id and version, DSCP,
+    /// Take `previous`'s send offset, grandmaster, media clock, name, SDP session id and version, DSCP,
     /// channel order and Info Block version, so this sender's next configure() announces the same session one version on.
     /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);
@@ -247,7 +247,7 @@ class Sender
     std::optional<Grandmaster> grandmaster_;
     bool sender_clock_{false};
     uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
-    std::atomic<uint32_t> read_delay_;
+    std::atomic<uint32_t> send_offset_;
     uint32_t phase_{0};
     uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};
     bool started_{false};

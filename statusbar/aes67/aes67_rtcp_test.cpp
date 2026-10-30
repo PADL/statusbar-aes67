@@ -213,7 +213,7 @@ struct SenderRig
 
     SenderRig()
     {
-        sender.set_read_delay(0);
+        sender.set_send_offset(0);
         sender.set_grandmaster(GRANDMASTER);
         (void)sender.configure(Destination{.address = GROUP.address, .port = GROUP.port});
         session = std::move(*RtcpSession::open_sender(sender, transport, options("bridge@10.0.0.2")));
@@ -762,7 +762,7 @@ TEST(aes67_rtcp, sr_rr_and_bye_round_trip_over_udp_loopback)
     EXPECT_TRUE(transport.has_value());
     Endpoint const group{.address = own_group(), .port = 45300};
     Sender sender{STEREO_L24, {}, **transport, "Loop"};
-    sender.set_read_delay(0);
+    sender.set_send_offset(0);
     EXPECT_TRUE(sender.configure(Destination{.address = group.address, .port = group.port, .ttl = 1}).has_value());
     Receiver receiver{STEREO_L24, {}, **transport};
     auto described = *sender.session();

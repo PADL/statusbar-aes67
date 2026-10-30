@@ -30,7 +30,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `StreamFormat` — encoding, channels, rate and frames per packet (the ptime).
 - `FrameHandler` / `FrameProvider` — the real-time callbacks, `sg14::inplace_function`s with 64 bytes of capture; `Supply` is what a provider gave.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
-- `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
+- `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, send offset, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` takes the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
@@ -120,17 +120,17 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `[k * fpp + phase, (k + 1) * fpp + phase)`. Its RTP timestamp is
   `PtpMediaClock::rtp_timestamp(first index, 0)`, so the SDP says `mediaclk:direct=0` and
   receivers on the same grandmaster place every sample exactly.
-- The read delay (the link offset) gates sending: a packet goes out on the first tick at
-  which its last frame's index is `read_delay()` or more behind the current index. A
+- The send offset gates sending: a packet goes out on the first tick at
+  which its last frame's index is `send_offset()` or more behind the current index. A
   network source delivers frames after their index: an AES67 packet `[n, n + 48)` arrives
-  no earlier than `(n + 48) / fs` plus its latency. `default_read_delay()` is one 125 µs
+  no earlier than `(n + 48) / fs` plus its latency. `default_send_offset()` is one 125 µs
   tick, for a provider whose frames are there by their index (generated, captured
   locally, or placed ahead of time); a receiver then sees the packet about a packet time
-  after its RTP timestamp (1.125 ms for 1 ms packets at 48 kHz). The lower the delay, the
+  after its RTP timestamp (1.125 ms for 1 ms packets at 48 kHz). The lower the send offset, the
   more of a receiver's latency budget is left (a Dante receiver at its 1 ms setting is
   already late with 1 ms packets), but a provider whose frames land later than that has
-  them counted lost. `relay_read_delay()`, a packet plus two ticks, is for a provider fed
-  from the network (an AES67 receiver's frames). A changed delay takes effect at the next
+  them counted lost. `relay_send_offset()`, a packet plus two ticks, is for a provider fed
+  from the network (an AES67 receiver's frames). A changed send offset takes effect at the next
   tick: a longer one waits, a shorter one catches up, up to `MAX_BURST` packets.
 - Send phase stagger: with every 1 ms output on phase 0, all of them send on the same
   tick in eight, and that burst, not the mean load, sets the ceiling. Give the kth sender
@@ -170,7 +170,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   name need ids of their own. The version starts at the wall clock's seconds (RFC 8866's
   suggestion, so it grows across restarts too) and goes up by one with each
   `configure()`, grandmaster change and rename. Ids and versions are kept to 63 bits.
-  `continue_from()` carries the id and version (and the read delay, grandmaster, media
+  `continue_from()` carries the id and version (and the send offset, grandmaster, media
   clock and name) to a replacement sender, so its next `configure()` announces the same
   session one version on.
 - A clock domain other than PTP: the caller ticks the sender with the domain's index
