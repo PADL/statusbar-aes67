@@ -3,6 +3,7 @@
 
 #include "statusbar/aes67/aes67_error.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
+#include "statusbar/net/net_tcam_classifier.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -348,13 +349,13 @@ TEST(aes67_xdp, group_rules_pin_the_whole_address)
 
 namespace {
 
-/// An untagged RTP frame to `destination` from 10.0.0.2 with a 288-octet payload.
-auto rtp_frame_to(Endpoint const& destination) -> std::vector<uint8_t>
+/// An RTP frame to `destination` from 10.0.0.2 with a 288-octet payload, untagged unless `vlan`.
+auto rtp_frame_to(Endpoint const& destination, std::optional<ieee::VlanTag> const vlan = std::nullopt) -> std::vector<uint8_t>
 {
     rtp::FrameAddressing const addressing{
         .destination_mac = rtp::multicast_mac(destination.address),
         .source_mac = {},
-        .vlan = std::nullopt,
+        .vlan = vlan,
         .source_address = IPv4Address{10, 0, 0, 2},
         .destination_address = destination.address,
         .source_port = destination.port,
@@ -370,6 +371,123 @@ auto rtp_frame_to(Endpoint const& destination) -> std::vector<uint8_t>
 }
 
 }  // namespace
+
+TEST(aes67_xdp, joined_groups_are_redirected_untagged_and_every_group_tagged_with_the_vid)
+{
+    IPv4Address const group{239, 69, 1, 2};
+    std::array const rules{XdpTransport::group_rule(group), XdpTransport::tagged_groups_rule(2)};
+    net::TcamClassifier<32> classifier;
+    classifier.set_rules(rules);
+    auto const redirected = [&classifier](std::vector<uint8_t> const& frame) {
+        return (classifier.classify_first(frame) & net::flag::process) != 0;
+    };
+    auto const tag = ieee::make_vlan_tag(2, false, 3);
+    Endpoint const stream{.address = group, .port = 5004};
+    Endpoint const other{.address = IPv4Address{239, 197, 7, 9}, .port = 5004};
+    EXPECT_TRUE(redirected(rtp_frame_to(stream)));
+    EXPECT_FALSE(redirected(rtp_frame_to(other)));
+    EXPECT_TRUE(redirected(rtp_frame_to(stream, tag)));
+    EXPECT_TRUE(redirected(rtp_frame_to(other, tag)));                                // the ports count it unmatched
+    EXPECT_TRUE(redirected(rtp_frame_to(stream, ieee::make_vlan_tag(2, false, 0))));  // any PCP
+    EXPECT_FALSE(redirected(rtp_frame_to(stream, ieee::make_vlan_tag(3, false, 3))));
+    auto unicast = rtp_frame_to(stream, tag);
+    unicast[0] = 0x02;
+    EXPECT_FALSE(redirected(unicast));
+    auto past_ipv4_range = rtp_frame_to(stream, tag);
+    past_ipv4_range[3] |= 0x80U;  // 01:00:5e:80:...: not an IPv4 group's MAC
+    EXPECT_FALSE(redirected(past_ipv4_range));
+}
+
+TEST(aes67_xdp, the_tagged_rule_goes_last_so_a_vid_change_leaves_the_group_slots_alone)
+{
+    auto const same = [](net::CompiledRule<32> const& a, net::CompiledRule<32> const& b) {
+        return a.mask == b.mask && a.match == b.match && a.result_flags == b.result_flags;
+    };
+    std::array<XdpTransport::PortState, 3> states{{
+        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5004}, net::FileDescriptor{}},
+        {{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}, net::FileDescriptor{}},
+        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5006}, net::FileDescriptor{}},  // a group already ruled
+    }};
+    std::array<XdpTransport::PortState*, 3> const ports{&states[0], &states[1], &states[2]};
+    std::array<net::CompiledRule<32>, 3> untagged{};
+    std::array<net::CompiledRule<32>, 3> tagged{};
+    auto const plain = XdpTransport::compile_rules(ports, std::nullopt, untagged);
+    auto const with_vid = XdpTransport::compile_rules(ports, 2, tagged);
+    EXPECT_TRUE(plain.first == 2 && !plain.second);
+    EXPECT_TRUE(with_vid.first == 3 && !with_vid.second);
+    EXPECT_TRUE(same(tagged[0], untagged[0]) && same(tagged[1], untagged[1]));
+    EXPECT_TRUE(same(tagged[2], XdpTransport::tagged_groups_rule(2)));
+    // One slot short: the tagged rule keeps its slot, last, and the second group is the one dropped.
+    std::array<net::CompiledRule<32>, 2> full{};
+    auto const short_of_one = XdpTransport::compile_rules(ports, 2, full);
+    EXPECT_TRUE(short_of_one.first == 2 && short_of_one.second == net::XdpError::too_many_filter_rules);
+    EXPECT_TRUE(same(full[0], untagged[0]) && same(full[1], XdpTransport::tagged_groups_rule(2)));
+}
+
+TEST(aes67_xdp, a_port_awaiting_retirement_past_max_groups_drops_its_group_not_the_tagged_rule)
+{
+    auto const same = [](net::CompiledRule<32> const& a, net::CompiledRule<32> const& b) {
+        return a.mask == b.mask && a.match == b.match && a.result_flags == b.result_flags;
+    };
+    // 17 groups: one more than MAX_GROUPS, as a closed port not yet retired leaves in ports_.
+    std::vector<std::unique_ptr<XdpTransport::PortState>> states;
+    std::vector<XdpTransport::PortState*> ports;
+    for (uint8_t i = 0; i <= XdpTransport::MAX_GROUPS; ++i) {
+        states.push_back(std::make_unique<XdpTransport::PortState>(
+            Endpoint{.address = IPv4Address{239, 69, 2, i}, .port = 5004}, net::FileDescriptor{}));
+        ports.push_back(states.back().get());
+    }
+    std::array<net::CompiledRule<32>, XdpTransport::MAX_GROUPS + 1> rules{};
+    auto const [count, error] = XdpTransport::compile_rules(ports, 2, rules);
+    EXPECT_EQ(count, XdpTransport::MAX_GROUPS + 1);
+    EXPECT_TRUE(error == net::XdpError::too_many_filter_rules);  // what rules_status() reports
+    EXPECT_TRUE(same(rules[XdpTransport::MAX_GROUPS], XdpTransport::tagged_groups_rule(2)));
+    EXPECT_TRUE(same(rules[XdpTransport::MAX_GROUPS - 1], XdpTransport::group_rule(IPv4Address{239, 69, 2, 15})));
+    auto const dropped = XdpTransport::group_rule(IPv4Address{239, 69, 2, 16});
+    EXPECT_FALSE(std::ranges::any_of(rules, [&](net::CompiledRule<32> const& rule) { return same(rule, dropped); }));
+}
+
+TEST(aes67_xdp, a_tagged_frame_reaches_the_port_of_its_group)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    std::array<XdpTransport::PortState*, 1> const ports{&port};
+    RefusalCounter refusals;
+    EXPECT_TRUE(XdpTransport::dispatch_frame(rtp_frame_to(stream, ieee::make_vlan_tag(2, false, 3)), ports, {}, refusals));
+    EXPECT_EQ(port.pending_count, size_t{1});
+    // A tagged alias is told apart by its address.
+    Endpoint const alias{.address = IPv4Address{239, 197, 1, 2}, .port = 5004};
+    EXPECT_FALSE(XdpTransport::dispatch_frame(rtp_frame_to(alias, ieee::make_vlan_tag(2, false, 3)), ports, {}, refusals));
+    EXPECT_EQ(refusals.load().unmatched, uint64_t{1});
+}
+
+TEST(aes67_xdp, a_send_port_s_tag_changes_from_its_next_frame)
+{
+    rtp::FrameAddressing const addressing{
+        .destination_mac = rtp::multicast_mac(IPv4Address{239, 69, 1, 2}),
+        .destination_address = IPv4Address{239, 69, 1, 2},
+        .destination_port = 5004,
+    };
+    XdpTransport::SendAddressing sending{addressing};
+    std::array<std::array<uint8_t, 512>, 3> buffers{};
+    XdpTransport::TxPool pool;
+    std::array<uint8_t, 288> const payload{};
+    auto const tag = ieee::make_vlan_tag(2, false, 3);
+    std::array<std::optional<ieee::VlanTag>, 3> const tags{std::nullopt, tag, std::nullopt};
+    for (uint16_t i = 0; i < 3; ++i) {
+        EXPECT_TRUE(pool.put({.handle = i, .buffer = buffers[i]}));
+        sending.set_vlan(tags[i]);
+        rtp::RtpHeader header{};
+        header.init(96, static_cast<uint16_t>(100 + i), 6U * i, 7);
+        auto const written = XdpTransport::write_frame(pool, sending.current(), header, payload);
+        size_t const length = written ? written->second : 0;
+        auto const frame = rtp::parse_rtp_frame(std::span{buffers[i]}.first(length));
+        EXPECT_EQ(length, rtp::rtp_frame_overhead(tags[i].has_value()) + rtp::RtpHeader::LENGTH + payload.size());
+        EXPECT_TRUE(frame && frame->addressing.vlan == tags[i]);
+        EXPECT_EQ(frame->packet.header.sequence.get(), uint16_t{static_cast<uint16_t>(100 + i)});
+    }
+    EXPECT_TRUE(XdpTransport::SendAddressing{rtp::FrameAddressing{.vlan = tag}}.current().vlan == std::optional{tag});
+}
 
 TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
 {

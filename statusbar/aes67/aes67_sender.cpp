@@ -122,8 +122,12 @@ auto Sender::configure(sdp::Session const& session) -> Status
 auto Sender::open_port(Destination const& destination) -> Status
 {
     clear();
-    auto port = transport_.open_send(
-        {.destination = {.address = destination.address, .port = destination.port}, .ttl = destination.ttl, .dscp = dscp_});
+    auto port = transport_.open_send({
+        .destination = {.address = destination.address, .port = destination.port},
+        .ttl = destination.ttl,
+        .dscp = dscp_,
+        .vlan = vlan_,
+    });
     if (!port) {
         state_ = State::error;
         error_ = port.error();
@@ -131,6 +135,17 @@ auto Sender::open_port(Destination const& destination) -> Status
     }
     port_ = std::move(*port);
     destination_ = destination;
+    return success();
+}
+
+auto Sender::set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status
+{
+    if (port_ != nullptr) {
+        if (auto const set = port_->set_vlan(vlan); !set) {
+            return set;
+        }
+    }
+    vlan_ = vlan;
     return success();
 }
 

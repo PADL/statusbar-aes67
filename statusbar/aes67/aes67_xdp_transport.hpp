@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// AES67 over AF_XDP: one XdpContext on NIC queue 0 serves every receiver and sender; the XDP
-/// program redirects the joined groups' untagged IPv4/UDP frames and passes the rest to the kernel.
+/// program redirects the joined groups' untagged IPv4/UDP frames (and, with set_receive_vid(), every
+/// group's tagged with one VID) and passes the rest to the kernel. Senders may tag (SendPort::set_vlan()).
 /// Multicast destinations only, at most MAX_GROUPS groups; ports and threads as aes67_transport.hpp.
 /// RTCP goes by kernel socket, except to a group whose frames the program redirects: begin_tick()
 /// copies those into the port's RtcpPipe. With launch time, every frame the socket sends is timed.
@@ -18,8 +19,10 @@
 #include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/net/net_rss.hpp"
 #include "statusbar/net/net_tc_launch_time.hpp"
+#include "statusbar/net/net_tcam_classifier.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -73,6 +76,8 @@ class XdpTransport final : public Transport
     static constexpr size_t UMEM_FRAMES = 2 * FILL_RING;
     /// Distinct groups the receivers may join.
     static constexpr size_t MAX_GROUPS = 16;
+    /// Rules installed at most: a group's each, then the tagged rule, as far as the TCAM holds them.
+    static constexpr size_t MAX_RULES = std::min(MAX_GROUPS + 1, net::tcam_default_capacity);
     /// Receive ports at most (several may share a group).
     static constexpr size_t MAX_PORTS = 64;
     /// Consecutive refused TX kicks that put the transport in error (1 ms of ticks).
@@ -113,6 +118,37 @@ class XdpTransport final : public Transport
       private:
         std::atomic<int64_t> lead_ns_{-1};
         net::LaunchOrder order_;
+    };
+
+    /// A send port's frame addressing: fixed at open but for the 802.1Q tag, which set_vlan() replaces
+    /// from one thread and current() reads on the real-time thread, wait-free (internal; public for tests).
+    class SendAddressing
+    {
+      public:
+        explicit SendAddressing(rtp::FrameAddressing const& addressing) noexcept
+            : addressing_{addressing}
+            , vlan_{packed(addressing.vlan)}
+        {}
+        /// Frames from the next current() on tagged with `vlan`, or untagged (nullopt).
+        void set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept { vlan_.store(packed(vlan), std::memory_order_relaxed); }
+        /// The addressing of the next frame. Real-time thread.
+        [[nodiscard]] auto current() noexcept -> rtp::FrameAddressing const&
+        {
+            uint32_t const vlan = vlan_.load(std::memory_order_relaxed);
+            auto const tag = ieee::VlanTag::from_raw(static_cast<uint16_t>(vlan >> 16U), static_cast<uint16_t>(vlan));
+            addressing_.vlan = vlan == 0 ? std::nullopt : std::optional{tag};
+            return addressing_;
+        }
+
+      private:
+        /// TPID and TCI in one word; 0 for none (or a tag whose TPID is not 802.1Q's).
+        [[nodiscard]] static auto packed(std::optional<ieee::VlanTag> const& vlan) noexcept -> uint32_t
+        {
+            return vlan && vlan->is_set() ? (static_cast<uint32_t>(vlan->tpid) << 16U) | static_cast<uint32_t>(vlan->tci) : 0;
+        }
+
+        rtp::FrameAddressing addressing_;
+        std::atomic<uint32_t> vlan_;
     };
 
     /// The queue that carries an RTCP port's redirected datagrams from begin_tick() to the
@@ -215,8 +251,11 @@ class XdpTransport final : public Transport
     /// by view: `options` must outlive the config).
     [[nodiscard]] static auto config_for(std::string_view interface, Options const& options = {}) noexcept -> net::XdpConfig;
 
-    /// The rule redirecting `group`'s frames to the socket.
+    /// The rule redirecting `group`'s untagged frames to the socket.
     [[nodiscard]] static auto group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>;
+    /// The rule redirecting every IPv4 group's UDP frames tagged with `vid`, any PCP (MAC 01:00:5e
+    /// and bit 24 clear, RFC 1112 Section 6.4); the ports take their own groups' and count the rest unmatched.
+    [[nodiscard]] static auto tagged_groups_rule(uint16_t vid) noexcept -> net::CompiledRule<32>;
 
     /// The TX queue to keep for the socket's timed frames on an interface of `tx_queues` TX queues
     /// (net::tc::settle_launch_time_queue): QUEUE under LAUNCH_TIME_QDISC_MAJOR.
@@ -293,6 +332,18 @@ class XdpTransport final : public Transport
     void clear_launch_lead() noexcept { launch_clock_.clear_lead(); }
     /// The launch lead in force (nullopt: not yet); the ordering's counters. Any thread.
     [[nodiscard]] auto launch_clock() const noexcept -> LaunchClock const& { return launch_clock_; }
+    /// Redirect groups' frames tagged with `vid` (an SR class VID) as well as untagged ones, or untagged
+    /// only (nullopt), from the next tick. Control thread; a TCAM too small for it: rules_status().
+    void set_receive_vid(std::optional<uint16_t> const vid) noexcept
+    {
+        receive_vid_.store(vid ? *vid : -1, std::memory_order_relaxed);
+    }
+    /// The VID set_receive_vid() set, or nullopt. Any thread.
+    [[nodiscard]] auto receive_vid() const noexcept -> std::optional<uint16_t>
+    {
+        int32_t const vid = receive_vid_.load(std::memory_order_relaxed);
+        return vid < 0 ? std::nullopt : std::optional{static_cast<uint16_t>(vid)};
+    }
     /// Refused TX kicks, the last errno, and whether the transport is failing
     /// (internal; public for tests). record() on the real-time thread only.
     class TxHealth
@@ -374,6 +425,13 @@ class XdpTransport final : public Transport
     class Port;        ///< a receive port (internal)
     class Sender;      ///< a send port (internal)
 
+    /// Writes into `rules` a rule per distinct group of `ports` (up to MAX_GROUPS) from slot 0, then, with a
+    /// VID, tagged_groups_rule(`vid`) in a slot kept for it: how many, and too_many_filter_rules when a group
+    /// did not fit (internal; public for tests).
+    [[nodiscard]] static auto compile_rules(
+        std::span<PortState* const> ports, std::optional<uint16_t> vid, std::span<net::CompiledRule<32>> rules) noexcept
+        -> std::pair<size_t, std::error_code>;
+
     /// Offers one received Ethernet frame to `ports` and `pipes`, as begin_tick() does, counting a
     /// refusal in `refusals`; true when a port kept it, to be held until the next tick (internal; public for tests).
     [[nodiscard]] static auto dispatch_frame(
@@ -397,8 +455,10 @@ class XdpTransport final : public Transport
     void rtcp_closed(RtcpPipe* pipe) noexcept;
     /// Real-time thread: take new RTCP pipes, retire closed ones.
     void update_rtcp_pipes() noexcept;
-    /// Real-time thread: install a rule per distinct group of ports_, without allocating.
+    /// Real-time thread: install a rule per distinct group of ports_, then the tagged rule with a receive
+    /// VID, without allocating.
     void install_rules() noexcept;
+
     void release_held() noexcept;
     void refill_tx_pool() noexcept;
     /// Destructor: frees every port state and RTCP pipe, live or not yet taken.
@@ -449,11 +509,13 @@ class XdpTransport final : public Transport
     std::array<uint64_t, RECEIVE_BATCH> held_{};
     size_t held_count_{0};
     TxPool tx_pool_;
-    std::array<net::CompiledRule<32>, MAX_GROUPS> rules_{};
+    std::array<net::CompiledRule<32>, MAX_RULES> rules_{};
     TxHealth tx_health_;
     RefusalCounter refusals_;  ///< real-time -> any
     LaunchClock launch_clock_;
     std::atomic<bool> reset_socket_stats_{false};  ///< any -> real-time: reset_counters() asked
+    std::atomic<int32_t> receive_vid_{-1};         ///< control -> real-time: set_receive_vid(), -1 for none
+    std::optional<uint16_t> installed_vid_;        ///< real-time: the VID rules_ were compiled for
 };
 
 /// A receive port's state: made on the control thread, used on the real-time thread from the

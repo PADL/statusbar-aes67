@@ -41,6 +41,7 @@ class UdpTransport final : public Transport
 
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
     [[nodiscard]] auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override;
+    /// Fails operation_not_supported for a SendOptions::vlan: a socket cannot tag.
     [[nodiscard]] auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override;
     /// A socket bound to the group (joined) or to RtcpOptions::local, marked
     /// with RtcpOptions::dscp; multicast loops back, so a session sees its own reports.

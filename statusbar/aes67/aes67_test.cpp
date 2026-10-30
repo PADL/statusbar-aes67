@@ -130,6 +130,7 @@ class LoopTransport final : public Transport
     {
         Endpoint destination;
         std::vector<uint8_t> bytes;
+        std::optional<ieee::VlanTag> vlan{};  ///< the port's tag when it was sent
     };
 
     class Rx final : public ReceivePort
@@ -171,7 +172,7 @@ class LoopTransport final : public Transport
         {
             std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
             (void)rtp::serialize_rtp(header, payload, bytes);
-            transport.queue.push_back({destination, std::move(bytes)});
+            transport.queue.push_back({destination, std::move(bytes), transport.vlan});
             return true;
         }
         auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
@@ -185,7 +186,7 @@ class LoopTransport final : public Transport
             if (!offset || !render(std::span{bytes}.subspan(*offset, payload_length))) {
                 return false;
             }
-            transport.queue.push_back({destination, std::move(bytes)});
+            transport.queue.push_back({destination, std::move(bytes), transport.vlan});
             return true;
         }
         auto send_rendered_at(
@@ -198,6 +199,14 @@ class LoopTransport final : public Transport
             return send_rendered(header, payload_length, render);
         }
         auto flush() noexcept -> size_t override { return 0; }
+        auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status override
+        {
+            if (transport.refuse_tag && vlan) {
+                return SendPort::set_vlan(vlan);
+            }
+            transport.vlan = vlan;
+            return success();
+        }
         LoopTransport& transport;
         Endpoint destination;
     };
@@ -209,6 +218,7 @@ class LoopTransport final : public Transport
     }
     auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override
     {
+        vlan = options.vlan;
         return std::make_unique<Tx>(*this, options.destination);
     }
 
@@ -218,10 +228,12 @@ class LoopTransport final : public Transport
     std::deque<Packet> queue;
     std::vector<uint64_t> departures;  ///< each packet's departure as the sender gave it
     Endpoint source{.address = IPv4Address{192, 168, 1, 10}, .port = 5004};
-    bool refuse{false};       ///< every send_rendered() finds no TX buffer
-    std::error_code failing;  ///< send_error()
-    bool every_tick{false};   ///< drain_every_tick()
-    size_t receives{0};       ///< receive() calls
+    bool refuse{false};                 ///< every send_rendered() finds no TX buffer
+    std::error_code failing;            ///< send_error()
+    bool every_tick{false};             ///< drain_every_tick()
+    bool refuse_tag{false};             ///< set_vlan() refuses a tag, as a socket does
+    std::optional<ieee::VlanTag> vlan;  ///< the open port's tag
+    size_t receives{0};                 ///< receive() calls
 };
 
 auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
@@ -976,6 +988,54 @@ TEST(aes67_sender, a_foreign_domain_output_announces_mediaclk_sender)
     EXPECT_TRUE(sdp::to_string(*replacement.session()).find("a=mediaclk:sender\r\n") != std::string::npos);
 }
 
+TEST(aes67_sender, a_tag_switched_mid_run_leaves_no_sequence_or_timestamp_gap)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    auto const tag = ieee::make_vlan_tag(2, false, 3);
+    uint64_t const base = (48'000ULL * 1'000'000) + 47;
+    sender.tick(base, 0);
+    EXPECT_TRUE(sender.set_vlan(tag));
+    sender.tick(base + FPP, 0);
+    sender.tick(base + (2 * FPP), 0);
+    EXPECT_TRUE(sender.set_vlan(std::nullopt));
+    sender.tick(base + (3 * FPP), 0);
+
+    EXPECT_EQ(transport.queue.size(), size_t{4});
+    std::array<bool, 4> const tagged{false, true, true, false};
+    auto const first = rtp::parse_rtp(transport.queue[0].bytes);
+    for (size_t i = 0; i < transport.queue.size(); ++i) {
+        auto const packet = rtp::parse_rtp(transport.queue[i].bytes);
+        EXPECT_EQ(transport.queue[i].vlan.has_value(), tagged[i]);
+        EXPECT_EQ(packet->header.sequence.get(), static_cast<uint16_t>(first->header.sequence.get() + i));
+        EXPECT_EQ(packet->header.timestamp.get(), static_cast<uint32_t>(first->header.timestamp.get() + (i * FPP)));
+        EXPECT_EQ(packet->header.ssrc.get(), first->header.ssrc.get());
+    }
+    EXPECT_TRUE(transport.queue[1].vlan == std::optional{tag});
+    EXPECT_EQ(sender.counters().lost, uint64_t{0});
+}
+
+TEST(aes67_sender, a_tag_is_kept_for_the_next_configure_and_a_refused_one_is_not)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    auto const tag = ieee::make_vlan_tag(2, false, 3);
+    EXPECT_TRUE(sender.set_vlan(tag));  // not configured: kept
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    EXPECT_TRUE(transport.vlan == std::optional{tag});  // opened with it
+
+    transport.refuse_tag = true;
+    EXPECT_TRUE(sender.set_vlan(std::nullopt));
+    auto const refused = sender.set_vlan(tag);
+    EXPECT_TRUE(!refused && refused.error() == std::errc::operation_not_supported);
+    EXPECT_FALSE(sender.vlan().has_value());
+    EXPECT_FALSE(transport.vlan.has_value());
+}
+
 TEST(aes67_stream, srp_reserves_the_packet_time_cut_to_the_class_interval)
 {
     auto const format = [](uint32_t const rate, uint32_t const fpp) {
@@ -1459,6 +1519,20 @@ TEST(aes67_udp, sender_to_receiver_over_loopback)
     EXPECT_EQ(receiver.counters().lost, uint64_t{0});
     EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{sender.ssrc()});
     EXPECT_EQ(sender.counters().packets, uint64_t{10});
+}
+
+TEST(aes67_udp, a_socket_sends_untagged_only)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    Endpoint const destination{.address = own_loopback(), .port = 45006};
+    auto const tag = ieee::make_vlan_tag(2, false, 3);
+    auto const tagged = (*transport)->open_send({.destination = destination, .vlan = tag});
+    EXPECT_TRUE(!tagged && tagged.error() == std::errc::operation_not_supported);
+    auto port = (*transport)->open_send({.destination = destination});
+    EXPECT_TRUE(port.has_value());
+    EXPECT_TRUE((*port)->set_vlan(std::nullopt));
+    EXPECT_FALSE((*port)->set_vlan(tag));
 }
 
 TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)

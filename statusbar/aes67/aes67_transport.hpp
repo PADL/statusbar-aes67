@@ -7,6 +7,7 @@
 /// a SendPort per sender and an RtcpPort per RTCP session. The control thread opens and destroys
 /// ports, safely while the real-time thread ticks; it brackets each tick with begin_tick() / end_tick().
 
+#include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/rtp/rtp_header.hpp"
@@ -18,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <system_error>
 #include <utility>
@@ -143,6 +145,16 @@ class SendPort
     /// Send what send() and send_rendered() queued. Returns the number of packets the network
     /// refused (0 on success).
     virtual auto flush() noexcept -> size_t = 0;
+    /// Tag the packets queued from now on with `vlan` (PCP and VID), or none (nullopt); sequence and
+    /// timestamps are the caller's and go on. One thread, not the real-time one, which never waits for it.
+    /// Default: untagged only (a tag fails operation_not_supported).
+    [[nodiscard]] virtual auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status
+    {
+        if (vlan) {
+            return failure(std::errc::operation_not_supported);
+        }
+        return success();
+    }
 };
 
 /// Where a sender's packets go and how they are marked.
@@ -151,6 +163,7 @@ struct SendOptions
     Endpoint destination;
     uint8_t ttl{32};                                 ///< multicast TTL (unicast uses the host default)
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};  ///< the IPv4 DSCP (Sender::set_dscp())
+    std::optional<ieee::VlanTag> vlan;               ///< the 802.1Q tag (SendPort::set_vlan()); none: untagged
 };
 
 /// Where an RtcpPort's reports go and arrive, and how they are marked.

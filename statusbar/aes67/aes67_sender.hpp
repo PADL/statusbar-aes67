@@ -155,6 +155,12 @@ class Sender
     void set_dscp(uint8_t const dscp) noexcept { dscp_ = dscp; }
     [[nodiscard]] auto dscp() const noexcept -> uint8_t { return dscp_; }
 
+    /// Tag the stream's packets with `vlan` (PCP and VID), or none (nullopt): from the next packet when
+    /// configured, the run, its sequence and timestamps going on; kept for the next configure(). Off the
+    /// real-time thread. Fails, keeping the tag before, when the transport cannot tag (SendPort::set_vlan()).
+    [[nodiscard]] auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status;
+    [[nodiscard]] auto vlan() const noexcept -> std::optional<ieee::VlanTag> const& { return vlan_; }
+
     /// Where this stream's RTCP goes and how it is marked (AES67-2018 Section 6.2: as the stream),
     /// or nullopt when not configured.
     [[nodiscard]] auto rtcp_options() const noexcept -> std::optional<RtcpOptions>;
@@ -250,6 +256,7 @@ class Sender
     std::atomic<uint32_t> send_offset_;
     uint32_t phase_{0};
     uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};
+    std::optional<ieee::VlanTag> vlan_;
     bool started_{false};
     uint64_t next_index_{0};  ///< first frame of the next packet to send
     Counters counters_;

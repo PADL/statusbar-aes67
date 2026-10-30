@@ -240,6 +240,9 @@ void UdpTransport::release(Endpoint const& destination) noexcept
 
 auto UdpTransport::open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>>
 {
+    if (options.vlan) {
+        return failure(std::errc::operation_not_supported);  // a socket cannot write the tag
+    }
     auto fd = net::make_udp_socket();
     if (!fd) {
         return failure(fd.error());

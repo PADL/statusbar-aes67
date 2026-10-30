@@ -40,7 +40,8 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
 - `SrClass`, `SrpTSpec`, `srp_format()`, `srp_tspec()`, `multicast_mac_aliases()` — a stream
   under SRP (AES67-2018 Annex C.1.1): its framing cut to the class interval, its MSRP TSpec, and
-  whether two groups share an Ethernet address.
+  whether two groups share an Ethernet address. `SendOptions::vlan`, `SendPort::set_vlan()` and
+  `Sender::set_vlan()` tag a stream; `XdpTransport::set_receive_vid()` receives tagged ones.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
 
 ## Quick example
@@ -338,8 +339,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - The XDP program redirects to the socket the untagged IPv4 (IHL 5) UDP frames whose
   destination is exactly one of the joined groups (the rule matches the group's MAC and
   the address's first two octets, which together are the whole address) and passes
-  everything else to the kernel. `begin_tick()` drains the RX ring once and hands each
-  frame, parsed with `rtp::parse_rtp_frame()`, to the ports for its destination group and
+  everything else to the kernel. With `set_receive_vid(vid)` one more rule, after the
+  groups' (so setting or clearing the VID rewrites only the tail), redirects every IPv4
+  group's UDP frames tagged with `vid`, any PCP (`tagged_groups_rule()`: MAC 01:00:5e with
+  bit 24 clear, RFC 1112 Section 6.4); the ports take their groups' and count the rest
+  `unmatched`, and the kernel no longer sees tagged multicast on that VID. `begin_tick()`
+  drains the RX ring once and hands each frame, parsed with `rtp::parse_rtp_frame()`, to the ports for its destination group and
   port; senders write whole frames into UMEM and `end_tick()` kicks the NIC.
 - Group membership is still the kernel's: each receive port holds a plain UDP socket
   joined to its group, so IGMP reports go out and the NIC's multicast filter keeps the
@@ -380,11 +385,14 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   ignored uncounted, by the transport and by the receiver alike. Relaxed atomics, written by
   `begin_tick()`, read from any thread. `dispatch_frame()` is that per-frame step.
 - Limits: multicast destinations only, both ways (a unicast receiver would need a rule
-  stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups
-  (the BPF program's TCAM holds 16 rules); a joined group's frames to ports no receiver
-  here listens on do not reach the kernel (the rule cannot see the UDP port), so other
-  listeners on the same group miss them; untagged frames only; one queue (`QUEUE`, 0), so the
-  NIC must deliver the groups there.
+  stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups;
+  `MAX_RULES` rules, the groups' and the tagged one, as far as core's TCAM
+  (`net::tcam_default_capacity`) holds them: the tagged rule keeps its slot, and a group
+  past the room left is dropped and reported by `rules_status()`; a joined group's frames to ports no
+  receiver here listens on do not reach the kernel (the rule cannot see the UDP port), so
+  other listeners on the same group miss them; tagged frames with one VID only; one queue
+  (`QUEUE`, 0), so the NIC must deliver the groups there, and a NIC that strips VLAN tags
+  (`rxvlan`) delivers them untagged.
 - RSS: a NIC with several RX queues hashes UDP flows over all of them, so `open()` steers
   every RSS bucket to `QUEUE` (`XdpTransportOptions::steer_rss`, on by default;
   `net::set_rss_indirection_all`, `CAP_NET_ADMIN`) and `rss_status()` says whether it could.
@@ -414,6 +422,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   reaches the interval: 6 at 48 kHz (exactly 125 us) and at 44.1 kHz (136 us, one frame per
   interval) in class A, 12 at 96 kHz. A packet time already that short is kept. The caller sends
   and announces the cut format.
+- A tagged stream: `SendOptions::vlan` opens a port tagged; `SendPort::set_vlan()` switches it between
+  tagged and untagged from the next frame (`XdpTransport`: one atomic word, wait-free for the
+  tick, read per frame), and the sender's run, sequence and timestamps go on. `UdpTransport` cannot tag and
+  refuses a tag. `Sender::set_vlan()` keeps the tag for its next `configure()`.
 - Reservations filter by destination MAC (Clause 35.2.2.8.3): `multicast_mac_aliases()` says when two
   groups share one.
 

@@ -58,7 +58,7 @@ class XdpTransport::Sender final : public SendPort
 
     auto send(rtp::RtpHeader const& header, std::span<uint8_t const> const payload) noexcept -> bool override
     {
-        auto const frame = write_frame(transport_.tx_pool_, addressing_, header, payload);
+        auto const frame = write_frame(transport_.tx_pool_, addressing_.current(), header, payload);
         return frame && transport_.commit(frame->first, frame->second, 0);
     }
 
@@ -74,16 +74,22 @@ class XdpTransport::Sender final : public SendPort
         PayloadRenderer const& render,
         uint64_t const departure_ns) noexcept -> bool override
     {
-        auto const frame = render_frame(transport_.tx_pool_, addressing_, header, payload_length, render);
+        auto const frame = render_frame(transport_.tx_pool_, addressing_.current(), header, payload_length, render);
         return frame && transport_.commit(frame->first, frame->second, departure_ns);
     }
 
     /// The transport flushes every sender's frames in end_tick().
     auto flush() noexcept -> size_t override { return 0; }
 
+    auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status override
+    {
+        addressing_.set_vlan(vlan);
+        return success();
+    }
+
   private:
     XdpTransport& transport_;
-    rtp::FrameAddressing addressing_;
+    SendAddressing addressing_;
 };
 
 /// An RTCP port: the kernel socket sends, and receives what the program passes; the pipe
@@ -298,6 +304,29 @@ auto XdpTransport::group_rule(ip::IPv4Address const& group) noexcept -> net::Com
     return rule;
 }
 
+auto XdpTransport::tagged_groups_rule(uint16_t const vid) noexcept -> net::CompiledRule<32>
+{
+    auto rule = net::ClassifierRuleBuilder<32>{}
+                    .ethertype(0x0800)
+                    .ipv4_protocol(ip::IPv4Header::PROTOCOL_UDP)
+                    .vlan_tagged_exact(vid)
+                    .result(net::flag::process)
+                    .build()[0];
+    constexpr size_t VERSION_IHL = 14 + ieee::VlanTag::LENGTH;  // IHL 5, as the untagged rule pins
+    std::array<std::array<uint8_t, 3>, 5> const bytes{{
+        {0, 0xFF, 0x01},  // 01:00:5e, then bit 24 clear: an IPv4 group's MAC
+        {1, 0xFF, 0x00},
+        {2, 0xFF, 0x5E},
+        {3, 0x80, 0x00},
+        {VERSION_IHL, 0xFF, 0x45},
+    }};
+    for (auto const& [at, mask, match] : bytes) {
+        rule.mask[at] = mask;
+        rule.match[at] = match;
+    }
+    return rule;
+}
+
 auto XdpTransport::open(std::string_view const interface, Options const& options) -> StatusValue<std::unique_ptr<XdpTransport>>
 {
     auto info = find_interface(interface);
@@ -465,7 +494,7 @@ auto XdpTransport::open_send(SendOptions const& options) -> StatusValue<std::uni
     rtp::FrameAddressing const addressing{
         .destination_mac = rtp::multicast_mac(options.destination.address),
         .source_mac = context_.hardware_address(),
-        .vlan = std::nullopt,
+        .vlan = options.vlan,
         .source_address = interface_.address,
         .destination_address = options.destination.address,
         .source_port = options.destination.port,
@@ -478,26 +507,49 @@ auto XdpTransport::open_send(SendOptions const& options) -> StatusValue<std::uni
 
 void XdpTransport::install_rules() noexcept
 {
-    std::array<ip::IPv4Address, MAX_GROUPS> groups{};
-    size_t count = 0;
-    std::error_code error;
-    for (size_t i = 0; i < port_count_; ++i) {
-        auto const& group = ports_[i]->destination.address;
-        if (std::ranges::contains(std::span{groups}.first(count), group)) {
-            continue;
-        }
-        if (count == MAX_GROUPS) {
-            error = make_error_code(net::XdpError::too_many_filter_rules);
-            break;
-        }
-        groups[count] = group;
-        rules_[count] = group_rule(group);
-        ++count;
-    }
+    installed_vid_ = receive_vid();
+    auto [count, error] = compile_rules(std::span<PortState* const>{ports_}.first(port_count_), installed_vid_, rules_);
     if (auto installed = context_.set_rules(std::span{rules_}.first(count)); !installed && !error) {
         error = installed.error();
     }
     rules_error_.store(error);
+}
+
+namespace {
+
+/// A rule per distinct group of `ports`, at most MAX_GROUPS, in `rules` from slot 0: how many, and whether all fit.
+auto compile_group_rules(
+    std::span<XdpTransport::PortState* const> const ports, std::span<net::CompiledRule<32>> const rules) noexcept
+    -> std::pair<size_t, bool>
+{
+    size_t count = 0;
+    for (size_t i = 0; i < ports.size(); ++i) {
+        auto const& group = ports[i]->destination.address;
+        auto const address = [](XdpTransport::PortState const* port) { return port->destination.address; };
+        if (std::ranges::contains(ports.first(i), group, address)) {
+            continue;
+        }
+        if (count == std::min(rules.size(), XdpTransport::MAX_GROUPS)) {
+            return {count, false};
+        }
+        rules[count++] = XdpTransport::group_rule(group);
+    }
+    return {count, true};
+}
+
+}  // namespace
+
+auto XdpTransport::compile_rules(
+    std::span<PortState* const> const ports,
+    std::optional<uint16_t> const vid,
+    std::span<net::CompiledRule<32>> const rules) noexcept -> std::pair<size_t, std::error_code>
+{
+    // The tagged rule's slot is kept, so a port still to be retired cannot push it out.
+    auto [count, all] = compile_group_rules(ports, rules.first(rules.size() - (vid && !rules.empty() ? 1 : 0)));
+    if (vid && count < rules.size()) {
+        rules[count++] = tagged_groups_rule(*vid);  // last: a VID change touches only the tail
+    }
+    return {count, all ? std::error_code{} : make_error_code(net::XdpError::too_many_filter_rules)};
 }
 
 void XdpTransport::release_held() noexcept
@@ -522,7 +574,7 @@ void XdpTransport::refill_tx_pool() noexcept
 void XdpTransport::begin_tick() noexcept
 {
     release_held();
-    if (update_ports()) {
+    if (update_ports() || receive_vid() != installed_vid_) {
         install_rules();
     }
     update_rtcp_pipes();

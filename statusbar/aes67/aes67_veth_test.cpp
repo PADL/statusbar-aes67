@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 /// Two UdpTransports on two veth pairs receiving the same group: a datagram arriving on one
-/// interface reaches only that interface's RTP and RTCP ports. Needs root (it creates the
-/// pairs and sends raw frames); skips without it.
+/// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
+/// tagged stream is received through the tagged group rule. Needs root; skips without it.
 
 #include "statusbar/aes67/aes67_udp_transport.hpp"
+#include "statusbar/aes67/aes67_xdp_transport.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -33,11 +34,11 @@ using statusbar::ip::IPv4Address;
 
 namespace {
 
-/// A veth pair, its first end addressed, both up; removed on destruction.
+/// A veth pair, its first end addressed (and its second, given `far_address`), both up; removed on destruction.
 class VethPair
 {
   public:
-    VethPair(std::string near, std::string const& far, std::string const& address)
+    VethPair(std::string near, std::string const& far, std::string const& address, std::string const& far_address = {})
         : near_{std::move(near)}
     {
         (void)std::system(std::format("ip link del {} 2>/dev/null", near_).c_str());
@@ -48,6 +49,9 @@ class VethPair
                               far,
                               address)
                               .c_str()) == 0;
+        if (ok_ && !far_address.empty()) {
+            ok_ = std::system(std::format("ip addr add {} dev {}", far_address, far).c_str()) == 0;
+        }
     }
     ~VethPair() { (void)std::system(std::format("ip link del {} 2>/dev/null", near_).c_str()); }
     VethPair(VethPair const&) = delete;
@@ -102,7 +106,65 @@ auto received(Port& port) -> size_t
     return total;
 }
 
+/// One packet sent by `sender` on `sending` and the datagrams `receiving`'s `port` takes within 50 ticks of 1 ms.
+auto sent_and_received(XdpTransport& sending, SendPort& sender, XdpTransport& receiving, ReceivePort& port) -> size_t
+{
+    receiving.begin_tick();  // installs the rules
+    receiving.end_tick();
+    sending.begin_tick();
+    rtp::RtpHeader header{};
+    header.init(97, 1, 2, 3);
+    std::array<uint8_t, 288> const payload{};
+    EXPECT_TRUE(sender.send(header, payload));
+    sending.end_tick();
+    std::array<Datagram, 8> batch{};
+    size_t total = 0;
+    for (int tick = 0; tick < 50 && total == 0; ++tick) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        receiving.begin_tick();
+        total += port.receive(batch);
+        receiving.end_tick();
+    }
+    return total;
+}
+
 }  // namespace
+
+TEST(aes67_veth, a_tagged_stream_is_received_through_the_tagged_group_rule)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67xveth0", "a67xveth1", "10.233.0.1/24", "10.233.0.2/24"};
+    if (!pair.ok()) {
+        std::println("  skipped: cannot create a veth pair");
+        return;
+    }
+    XdpTransportOptions const options{
+        .bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic, .steer_rss = false};
+    auto sending = XdpTransport::open("a67xveth0", options);
+    auto receiving = XdpTransport::open("a67xveth1", options);
+    if (!sending || !receiving) {
+        std::println("  skipped: AF_XDP unavailable");
+        return;
+    }
+    Endpoint const stream{.address = IPv4Address{239, 69, 233, 1}, .port = 45210};
+    auto port = (*receiving)->open_receive(stream);
+    auto sender = (*sending)->open_send({.destination = stream, .vlan = ieee::make_vlan_tag(2, false, 3)});
+    EXPECT_TRUE(port && sender);
+    if (!port || !sender) {
+        return;
+    }
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{0});  // the untagged rule only
+    (*receiving)->set_receive_vid(2);
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{1});
+    EXPECT_TRUE((*sender)->set_vlan(std::nullopt));
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{1});
+    EXPECT_TRUE((*receiving)->rules_status().has_value());
+    port->reset();
+    sender->reset();
+}
 
 TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arrives)
 {
