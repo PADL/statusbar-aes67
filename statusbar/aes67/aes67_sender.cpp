@@ -257,11 +257,12 @@ auto Sender::rtcp_options() const noexcept -> std::optional<RtcpOptions>
     };
 }
 
-void Sender::tick(uint64_t const now_index) noexcept
+void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
 {
     if (!port_) {
         return;
     }
+    tick_ns_ = tick_ns;
     if (paused_) {
         // A new run after a pause: a new SSRC and sequence (RFC 3550 Section 8), its SR counts afresh.
         paused_ = false;
@@ -343,7 +344,7 @@ auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool
         supply = render_payload(next_index_, payload);
         return true;
     };
-    bool const sent = port_->send_rendered(header, payload_.size(), render);
+    bool const sent = port_->send_rendered_at(header, payload_.size(), render, tick_ns_);
     Supply const supplied = supply ? *supply : render_payload(next_index_, payload_);
     if (supplied == Supply::missing) {
         counters_.lost += format_.frames_per_packet;

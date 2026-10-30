@@ -223,7 +223,7 @@ struct SenderRig
     void run(uint64_t const start, uint64_t const ms)
     {
         for (uint64_t t = start; t <= start + (ms * MS); t += MS) {
-            sender.tick(index_at(t));
+            sender.tick(index_at(t), 0);
             session->tick(t);
         }
     }
@@ -372,7 +372,7 @@ TEST(aes67_rtcp, a_pause_and_resume_between_two_ticks_still_says_bye_for_the_old
     rig.run(T0, 10);
     uint32_t const old = rig.sender.ssrc();
     rig.sender.pause();
-    rig.sender.tick(index_at(T0 + (11 * MS)));  // resumed before the session's next tick
+    rig.sender.tick(index_at(T0 + (11 * MS)), 0);  // resumed before the session's next tick
     uint32_t const fresh = rig.sender.ssrc();
     EXPECT_NE(fresh, old);
     size_t const before = rig.transport.rtcp_out.size();
@@ -529,7 +529,7 @@ TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)
     rig.sender.set_sender_clock(true);
     rig.session->set_timebase(&timebase);
     for (uint64_t t = T0; t <= T0 + (10 * MS); t += MS) {
-        rig.sender.tick(domain_index(t));
+        rig.sender.tick(domain_index(t), 0);
         rig.session->tick(t);
     }
     EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{1});
@@ -570,7 +570,7 @@ TEST(aes67_rtcp, an_identity_timebase_leaves_the_sender_report_unchanged)
     auto mapped = std::move(*RtcpSession::open_sender(rig.sender, rig.transport, options("bridge@10.0.0.2")));
     mapped->set_timebase(&timebase);
     for (uint64_t t = T0; t <= T0 + (10 * MS); t += MS) {
-        rig.sender.tick(index_at(t));
+        rig.sender.tick(index_at(t), 0);
         rig.session->tick(t);
         mapped->tick(t);
     }
@@ -780,7 +780,7 @@ TEST(aes67_rtcp, sr_rr_and_bye_round_trip_over_udp_loopback)
     };
     for (int step = 0; step < 200; ++step) {
         uint64_t const now = ptp_now();
-        sender.tick(index_at(now));
+        sender.tick(index_at(now), 0);
         receiver.drain(index_at(now));
         (*talker)->on_ready(now);
         (*listener)->on_ready(now);

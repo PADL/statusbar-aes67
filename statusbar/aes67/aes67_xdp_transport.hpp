@@ -7,19 +7,22 @@
 /// program redirects the joined groups' untagged IPv4/UDP frames and passes the rest to the kernel.
 /// Multicast destinations only, at most MAX_GROUPS groups; ports and threads as aes67_transport.hpp.
 /// RTCP goes by kernel socket, except to a group whose frames the program redirects: begin_tick()
-/// copies those into the port's RtcpPipe.
+/// copies those into the port's RtcpPipe. With launch time, every frame the socket sends is timed.
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
 #include "statusbar/itc/itc_message_pipe.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/net/net_compiled_rule.hpp"
+#include "statusbar/net/net_launch_order.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/net/net_rss.hpp"
+#include "statusbar/net/net_tc_launch_time.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
@@ -47,6 +50,9 @@ struct XdpTransportOptions
     /// Steer every RSS bucket to the socket's queue at open (net::set_rss_indirection_all): with
     /// RSS spreading received UDP over the NIC's queues, most groups would miss the socket.
     bool steer_rss{true};
+    /// Frames carry launch times (net::XdpConfig::tx_launch_time): the host found that the driver
+    /// honours them (net::launch_time_support). open() goes on without when this build lacks it.
+    bool launch_time{false};
 };
 
 class XdpTransport final : public Transport
@@ -73,6 +79,41 @@ class XdpTransport final : public Transport
     static constexpr uint32_t TX_FAILING_AFTER = 8;
     /// RTCP ports at most.
     static constexpr size_t MAX_RTCP_PORTS = 64;
+    /// The handle major of the mqprio root launch_time_queue() lays.
+    static constexpr uint16_t LAUNCH_TIME_QDISC_MAJOR = 0x9100;
+
+    /// The launch time each frame on a socket with launch time carries (internal; public for tests):
+    /// CLOCK_TAI now until a lead is in force, then departure plus lead, in commit order
+    /// (net::LaunchOrder). next() on the real-time thread; set_lead_ns() and the accessors any thread.
+    class LaunchClock
+    {
+      public:
+        /// Launch times in force from the next frame: each at its departure plus @p ns.
+        void set_lead_ns(uint64_t const ns) noexcept { lead_ns_.store(static_cast<int64_t>(ns), std::memory_order_relaxed); }
+        /// No lead in force from the next frame: every frame at now again.
+        void clear_lead() noexcept { lead_ns_.store(-1, std::memory_order_relaxed); }
+        /// The lead in force; nullopt before set_lead_ns() (every frame goes at now).
+        [[nodiscard]] auto lead_ns() const noexcept -> std::optional<uint64_t>
+        {
+            int64_t const lead = lead_ns_.load(std::memory_order_relaxed);
+            return lead < 0 ? std::nullopt : std::optional{static_cast<uint64_t>(lead)};
+        }
+        /// The time for a frame departing at @p departure_ns (0, or no lead in force: untimed, at
+        /// @p now()): departure plus lead, never before the last time given.
+        template <typename Now>
+        [[nodiscard]] auto next(uint64_t const departure_ns, Now const& now) noexcept -> uint64_t
+        {
+            int64_t const lead = lead_ns_.load(std::memory_order_relaxed);
+            uint64_t const wanted = lead < 0 || departure_ns == 0 ? 0 : departure_ns + static_cast<uint64_t>(lead);
+            return order_.next(wanted, now);
+        }
+        /// The ordering's counters: frames clamped, the largest clamp, steps.
+        [[nodiscard]] auto order() const noexcept -> net::LaunchOrder const& { return order_; }
+
+      private:
+        std::atomic<int64_t> lead_ns_{-1};
+        net::LaunchOrder order_;
+    };
 
     /// The queue that carries an RTCP port's redirected datagrams from begin_tick() to the
     /// reactor, copied out of the UMEM (internal; public for tests).
@@ -175,15 +216,46 @@ class XdpTransport final : public Transport
     /// The rule redirecting `group`'s frames to the socket.
     [[nodiscard]] static auto group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>;
 
-    /// Open AF_XDP on `interface`'s queue 0, adopting or attaching (and
-    /// pinning) the program as net::XdpConfig says, then steer RSS (Options::steer_rss).
-    /// Fails without a supported NIC, libxdp or the privileges, or zero-copy when it was required.
+    /// The TX queue to keep for the socket's timed frames on an interface of `tx_queues` TX queues
+    /// (net::tc::settle_launch_time_queue): QUEUE under LAUNCH_TIME_QDISC_MAJOR.
+    [[nodiscard]] static constexpr auto launch_time_queue(uint16_t const tx_queues) noexcept -> net::tc::LaunchTimeQueue
+    {
+        return net::tc::LaunchTimeQueue{.major = LAUNCH_TIME_QDISC_MAJOR, .queue = QUEUE, .tx_queues = tx_queues};
+    }
+
+    /// Bring `interface`'s qdiscs to `mode` for the socket's queue (net::tc::settle_launch_time_queue
+    /// over a TcClient; on igc putting the first offloaded etf, or removing the last, resets the adapter).
+    /// Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails. Unsupported: none, no lookup.
+    [[nodiscard]] static auto settle_launch_time(std::string_view interface, net::tc::LaunchTimeMode mode)
+        -> StatusValue<net::tc::LaunchTimeQueueAction>;
+
+    /// Open AF_XDP on `interface`'s queue 0, adopting or attaching (and pinning) the program as
+    /// net::XdpConfig says, then steer RSS (Options::steer_rss). Fails without a supported NIC, libxdp
+    /// or the privileges, or zero-copy when it was required; without TX metadata: launch_time_error().
     [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
         -> StatusValue<std::unique_ptr<XdpTransport>>;
 
     /// Every receive and RTCP port must be gone first (asserted); the real-time
     /// thread must have stopped ticking the transport.
     ~XdpTransport() override;
+    /// `options` with launch_time kept only where @p probe (-> Status: net::probe_tx_metadata, the build
+    /// and the kernel) allows it, else off with the reason in launch_time_error_: the socket then opens
+    /// once, untimed, rather than failing on a kernel that refuses TX metadata.
+    template <typename Probe>
+    [[nodiscard]] auto with_launch_time(Options const& options, Probe const& probe) noexcept -> Options
+    {
+        Options effective = options;
+        if (auto const probed = options.launch_time ? probe() : Status{}; !probed) {
+            launch_time_error_ = probed.error();
+            effective.launch_time = false;
+        }
+        return effective;
+    }
+    /// A transport that never opened, for with_launch_time() alone (tests).
+    [[nodiscard]] static auto unopened() -> std::unique_ptr<XdpTransport>
+    {
+        return std::unique_ptr<XdpTransport>{new XdpTransport{{}}};
+    }
     XdpTransport(XdpTransport const&) = delete;
     auto operator=(XdpTransport const&) -> XdpTransport& = delete;
     XdpTransport(XdpTransport&&) = delete;
@@ -208,6 +280,17 @@ class XdpTransport final : public Transport
     /// open()'s RSS steering: nullopt when Options::steer_rss was false; success when every bucket
     /// goes to queue_id(); else why not (operation_not_supported: the NIC has no RSS).
     [[nodiscard]] auto rss_status() const noexcept -> std::optional<Status> { return rss_status_; }
+    /// Whether sent frames carry launch times (opened with Options::launch_time, and this build has them).
+    [[nodiscard]] auto launch_time() const noexcept -> bool { return context_.tx_launch_time(); }
+    /// Why open() went on without the launch time it was asked for (empty: it did not).
+    [[nodiscard]] auto launch_time_error() const noexcept -> std::error_code { return launch_time_error_; }
+    /// Launch times in force: each RTP packet leaves at its departure plus @p ns; before this, and after
+    /// clear_launch_lead(), every frame goes at CLOCK_TAI now (sent at once in launch-time mode). The
+    /// host sets it while the system clock follows the NIC's PHC and the queue's etf is on. Any thread.
+    void set_launch_lead_ns(uint64_t const ns) noexcept { launch_clock_.set_lead_ns(ns); }
+    void clear_launch_lead() noexcept { launch_clock_.clear_lead(); }
+    /// The launch lead in force (nullopt: not yet); the ordering's counters. Any thread.
+    [[nodiscard]] auto launch_clock() const noexcept -> LaunchClock const& { return launch_clock_; }
     /// Refused TX kicks, the last errno, and whether the transport is failing
     /// (internal; public for tests). record() on the real-time thread only.
     class TxHealth
@@ -330,10 +413,14 @@ class XdpTransport final : public Transport
     void start_cycle() noexcept;
     /// Real-time thread: take the received frames, holding those a receive port kept.
     void receive_frames() noexcept;
+    /// Real-time thread: put a written frame on the TX ring, timed for @p departure_ns (0: untimed)
+    /// when the socket carries launch times; false when the ring is full (the frame is freed).
+    [[nodiscard]] auto commit(net::EthernetTxSlot const& slot, size_t length, uint64_t departure_ns) noexcept -> bool;
 
     InterfaceInfo interface_;
     net::XdpContext context_;
     std::optional<Status> rss_status_;
+    std::error_code launch_time_error_;
 
     // Control thread only.
     std::vector<std::pair<ip::IPv4Address, size_t>> groups_;  ///< groups of the open ports, with counts
@@ -359,6 +446,7 @@ class XdpTransport final : public Transport
     std::array<net::CompiledRule<32>, MAX_GROUPS> rules_{};
     TxHealth tx_health_;
     RefusalCounter refusals_;  ///< real-time -> any
+    LaunchClock launch_clock_;
 };
 
 /// A receive port's state: made on the control thread, used on the real-time thread from the

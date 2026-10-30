@@ -30,9 +30,9 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `StreamFormat` — encoding, channels, rate and frames per packet (the ptime).
 - `FrameHandler` / `FrameProvider` — the real-time callbacks, `sg14::inplace_function`s with 64 bytes of capture; `Supply` is what a provider gave.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
-- `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`.
+- `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, read delay, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
-- `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`).
+- `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` takes the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
 - `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, SR interval, receiver DSCP, cadence, `on_sender_report`), `RtcpStats`.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
@@ -398,7 +398,39 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   redirects it and sends every report (the program steals RX only). RTCP ports do not
   add rules. `fd()` is -1.
 - AF_XDP zero-copy, attach and pinning behaviour is hardware-dependent and verified on the
-  bench box, not in unit tests; `aes67_xdp_test` covers the frame, pool and health logic.
+  bench box, not in unit tests; `aes67_xdp_test` covers the frame, pool, health and launch-time logic.
+
+### Launch time
+
+- A sender hands each packet over with its departure (`SendPort::send_rendered_at`): the time of
+  the tick that sends it, as the caller gives `Sender::tick(now_index, tick_ns)`, in the ns the
+  sending NIC's PHC reads (PTP time; a member interface's domain time). The sender reconstructs
+  nothing: a tick without a time sends untimed, a stalled sender's burst departs at the tick that
+  catches up. The RTP timestamp is the frames' index (RFC 3550 Section 5.1, capture time) and does
+  not move with the departure or the lead.
+- `XdpTransport` opened with `XdpTransportOptions::launch_time` (the host found that the driver
+  honours it, `net::launch_time_support`; a build without TX metadata opens without and records
+  `launch_time_error()`) gives every frame on the socket a launch time (`LaunchClock`): CLOCK_TAI
+  now until `set_launch_lead_ns()` puts a lead in force, then departure plus lead, never earlier than
+  the last time committed (`net::LaunchOrder`: igc's queue is a FIFO; a time over 1 ms behind is a
+  clock step; a time already past at commit, an overrunning tick, goes at now and is counted in
+  `launch_clock().order()`); `clear_launch_lead()` is now again. An untimed send (`send()`, a tick
+  without a time) goes at now. RTCP and SAP go by kernel sockets, never through the socket.
+- The lead moves the wire time only: the packet leaves at departure plus lead, free of the sending
+  CPU's jitter, while its timestamp and the receiver's placement are unchanged, so launch time
+  changes no latency; it lets a receiver's link offset cover the lead plus the network transit
+  instead of the sender's jitter as well (AES67-2018 Section 7.4). A lead of 0 would be past when
+  the tick commits the frame (the NIC sends at once, as without launch time), so the lead is a
+  whole tick or more.
+- The NIC honours the time only with the socket's queue in launch-time mode, and igc places a
+  frame by CLOCK_TAI's offset in its cycle against its own PHC, so the queue may be in that mode
+  only while the system clock follows this NIC's PHC: `XdpTransport::settle_launch_time(interface,
+  mode)` lays core's mqprio root (`LAUNCH_TIME_QDISC_MAJOR`, every priority mapped away from
+  `QUEUE`) with an offloaded etf on the socket's queue (`net::tc::settle_launch_time_queue`) when
+  the host finds the clocks agree, and removes them when they no longer do; on igc each switch
+  resets the adapter (its PHC time is kept across the reset, `igc_ptp_time_restore`), so the host
+  says so. `unsupported` (igb) looks nothing up and sends nothing. None of this has run on an igc
+  yet.
 
 ## Further reading
 

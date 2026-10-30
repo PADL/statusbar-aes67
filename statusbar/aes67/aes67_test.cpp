@@ -188,6 +188,15 @@ class LoopTransport final : public Transport
             transport.queue.push_back({destination, std::move(bytes)});
             return true;
         }
+        auto send_rendered_at(
+            rtp::RtpHeader const& header,
+            size_t const payload_length,
+            PayloadRenderer const& render,
+            uint64_t const departure_ns) noexcept -> bool override
+        {
+            transport.departures.push_back(departure_ns);
+            return send_rendered(header, payload_length, render);
+        }
         auto flush() noexcept -> size_t override { return 0; }
         LoopTransport& transport;
         Endpoint destination;
@@ -207,6 +216,7 @@ class LoopTransport final : public Transport
     [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return every_tick; }
 
     std::deque<Packet> queue;
+    std::vector<uint64_t> departures;  ///< each packet's departure as the sender gave it
     Endpoint source{.address = IPv4Address{192, 168, 1, 10}, .port = 5004};
     bool refuse{false};       ///< every send_rendered() finds no TX buffer
     std::error_code failing;  ///< send_error()
@@ -270,6 +280,28 @@ TEST(aes67_sender, announces_l32_that_an_l32_receiver_takes)
     Receiver receiver{STEREO_L32, sink.handler(), transport};
     EXPECT_TRUE(receiver.configure(*parsed));
     EXPECT_EQ(STEREO_L32.bytes_per_frame(), uint32_t{8});
+}
+
+// A packet is handed to the transport departing at the time of the tick that sends it, whatever
+// timescale the caller ticks in (the sending NIC's PHC: PTP time, or a member interface's domain
+// time); a tick without a time sends untimed.
+TEST(aes67_sender, a_packet_departs_at_the_time_of_the_tick_that_sends_it)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};  // 48 frames a packet at 48 kHz
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 98}));
+    EXPECT_EQ(sender.read_delay(), uint32_t{6});
+    constexpr uint64_t T0 = 1'700'000'000'000'000'000ULL;
+    sender.tick(54, T0 + 1'125'000);  // the tick that sends packet 0 (last frame 47, read delay 6)
+    sender.tick(60, T0 + 1'250'000);  // nothing due
+    sender.tick(102, T0 + 2'125'000);
+    EXPECT_TRUE((transport.departures == std::vector<uint64_t>{T0 + 1'125'000, T0 + 2'125'000}));
+    sender.tick(150, 0);  // untimed
+    EXPECT_TRUE(!transport.departures.empty() && transport.departures.back() == 0);
+    // A stalled sender catches up in one tick: every packet of the burst departs at that tick.
+    sender.tick(300, T0 + 6'250'000);
+    EXPECT_TRUE(transport.departures.size() >= 5 && transport.departures.back() == T0 + 6'250'000);
 }
 
 TEST(aes67_sender, parses_a_grandmaster)
@@ -429,13 +461,13 @@ TEST(aes67_sender, sends_packets_on_the_grid_when_due)
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 48'000ULL * 1'000'000;  // some PTP time well past the epoch
-    sender.tick(base + 46);                       // packet [base - 48, base) is due: last index base - 1
+    sender.tick(base + 46, 0);                    // packet [base - 48, base) is due: last index base - 1
     EXPECT_EQ(transport.queue.size(), size_t{1});
-    sender.tick(base + 46);  // nothing new
+    sender.tick(base + 46, 0);  // nothing new
     EXPECT_EQ(transport.queue.size(), size_t{1});
-    sender.tick(base + 47);  // [base, base + 48) completes
+    sender.tick(base + 47, 0);  // [base, base + 48) completes
     EXPECT_EQ(transport.queue.size(), size_t{2});
-    sender.tick(base + 47 + (3 * 48));  // three more at once
+    sender.tick(base + 47 + (3 * 48), 0);  // three more at once
     EXPECT_EQ(transport.queue.size(), size_t{5});
 
     uint16_t expected_seq = 0;
@@ -469,9 +501,9 @@ TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 4800 * 48;
-    sender.tick(base - 1);  // sends [base - 48, base)
+    sender.tick(base - 1, 0);  // sends [base - 48, base)
     source.refuse_index = base;
-    sender.tick(base + 47);
+    sender.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{2});
     auto const silent = rtp::parse_rtp(transport.queue[1].bytes);
     EXPECT_TRUE(std::ranges::all_of(silent->payload, [](uint8_t b) { return b == 0; }));
@@ -479,7 +511,7 @@ TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
 
     // 100 packets later: only the newest is sent, the rest counted lost.
     transport.queue.clear();
-    sender.tick(base + 47 + (100 * 48));
+    sender.tick(base + 47 + (100 * 48), 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
     EXPECT_EQ(rtp::parse_rtp(transport.queue[0].bytes)->header.timestamp.get(), static_cast<uint32_t>(base + (100 * 48)));
     EXPECT_EQ(sender.counters().lost, uint64_t{48 + (99 * 48)});
@@ -536,9 +568,9 @@ TEST(aes67_sender, waits_out_the_read_delay)
     sender.set_read_delay(100);
 
     uint64_t const base = 48'000ULL * 1000;  // a multiple of 48
-    sender.tick(base + 47 + 99);             // [base, base + 48) is one frame short of due
+    sender.tick(base + 47 + 99, 0);          // [base, base + 48) is one frame short of due
     std::size_t const before = transport.queue.size();
-    sender.tick(base + 47 + 100);  // due now
+    sender.tick(base + 47 + 100, 0);  // due now
     EXPECT_EQ(transport.queue.size(), before + 1);
     EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(base));
 }
@@ -549,7 +581,7 @@ TEST(aes67_sender, sends_uncounted_silence_with_no_provider)
     Sender sender{STEREO_L24, FrameProvider{}, transport, "Test"};
     sender.set_read_delay(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
-    sender.tick(48'000ULL * 1000 + 47);
+    sender.tick(48'000ULL * 1000 + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
     EXPECT_TRUE(std::ranges::all_of(rtp::parse_rtp(transport.queue[0].bytes)->payload, [](uint8_t b) { return b == 0; }));
     EXPECT_EQ(sender.counters().lost, uint64_t{0});
@@ -564,7 +596,7 @@ TEST(aes67_sender, a_paused_sender_sends_nothing_and_resumes_on_the_grid_as_a_ne
     sender.set_read_delay(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
     uint64_t const base = 48'000ULL * 1'000'000;
-    sender.tick(base + 47);
+    sender.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
     EXPECT_TRUE(sender.state() == State::running);
 
@@ -574,7 +606,7 @@ TEST(aes67_sender, a_paused_sender_sends_nothing_and_resumes_on_the_grid_as_a_ne
     auto const last = rtp::parse_rtp(transport.queue.back().bytes);
 
     // Ten packets later: a new run from the newest due packet under a new SSRC (RFC 3550 Section 8).
-    sender.tick(base + 47 + (10 * uint64_t{FPP}));
+    sender.tick(base + 47 + (10 * uint64_t{FPP}), 0);
     EXPECT_EQ(transport.queue.size(), size_t{2});
     auto const resumed = rtp::parse_rtp(transport.queue.back().bytes);
     EXPECT_TRUE(last && resumed);
@@ -599,9 +631,9 @@ TEST(aes67_sender, a_paused_sender_whose_transport_fails_reports_error)
     sender.set_read_delay(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
     uint64_t const base = 48'000ULL * 1'000'000;
-    sender.tick(base + 47);
+    sender.tick(base + 47, 0);
     transport.failing = std::error_code{EINVAL, std::system_category()};
-    sender.tick(base + 95);
+    sender.tick(base + 95, 0);
     EXPECT_TRUE(sender.state() == State::error);
     sender.pause();
     EXPECT_TRUE(sender.state() == State::error);  // paused, but the transport still cannot send
@@ -661,7 +693,7 @@ TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
     Sender idle{AM824, FrameProvider{}, transport, "Test"};
     idle.set_read_delay(0);
     EXPECT_TRUE(idle.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
-    idle.tick(base + 47);
+    idle.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
     auto const silent = rtp::parse_rtp(transport.queue[0].bytes);
     EXPECT_EQ(silent->payload.size(), size_t{AM824.bytes_per_packet()});
@@ -677,7 +709,7 @@ TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
     Sender sender{AM824, std::move(partial), transport, "Test"};
     sender.set_read_delay(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 3}}));
-    sender.tick(base + 47);
+    sender.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
     EXPECT_TRUE(all_words_are(rtp::parse_rtp(transport.queue[0].bytes)->payload, 0x4000'0000));
     EXPECT_EQ(sender.counters().lost, uint64_t{FPP});
@@ -691,7 +723,7 @@ TEST(aes67_sender, am824_silence_is_the_mbla_word_in_every_sample)
     Sender l24{STEREO_L24, std::move(partial_l24), transport, "Test"};
     l24.set_read_delay(0);
     EXPECT_TRUE(l24.configure(Destination{.address = IPv4Address{239, 69, 1, 4}}));
-    l24.tick(base + 47);
+    l24.tick(base + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{1});
     EXPECT_TRUE(std::ranges::all_of(rtp::parse_rtp(transport.queue[0].bytes)->payload, [](uint8_t b) { return b == 0; }));
 }
@@ -705,14 +737,14 @@ TEST(aes67_sender, waits_out_a_small_backward_step)
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     uint64_t const base = 48'000ULL * 1000;
     for (uint64_t k = 0; k < 4; ++k) {
-        sender.tick(base + 47 + (k * FPP));  // sends [base, ...) .. [base + 3 * 48, ...)
+        sender.tick(base + 47 + (k * FPP), 0);  // sends [base, ...) .. [base + 3 * 48, ...)
     }
     EXPECT_EQ(transport.queue.size(), size_t{4});
     // Two packets back: nothing is sent again, and sending resumes where it left off.
-    sender.tick(base + 47 + FPP);
-    sender.tick(base + 47 + (3 * FPP));
+    sender.tick(base + 47 + FPP, 0);
+    sender.tick(base + 47 + (3 * FPP), 0);
     EXPECT_EQ(transport.queue.size(), size_t{4});
-    sender.tick(base + 47 + (4 * FPP));
+    sender.tick(base + 47 + (4 * FPP), 0);
     EXPECT_EQ(transport.queue.size(), size_t{5});
     EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(base + (4 * FPP)));
     for (size_t i = 1; i < transport.queue.size(); ++i) {
@@ -729,10 +761,10 @@ TEST(aes67_sender, resynchronises_after_a_large_backward_step)
     sender.set_read_delay(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     uint64_t const base = 48'000ULL * 1000;
-    sender.tick(base + 47);
+    sender.tick(base + 47, 0);
     // A step back of more than MAX_BURST packets: start again from now.
     uint64_t const back = base - (uint64_t{Sender::MAX_BURST + 2} * FPP);
-    sender.tick(back + 47);
+    sender.tick(back + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{2});
     EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(back));
 }
@@ -746,13 +778,13 @@ TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_take)
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 4800 * 48;
-    sender.tick(base - 1);  // [base - 48, base), rendered in place
+    sender.tick(base - 1, 0);  // [base - 48, base), rendered in place
     EXPECT_EQ(source.pulls, size_t{1});
     // No TX buffer: the frames are still taken (into the staging buffer), the
     // missing packet still counted lost, and both packets counted dropped.
     transport.refuse = true;
     source.refuse_index = base + 48;
-    sender.tick(base + 95);
+    sender.tick(base + 95, 0);
     EXPECT_EQ(source.pulls, size_t{3});
     EXPECT_EQ(transport.queue.size(), size_t{1});
     EXPECT_EQ(sender.counters().dropped, uint64_t{2});
@@ -771,15 +803,15 @@ TEST(aes67_sender, a_packet_phase_moves_the_send_tick_not_the_timestamps)
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
 
     uint64_t const base = 48'000ULL * 1'000'000;  // a multiple of 48
-    sender.tick(base + 16);                       // starts with [base - 78, base - 30)
+    sender.tick(base + 16, 0);                    // starts with [base - 78, base - 30)
     EXPECT_EQ(transport.queue.size(), size_t{1});
-    sender.tick(base + 16);  // [base - 30, base + 18) completes at base + 17
+    sender.tick(base + 16, 0);  // [base - 30, base + 18) completes at base + 17
     EXPECT_EQ(transport.queue.size(), size_t{1});
-    sender.tick(base + 17);
+    sender.tick(base + 17, 0);
     EXPECT_EQ(transport.queue.size(), size_t{2});
-    sender.tick(base + 17 + 47);
+    sender.tick(base + 17 + 47, 0);
     EXPECT_EQ(transport.queue.size(), size_t{2});
-    sender.tick(base + 17 + 48);  // [base + 18, base + 66)
+    sender.tick(base + 17 + 48, 0);  // [base + 18, base + 66)
     EXPECT_EQ(transport.queue.size(), size_t{3});
     for (size_t i = 0; i < transport.queue.size(); ++i) {
         auto const packet = rtp::parse_rtp(transport.queue[i].bytes);
@@ -820,19 +852,19 @@ TEST(aes67_sender, reports_the_transports_send_error)
     sender.set_read_delay(0);
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
     uint64_t const base = 4800 * 48;
-    sender.tick(base - 1);
+    sender.tick(base - 1, 0);
     EXPECT_TRUE(sender.state() == State::running);
     transport.failing = std::error_code{EINVAL, std::system_category()};
-    sender.tick(base + 47);
+    sender.tick(base + 47, 0);
     EXPECT_TRUE(sender.state() == State::error);
     EXPECT_TRUE(sender.error() == std::errc::invalid_argument);
-    sender.tick(base + 47);  // nothing due: still in error
+    sender.tick(base + 47, 0);  // nothing due: still in error
     EXPECT_TRUE(sender.state() == State::error);
     transport.failing.clear();
-    sender.tick(base + 47);  // nothing due, but the transport sends again
+    sender.tick(base + 47, 0);  // nothing due, but the transport sends again
     EXPECT_TRUE(sender.state() == State::ready);
     EXPECT_FALSE(sender.error());
-    sender.tick(base + 95);
+    sender.tick(base + 95, 0);
     EXPECT_TRUE(sender.state() == State::running);
 }
 
@@ -864,7 +896,7 @@ TEST(aes67_sender, a_sender_on_a_drifting_index_sends_every_packet_once)
                     ++advances[std::min<uint64_t>(index - previous, advances.size() - 1)];
                 }
                 previous = index;
-                sender.tick(index);
+                sender.tick(index, 0);
             }
             EXPECT_EQ(advances[6] + advances[rate_offset > 0 ? 7 : 5], size_t{23'999});
             EXPECT_TRUE(advances[rate_offset > 0 ? 7 : 5] > 0);
@@ -1334,7 +1366,7 @@ TEST(aes67_udp, sender_to_receiver_over_loopback)
     // A fake PTP clock: 1 ms (one packet) per step, from an index past 2^32.
     uint64_t now = (5ULL << 32U) + 47;
     for (int step = 0; step < 10; ++step) {
-        sender.tick(now);
+        sender.tick(now, 0);
         receiver.drain(now);
         for (int tries = 0; tries < 100 && receiver.counters().packets < static_cast<uint64_t>(step + 1); ++tries) {
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
@@ -1367,7 +1399,7 @@ TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)
     EXPECT_TRUE(sender.configure(Destination{.address = own_loopback(), .port = 45010}));
     uint64_t now = 48'000ULL * 900 + 47;
     for (int step = 0; step < 20; ++step, now += FPP) {
-        sender.tick(now);
+        sender.tick(now, 0);
         std::this_thread::sleep_for(std::chrono::microseconds{200});  // let the ICMP come back
     }
     EXPECT_EQ(sender.counters().dropped, uint64_t{0});
@@ -1380,7 +1412,7 @@ TEST(aes67_udp, unicast_to_a_closed_port_is_not_refused)
     session.media[0].payload_type = 96;
     EXPECT_TRUE(receiver.configure(session));
     for (int step = 0; step < 3; ++step, now += FPP) {
-        sender.tick(now);
+        sender.tick(now, 0);
     }
     for (int tries = 0; tries < 100 && receiver.counters().packets < 3; ++tries) {
         receiver.drain(now);
@@ -1463,7 +1495,7 @@ TEST(aes67_udp, multicast_over_loopback_when_the_host_allows)
     EXPECT_TRUE(sender.configure(Destination{.address = group.address, .port = group.port, .payload_type = 97}));
     uint64_t now = 48000ULL * 7200 + 47;
     for (int step = 0; step < 5; ++step, now += FPP) {
-        sender.tick(now);
+        sender.tick(now, 0);
     }
     for (int tries = 0; tries < 50 && receiver.counters().packets < 5; ++tries) {
         receiver.drain(now);
@@ -1732,8 +1764,8 @@ TEST(aes67_udp, sender_renders_each_payload_once_straight_into_the_batch)
 
         uint64_t const base = 48'000ULL * 2000;
         source.refuse_index = base + 48;  // the second packet of the burst is missing
-        sender.tick(base - 1);            // one packet: [base - 48, base)
-        sender.tick(base + 143);          // a burst of three in one tick
+        sender.tick(base - 1, 0);         // one packet: [base - 48, base)
+        sender.tick(base + 143, 0);       // a burst of three in one tick
         EXPECT_EQ(source.pulls, size_t{4});
         EXPECT_EQ(targets.size(), size_t{4});
         for (size_t i = 2; i < targets.size(); ++i) {

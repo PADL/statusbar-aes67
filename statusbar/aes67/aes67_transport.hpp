@@ -122,6 +122,17 @@ class SendPort
     /// queued; when `render` returns false or the packet is refused after it, the buffer goes unsent.
     [[nodiscard]] virtual auto send_rendered(
         rtp::RtpHeader const& header, size_t payload_length, PayloadRenderer const& render) noexcept -> bool = 0;
+    /// As send_rendered(), the packet departing at @p departure_ns, the PTP time (ns) its sender sends it
+    /// (0: untimed): a transport sending at launch times sends it then plus its lead; others ignore it.
+    [[nodiscard]] virtual auto send_rendered_at(
+        rtp::RtpHeader const& header,
+        size_t const payload_length,
+        PayloadRenderer const& render,
+        uint64_t const departure_ns) noexcept -> bool
+    {
+        (void)departure_ns;
+        return send_rendered(header, payload_length, render);
+    }
     /// Send what send() and send_rendered() queued. Returns the number of packets the network
     /// refused (0 on success).
     virtual auto flush() noexcept -> size_t = 0;

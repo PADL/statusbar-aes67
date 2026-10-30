@@ -5,6 +5,7 @@
 
 /// An AES67 sender: a FrameProvider's frames by sample index, sent as RTP on the sample-index grid
 /// with `mediaclk:direct=0` (or `sender`, for an index not derived from PTP), and the stream's SDP.
+/// Each packet is handed to the transport with its departure, the time of the tick that sends it.
 /// configure(), clear(), the setters and session() allocate; tick() and the accessors are real-time safe.
 
 #include "statusbar/aes67/aes67_stream.hpp"
@@ -160,9 +161,10 @@ class Sender
     /// The latest SendState, published by tick(). Any thread.
     [[nodiscard]] auto send_state() const noexcept -> SendState { return send_state_.load(); }
 
-    /// Send every packet due by `now_index` (the media clock's index at the
-    /// current PTP time).
-    void tick(uint64_t now_index) noexcept;
+    /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
+    /// handed to the transport departing at `tick_ns`, this tick's time in the ns the sending NIC's
+    /// PHC reads (0: untimed; SendPort::send_rendered_at).
+    void tick(uint64_t now_index, uint64_t tick_ns) noexcept;
     /// Send nothing until the next tick(), which starts a new run on the index grid with a new SSRC and
     /// sequence (RFC 3550 Section 8): send_state() is cleared (the RTCP session says BYE), state() reads
     /// idle, or error while Transport::send_error() says so. Real-time safe; the ticking thread only.
@@ -242,6 +244,7 @@ class Sender
     uint64_t session_version_{0};
     std::optional<Grandmaster> grandmaster_;
     bool sender_clock_{false};
+    uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
     std::atomic<uint32_t> read_delay_;
     uint32_t phase_{0};
     uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};

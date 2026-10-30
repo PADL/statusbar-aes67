@@ -5,6 +5,7 @@
 
 #include "statusbar/aes67/aes67_error.hpp"
 #include "statusbar/ip/ip_ipv4.hpp"
+#include "statusbar/net/net_interface_info.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -58,20 +59,23 @@ class XdpTransport::Sender final : public SendPort
     auto send(rtp::RtpHeader const& header, std::span<uint8_t const> const payload) noexcept -> bool override
     {
         auto const frame = write_frame(transport_.tx_pool_, addressing_, header, payload);
-        if (!frame) {
-            return false;
-        }
-        return transport_.context_.tx_commit(frame->first.handle, frame->second).has_value();  // a full ring frees the frame
+        return frame && transport_.commit(frame->first, frame->second, 0);
     }
 
     auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
         -> bool override
     {
+        return send_rendered_at(header, payload_length, render, 0);
+    }
+
+    auto send_rendered_at(
+        rtp::RtpHeader const& header,
+        size_t const payload_length,
+        PayloadRenderer const& render,
+        uint64_t const departure_ns) noexcept -> bool override
+    {
         auto const frame = render_frame(transport_.tx_pool_, addressing_, header, payload_length, render);
-        if (!frame) {
-            return false;
-        }
-        return transport_.context_.tx_commit(frame->first.handle, frame->second).has_value();  // a full ring frees the frame
+        return frame && transport_.commit(frame->first, frame->second, departure_ns);
     }
 
     /// The transport flushes every sender's frames in end_tick().
@@ -228,7 +232,44 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .bind_mode = options.bind_mode,
         .attach_mode = options.attach_mode,
         .pin_path = options.pin_path,
+        .tx_launch_time = options.launch_time,
     };
+}
+
+#if defined(__linux__)
+namespace {
+
+/// `queue` of `ifindex` to `mode` over a TcClient of its own.
+auto settle_over_tc(int const ifindex, net::tc::LaunchTimeQueue const& queue, net::tc::LaunchTimeMode const mode)
+    -> StatusValue<net::tc::LaunchTimeQueueAction>
+{
+    net::tc::TcClient tc;
+    if (auto const opened = tc.open(); !opened) {
+        return forward_failure(opened);
+    }
+    return net::tc::settle_launch_time_queue(tc, ifindex, queue, mode);
+}
+
+}  // namespace
+#endif
+
+auto XdpTransport::settle_launch_time(std::string_view const interface, net::tc::LaunchTimeMode const mode)
+    -> StatusValue<net::tc::LaunchTimeQueueAction>
+{
+#if defined(__linux__)
+    if (mode == net::tc::LaunchTimeMode::unsupported) {
+        return net::tc::LaunchTimeQueueAction::none;
+    }
+    auto const ifindex = net::interface_index(interface);
+    auto const queues = net::tx_queue_count(interface);
+    if (!ifindex || !queues) {
+        return failure(ifindex ? queues.error() : ifindex.error());
+    }
+    return settle_over_tc(*ifindex, launch_time_queue(*queues), mode);
+#else
+    (void)interface, (void)mode;
+    return failure(std::errc::not_supported);
+#endif
 }
 
 auto XdpTransport::group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>
@@ -264,7 +305,9 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    if (auto opened = transport->context_.open(config_for(transport->interface_.name, options)); !opened) {
+    if (auto opened = transport->context_.open(
+            config_for(transport->interface_.name, transport->with_launch_time(options, net::probe_tx_metadata)));
+        !opened) {
         return failure(opened.error());
     }
     if (options.steer_rss) {
@@ -509,6 +552,16 @@ auto XdpTransport::update_ports() noexcept -> bool
         }
     }
     return changed;
+}
+
+auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, uint64_t const departure_ns) noexcept -> bool
+{
+    // A pooled frame was taken untimed (tx_start): on a socket with launch time every frame gets its
+    // time now, since the driver may otherwise reuse the previous frame's.
+    if (context_.tx_launch_time()) {
+        context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure_ns, net::tai_now_ns)));
+    }
+    return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
 }
 
 void XdpTransport::start_cycle() noexcept

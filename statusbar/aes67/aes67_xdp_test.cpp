@@ -82,6 +82,74 @@ TEST(aes67_xdp, refused_kicks_are_counted_and_fail_the_transport_after_a_millise
     EXPECT_TRUE(health.error() == std::errc::invalid_argument);  // the last refusal is kept for the log
 }
 
+// Until a lead is in force every frame goes at now, in order; then each at its departure plus the
+// lead, never before the last time given (igc's launch-time queue is a FIFO); an untimed frame at now.
+TEST(aes67_xdp, launch_times_are_now_until_the_lead_is_in_force_then_departure_plus_lead)
+{
+    constexpr uint64_t T = 1'800'000'000ULL * 1'000'000'000ULL;
+    XdpTransport::LaunchClock clock;
+    EXPECT_FALSE(clock.lead_ns().has_value());
+    EXPECT_EQ(clock.next(T, [] { return T - 5'000'000; }), T - 5'000'000);  // a departure, but no lead yet: now
+    clock.set_lead_ns(125'000);
+    EXPECT_EQ(clock.lead_ns(), std::optional<uint64_t>{125'000});
+    EXPECT_EQ(clock.next(T, [] { return uint64_t{0}; }), T + 125'000);
+    EXPECT_EQ(clock.next(T - 50'000, [] { return uint64_t{0}; }), T + 125'000);   // a second sender's, just behind: held
+    EXPECT_EQ(clock.order().clamped(), uint64_t{0});                              // under a packet: not counted
+    EXPECT_EQ(clock.next(T - 200'000, [] { return uint64_t{0}; }), T + 125'000);  // over a packet: counted
+    EXPECT_EQ(clock.next(0, [] { return T + 200'000; }), T + 200'000);            // untimed: now
+    EXPECT_EQ(clock.next(T - 3'000'000'000ULL, [] { return uint64_t{0}; }), T - 3'000'000'000ULL + 125'000);  // a step
+    EXPECT_EQ(clock.order().clamped(), uint64_t{1});
+    EXPECT_EQ(clock.order().max_clamp_ns(), uint64_t{200'000});
+    EXPECT_EQ(clock.order().steps(), uint64_t{1});
+    clock.set_lead_ns(0);
+    EXPECT_EQ(clock.next(T + 1'000'000, [] { return uint64_t{0}; }), T + 1'000'000);
+    clock.clear_lead();  // the clock no longer agrees: now again
+    EXPECT_FALSE(clock.lead_ns().has_value());
+    EXPECT_EQ(clock.next(T + 2'000'000, [] { return T + 1'500'000; }), T + 1'500'000);
+}
+
+// A kernel refusing the UMEM's TX metadata is probed once before the open: launch time goes off with the
+// reason and the socket opens untimed; a probe that passes keeps it; not asked for, not probed.
+TEST(aes67_xdp, a_kernel_refusing_tx_metadata_is_probed_before_the_open)
+{
+    int probes = 0;
+    auto const refuses = [&probes] {
+        ++probes;
+        return Status{failure(net::XdpError::tx_metadata_not_supported)};
+    };
+    auto const passes = [&probes] {
+        ++probes;
+        return Status{};
+    };
+    auto const transport = XdpTransport::unopened();
+    XdpTransport::Options const wanted{.launch_time = true};
+    auto const refused = transport->with_launch_time(wanted, refuses);
+    EXPECT_TRUE(!refused.launch_time && transport->launch_time_error() == net::XdpError::tx_metadata_not_supported && probes == 1);
+    auto const kept = transport->with_launch_time(wanted, passes);
+    EXPECT_TRUE(kept.launch_time && probes == 2);
+    auto const unasked = transport->with_launch_time(XdpTransport::Options{}, refuses);
+    EXPECT_TRUE(!unasked.launch_time && probes == 2);
+    EXPECT_FALSE(transport->launch_time());
+}
+
+// Launch time asks the socket for TX metadata; the queue the etf goes on is the socket's, under our
+// mqprio handle, with the interface's TX queues.
+TEST(aes67_xdp, launch_time_asks_for_tx_metadata_on_the_socket_s_queue)
+{
+    EXPECT_FALSE(XdpTransport::config_for("eth0").tx_launch_time);
+    EXPECT_TRUE(XdpTransport::config_for("eth0", {.launch_time = true}).tx_launch_time);
+    auto const queue = XdpTransport::launch_time_queue(4);
+    EXPECT_EQ(queue.major, XdpTransport::LAUNCH_TIME_QDISC_MAJOR);
+    EXPECT_EQ(queue.queue, static_cast<uint16_t>(XdpTransport::QUEUE));
+    EXPECT_EQ(queue.tx_queues, uint16_t{4});
+    EXPECT_EQ(queue.etf_delta_ns, net::tc::DEFAULT_ETF_DELTA_NS);
+    EXPECT_EQ(net::tc::launch_time_class(queue), net::tc::make_handle(XdpTransport::LAUNCH_TIME_QDISC_MAJOR, 1));
+    // Unsupported asks nothing of the kernel and looks nothing up: no interface, no privilege needed.
+    auto const none = XdpTransport::settle_launch_time("no-such-interface-0", net::tc::LaunchTimeMode::unsupported);
+    EXPECT_TRUE(none && *none == net::tc::LaunchTimeQueueAction::none);
+    EXPECT_FALSE(XdpTransport::settle_launch_time("no-such-interface-0", net::tc::LaunchTimeMode::off).has_value());
+}
+
 TEST(aes67_xdp, steers_rss_to_the_socket_queue_by_default)
 {
     EXPECT_TRUE(XdpTransport::Options{}.steer_rss);
