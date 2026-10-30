@@ -3,10 +3,12 @@
 
 /// Two UdpTransports on two veth pairs receiving the same group: a datagram arriving on one
 /// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
-/// tagged stream is received through the tagged group rule. Needs root; skips without it.
+/// tagged stream is received through the tagged group rule, a membership on an up VLAN link
+/// beside. Needs root; skips without it.
 
 #include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
+#include "statusbar/net/net_socket.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -162,6 +164,39 @@ TEST(aes67_veth, a_tagged_stream_is_received_through_the_tagged_group_rule)
     EXPECT_TRUE((*sender)->set_vlan(std::nullopt));
     EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{1});
     EXPECT_TRUE((*receiving)->rules_status().has_value());
+    port->reset();
+    sender->reset();
+}
+
+// The group joined on the receiving end's VLAN link too, up (as an SRP listener reports it): the socket
+// still takes the tagged stream, the XDP program redirecting it before the VLAN link sees it
+TEST(aes67_veth, a_group_joined_on_an_up_vlan_link_leaves_the_tagged_stream_to_the_socket)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67yveth0", "a67yveth1", "10.234.0.1/24", "10.234.0.2/24"};
+    bool const vlan =
+        pair.ok() && std::system("ip link add link a67yveth1 name a67yveth1.2 type vlan id 2 && ip link set a67yveth1.2 up") == 0;
+    XdpTransportOptions const options{
+        .bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic, .steer_rss = false};
+    auto sending = XdpTransport::open("a67yveth0", options);
+    auto receiving = XdpTransport::open("a67yveth1", options);
+    if (!vlan || !sending || !receiving) {
+        std::println("  skipped: no veth pair with a VLAN link, or AF_XDP unavailable");
+        return;
+    }
+    Endpoint const stream{.address = IPv4Address{239, 69, 234, 1}, .port = 45210};
+    auto const membership = net::open_group_membership(stream.address, ::if_nametoindex("a67yveth1.2"));
+    auto port = (*receiving)->open_receive(stream);
+    auto sender = (*sending)->open_send({.destination = stream, .vlan = ieee::make_vlan_tag(2, false, 3)});
+    EXPECT_TRUE(membership && port && sender);
+    if (!membership || !port || !sender) {
+        return;
+    }
+    (*receiving)->set_receive_vid(2);
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{1});
     port->reset();
     sender->reset();
 }
