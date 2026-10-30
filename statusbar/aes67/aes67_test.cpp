@@ -976,6 +976,55 @@ TEST(aes67_sender, a_foreign_domain_output_announces_mediaclk_sender)
     EXPECT_TRUE(sdp::to_string(*replacement.session()).find("a=mediaclk:sender\r\n") != std::string::npos);
 }
 
+TEST(aes67_stream, srp_reserves_the_packet_time_cut_to_the_class_interval)
+{
+    auto const format = [](uint32_t const rate, uint32_t const fpp) {
+        return StreamFormat{.encoding = sdp::Encoding::l24, .channels = 8, .sample_rate = rate, .frames_per_packet = fpp};
+    };
+    EXPECT_EQ(srp_format(format(48000, 48)).frames_per_packet, uint32_t{6});               // 1 ms -> 125 us
+    EXPECT_EQ(srp_format(format(48000, 48), SrClass::b).frames_per_packet, uint32_t{12});  // 1 ms -> 250 us
+    EXPECT_EQ(srp_format(format(48000, 16)).frames_per_packet, uint32_t{6});               // 333 us -> 125 us
+    EXPECT_EQ(srp_format(format(96000, 96)).frames_per_packet, uint32_t{12});
+    EXPECT_EQ(srp_format(format(192000, 192)).frames_per_packet, uint32_t{24});
+    EXPECT_EQ(srp_format(format(44100, 44)).frames_per_packet, uint32_t{6});               // 1 ms -> 136 us
+    EXPECT_EQ(srp_format(format(88200, 88), SrClass::b).frames_per_packet, uint32_t{23});  // 22.05 frames up
+    EXPECT_TRUE(srp_format(format(48000, 6), SrClass::b) == format(48000, 6));             // 125 us kept in class B
+    EXPECT_EQ(srp_format(format(8000, 8)).frames_per_packet, uint32_t{1});                 // never none
+}
+
+TEST(aes67_stream, srp_tspecs_count_ip_udp_rtp_the_payload_and_a_spare_octet)
+{
+    auto const format = [](sdp::Encoding const encoding, uint16_t const channels, uint32_t const rate, uint32_t const fpp) {
+        return StreamFormat{.encoding = encoding, .channels = channels, .sample_rate = rate, .frames_per_packet = fpp};
+    };
+    auto const l24 = sdp::Encoding::l24;
+    EXPECT_TRUE(srp_tspec(format(l24, 2, 48000, 6)) == (SrpTSpec{77, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 6)) == (SrpTSpec{185, 1}));
+    EXPECT_TRUE(srp_tspec(format(sdp::Encoding::l16, 8, 48000, 6)) == (SrpTSpec{137, 1}));
+    EXPECT_TRUE(srp_tspec(format(sdp::Encoding::l32, 8, 48000, 6)) == (SrpTSpec{233, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 16, 96000, 12)) == (SrpTSpec{617, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 64, 48000, 6)) == (SrpTSpec{1193, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 12), SrClass::b) == (SrpTSpec{329, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 6), SrClass::b) == (SrpTSpec{185, 2}));
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 16)) == (SrpTSpec{185, 1}));  // 333 us, scaled
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48)) == (SrpTSpec{185, 1}));  // 1 ms, scaled
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48), SrClass::b) == (SrpTSpec{329, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 44)) == (SrpTSpec{77, 1}));  // 6 frames, 136 us
+    EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 6)) == (SrpTSpec{77, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 2, 48000, 0)) == SrpTSpec{});
+}
+
+TEST(aes67_stream, groups_alias_when_their_low_23_bits_agree)
+{
+    EXPECT_TRUE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{239, 197, 1, 2}));
+    EXPECT_TRUE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{224, 69, 1, 2}));
+    EXPECT_TRUE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{239, 69, 1, 2}));
+    EXPECT_TRUE(multicast_mac_aliases(IPv4Address{224, 0, 1, 129}, IPv4Address{239, 128, 1, 129}));        // PTP's MAC
+    EXPECT_TRUE(multicast_mac_aliases(IPv4Address{239, 255, 255, 255}, IPv4Address{239, 127, 255, 255}));  // SAP's
+    EXPECT_FALSE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{239, 69, 1, 3}));
+    EXPECT_FALSE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{10, 69, 1, 2}));
+}
+
 TEST(aes67_receiver, a_receiver_taking_the_senders_clock_refuses_a_direct_stream)
 {
     LoopTransport transport;

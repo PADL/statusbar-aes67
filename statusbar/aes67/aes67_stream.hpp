@@ -11,6 +11,8 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
+#include "statusbar/rtp/rtp_frame.hpp"
+#include "statusbar/rtp/rtp_header.hpp"
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
@@ -41,6 +43,72 @@ struct StreamFormat
 
     auto operator==(StreamFormat const&) const noexcept -> bool = default;
 };
+
+//
+// Streams under SRP - AES67-2018 Annex C.1.1
+//
+
+/// An SRP traffic class; its measurement interval is IEEE 802.1Q-2022 Clause 34.4's.
+enum class SrClass : uint8_t
+{
+    a,  ///< 125 us
+    b,  ///< 250 us
+};
+
+/// The class measurement interval of `sr_class` in microseconds.
+[[nodiscard]] constexpr auto sr_class_interval_us(SrClass const sr_class) noexcept -> uint32_t
+{
+    return sr_class == SrClass::a ? 125 : 250;
+}
+
+/// An MSRP TSpec (IEEE 802.1Q-2022 Clause 35.2.2.8.4).
+struct SrpTSpec
+{
+    /// MaxFrameSize past the payload. Clause 35.2.2.8.4 a): IPv4 (20), UDP (8) and RTP headers, no
+    /// Ethernet overhead (AES67-2018 Annex C.1.1.1), and one spare octet as Milan v1.2 Section 4.3.3.2 reserves.
+    static constexpr uint32_t FRAME_OVERHEAD = static_cast<uint32_t>(20 + 8 + rtp::RtpHeader::LENGTH + 1);
+
+    uint16_t max_frame_size{0};       ///< MaxFrameSize: octets from the IPv4 header on
+    uint16_t max_interval_frames{0};  ///< MaxIntervalFrames: frames per class measurement interval
+
+    auto operator==(SrpTSpec const&) const noexcept -> bool = default;
+};
+
+/// `format` as it is sent under SRP in `sr_class`: frames per packet cut to the fewest whose packet
+/// time reaches the class interval (6 at 44.1 or 48 kHz in class A) when it has more; else kept.
+[[nodiscard]] constexpr auto srp_format(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> StreamFormat
+{
+    uint64_t const interval = uint64_t{format.sample_rate} * sr_class_interval_us(sr_class);
+    uint64_t const interval_frames = (interval + 999'999) / 1'000'000;
+    StreamFormat scaled = format;
+    if (scaled.frames_per_packet > interval_frames) {
+        scaled.frames_per_packet = static_cast<uint32_t>(interval_frames == 0 ? 1 : interval_frames);
+    }
+    return scaled;
+}
+
+/// The TSpec of `format` sent as srp_format() sends it in `sr_class` (AES67-2018 Annex C.1.1.1):
+/// MaxIntervalFrames is the packets that can start in one interval; zero for an empty format.
+[[nodiscard]] constexpr auto srp_tspec(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> SrpTSpec
+{
+    StreamFormat const sent = srp_format(format, sr_class);
+    uint64_t const packet = uint64_t{sent.frames_per_packet} * 1'000'000;
+    if (packet == 0 || sent.bytes_per_packet() == 0) {
+        return {};
+    }
+    uint64_t const interval = uint64_t{sent.sample_rate} * sr_class_interval_us(sr_class);
+    return {
+        .max_frame_size = static_cast<uint16_t>(SrpTSpec::FRAME_OVERHEAD + sent.bytes_per_packet()),
+        .max_interval_frames = static_cast<uint16_t>((interval + packet - 1) / packet),
+    };
+}
+
+/// True when IPv4 groups `a` and `b` map to the same Ethernet group address (RFC 1112 Section
+/// 6.4), the same group included; false unless both are multicast.
+[[nodiscard]] constexpr auto multicast_mac_aliases(ip::IPv4Address const& a, ip::IPv4Address const& b) noexcept -> bool
+{
+    return a.is_multicast() && b.is_multicast() && rtp::multicast_mac(a) == rtp::multicast_mac(b);
+}
 
 /// The media at `media_index`, its formats reordered to prefer `encoding` (else the primary, which
 /// check_media_format() refuses); fails no_media.

@@ -38,6 +38,9 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
 - `RtcpCadence` — when the next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
+- `SrClass`, `SrpTSpec`, `srp_format()`, `srp_tspec()`, `multicast_mac_aliases()` — a stream
+  under SRP (AES67-2018 Annex C.1.1): its framing cut to the class interval, its MSRP TSpec, and
+  whether two groups share an Ethernet address.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
 
 ## Quick example
@@ -399,6 +402,20 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   add rules. `fd()` is -1.
 - AF_XDP zero-copy, attach and pinning behaviour is hardware-dependent and verified on the
   bench box, not in unit tests; `aes67_xdp_test` covers the frame, pool, health and launch-time logic.
+
+### Streams under SRP
+
+- AES67-2018 Annex C.1.1 carries a stream as an IEEE 802.1Q Clause 35 reservation. `srp_tspec(format,
+  class)` is its TSpec (Clause 35.2.2.8.4): MaxFrameSize counts the IPv4, UDP and RTP headers, the
+  payload and one spare octet, no Ethernet overhead (Annex C.1.1.1); MaxIntervalFrames the packets
+  that can start in one class interval (125 us for class A, 250 us for B, Clause 34.4).
+- A packet time longer than the interval would reserve a whole frame every interval for one sent
+  each packet time, so `srp_format()` cuts the frames per packet to the fewest whose packet time
+  reaches the interval: 6 at 48 kHz (exactly 125 us) and at 44.1 kHz (136 us, one frame per
+  interval) in class A, 12 at 96 kHz. A packet time already that short is kept. The caller sends
+  and announces the cut format.
+- Reservations filter by destination MAC (Clause 35.2.2.8.3): `multicast_mac_aliases()` says when two
+  groups share one.
 
 ### Launch time
 
