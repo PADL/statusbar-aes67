@@ -167,6 +167,9 @@ class RtcpSession
     /// This end's SSRC: the stream's for a sender, a random one for a receiver.
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t;
     [[nodiscard]] auto stats() const noexcept -> RtcpStats const& { return stats_; }
+    /// The counts (reports sent and received, BYEs, bad packets, send errors) to zero; what the
+    /// remote last reported (loss, jitter, round trip, CNAME, its SR) stays. The ticking thread.
+    void reset_stats() noexcept;
     /// RtcpPort::dropped(). Any thread.
     [[nodiscard]] auto dropped() const noexcept -> uint64_t;
 

@@ -176,6 +176,8 @@ class Sender
     [[nodiscard]] auto format() const noexcept -> StreamFormat const& { return format_; }
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
+    /// Every counter to zero; the run, its SSRC and sequence go on. The ticking thread.
+    void reset_counters() noexcept { counters_ = {}; }
     /// Why the transport refused the last configure(), or why it cannot send
     /// (Transport::send_error(), seen by the last tick), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }

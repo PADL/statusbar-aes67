@@ -490,6 +490,17 @@ TEST(aes67_sender, sends_packets_on_the_grid_when_due)
     EXPECT_EQ(sender.counters().packets, uint64_t{5});
     EXPECT_EQ(sender.counters().frames, uint64_t{5 * 48});
     EXPECT_TRUE(sender.state() == State::running);
+
+    // Reset: the counters start again, the run (its SSRC and sequence) goes on.
+    uint32_t const ssrc = sender.ssrc();
+    sender.reset_counters();
+    EXPECT_EQ(sender.counters().packets, uint64_t{0});
+    sender.tick(base + 47 + (4 * 48), 0);
+    EXPECT_EQ(sender.counters().packets, uint64_t{1});
+    EXPECT_EQ(transport.queue.size(), size_t{6});
+    auto const next = rtp::parse_rtp(transport.queue.back().bytes);
+    EXPECT_TRUE(next && next->header.ssrc.get() == ssrc && next->header.sequence.get() == expected_seq);
+    EXPECT_TRUE(sender.state() == State::running);
 }
 
 TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
@@ -1092,6 +1103,19 @@ TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
     EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{0x1234});
     EXPECT_TRUE(receiver.state() == State::running);
 
+    // Reset: the counters start again; the source and its sequence are kept, so the next packet
+    // is placed as before, the gap behind it (17) is a loss and a repeat is still a duplicate.
+    receiver.reset_counters();
+    EXPECT_TRUE(receiver.counters() == Counters{});
+    send(18, at(8));
+    send(18, at(8));
+    receiver.drain(at(8));
+    EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{0x1234});
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
+    EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{1});
+    EXPECT_EQ(sink.blocks.back().first_index, at(8));
+
     // A second of silence from 0x1234, and a new source is adopted.
     uint64_t const later = at(7) + 48000;
     send(500, later, 0x5555);
@@ -1475,6 +1499,8 @@ TEST(aes67_udp, a_truncated_datagram_is_counted_malformed)
     }
     EXPECT_EQ((*transport)->receive_refusals().malformed, uint64_t{1});
     EXPECT_EQ((*transport)->receive_refusals().unmatched, uint64_t{0});
+    (*transport)->reset_counters();
+    EXPECT_EQ((*transport)->receive_refusals(), ReceiveRefusals{});
     port->reset();
 }
 

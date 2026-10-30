@@ -166,6 +166,18 @@ auto RtcpSession::fd() const noexcept -> int
     return port_ ? port_->fd() : -1;
 }
 
+void RtcpSession::reset_stats() noexcept
+{  // NOLINT(statusbar-block-statements): the counts of the record, zeroed together
+    stats_.sr_sent = 0;
+    stats_.rr_sent = 0;
+    stats_.bye_sent = 0;
+    stats_.sr_received = 0;
+    stats_.rr_received = 0;
+    stats_.bye_received = 0;
+    stats_.bad_packets = 0;
+    stats_.send_errors = 0;
+}
+
 auto RtcpSession::dropped() const noexcept -> uint64_t
 {
     return port_ ? port_->dropped() : 0;

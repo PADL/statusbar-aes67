@@ -80,6 +80,9 @@ TEST(aes67_xdp, refused_kicks_are_counted_and_fail_the_transport_after_a_millise
     health.record(true, 0);
     EXPECT_FALSE(health.failing());
     EXPECT_TRUE(health.error() == std::errc::invalid_argument);  // the last refusal is kept for the log
+    health.reset_failures();
+    EXPECT_EQ(health.failures(), uint64_t{0});
+    EXPECT_TRUE(health.error() == std::errc::invalid_argument);  // the count, not the history
 }
 
 // Until a lead is in force every frame goes at now, in order; then each at its departure plus the
@@ -400,6 +403,8 @@ TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
     EXPECT_EQ(counted.port_full, uint64_t{1});
     EXPECT_EQ(port.pending_count, XdpTransport::PORT_BATCH);
     EXPECT_EQ(pipe.dropped(), uint64_t{0});
+    refusals.reset();
+    EXPECT_EQ(refusals.load(), ReceiveRefusals{});
 }
 
 TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps_it)
@@ -468,6 +473,13 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     EXPECT_FALSE((*transport)->send_error());
     EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{1});  // published by end_tick()
     EXPECT_EQ((*transport)->tx_pool_empty_count(), uint64_t{0});
+    // A reset takes the socket's counters at the next end_tick(), on the ticking thread.
+    (*transport)->reset_counters();
+    EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{1});
+    (*transport)->begin_tick();
+    (*transport)->end_tick();
+    EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{0});
+    EXPECT_EQ((*transport)->socket_stats().tx_flush_count + (*transport)->socket_stats().tx_flush_skipped, uint64_t{0});
 }
 
 TEST(aes67_xdp, joins_and_ticks_when_privileged)

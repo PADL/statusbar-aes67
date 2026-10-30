@@ -509,6 +509,12 @@ TEST(aes67_rtcp, a_receiver_reports_loss_jitter_and_the_last_sr)
     session->tick(T0 + (6 * MS));
     EXPECT_EQ(session->stats().bye_received, uint64_t{1});
     EXPECT_TRUE(session->stats().remote_bye);
+
+    // Reset: the counts go, what the remote last reported stays.
+    session->reset_stats();
+    EXPECT_TRUE(session->stats().sr_received == 0 && session->stats().rr_sent == 0 && session->stats().bye_received == 0);
+    EXPECT_EQ(session->stats().remote_cname, std::string{"talker@10.0.0.1"});
+    EXPECT_TRUE(session->stats().remote_bye && session->stats().remote_ssrc == 0x5EED);
 }
 
 TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)

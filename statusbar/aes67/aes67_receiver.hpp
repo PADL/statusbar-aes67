@@ -67,6 +67,8 @@ class Receiver
     [[nodiscard]] auto format() const noexcept -> StreamFormat const& { return format_; }
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
+    /// Every counter to zero; the stream, its source and sequence go on. The draining thread.
+    void reset_counters() noexcept { counters_ = {}; }
     /// Why the transport refused the last configure(), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }

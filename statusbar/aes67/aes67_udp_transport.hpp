@@ -49,6 +49,7 @@ class UdpTransport final : public Transport
     /// Truncated datagrams (malformed); the receivers judge the rest, and another group's datagrams on a
     /// shared port are not refusals.
     [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals_.load(); }
+    void reset_counters() noexcept override { refusals_.reset(); }
 
     /// A receive port closing (its destructor, on the control thread).
     void release(Endpoint const& destination) noexcept;

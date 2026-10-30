@@ -180,6 +180,8 @@ class XdpTransport final : public Transport
         [[nodiscard]] auto size() const noexcept -> size_t { return count_; }
         /// take() calls that found the pool empty. Any thread.
         [[nodiscard]] auto empty_count() const noexcept -> uint64_t { return empty_.load(std::memory_order_relaxed); }
+        /// The count to zero. Any thread; a miss meanwhile may go uncounted.
+        void reset_empty_count() noexcept { empty_.store(0, std::memory_order_relaxed); }
 
       private:
         std::array<net::EthernetTxSlot, TX_POOL> slots_{};
@@ -313,6 +315,8 @@ class XdpTransport final : public Transport
             }
         }
         [[nodiscard]] auto failures() const noexcept -> uint64_t { return failures_.load(std::memory_order_relaxed); }
+        /// Forget the kicks counted, not whether transmit is failing nor the last errno. Any thread.
+        void reset_failures() noexcept { failures_.store(0, std::memory_order_relaxed); }
         /// The last refusal's errno as an error code (none before the first).
         [[nodiscard]] auto error() const noexcept -> std::error_code
         {
@@ -347,6 +351,8 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto tx_pool_empty_count() const noexcept -> uint64_t { return tx_pool_.empty_count(); }
     /// Redirected frames no receive port kept, by reason (RTCP pipes' drops are theirs). Any thread.
     [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals_.load(); }
+    /// The refusals, refused kicks and pool misses now; the socket's counters at the next end_tick(). Any thread.
+    void reset_counters() noexcept override;
     /// A port's datagrams last only the tick they arrived in.
     [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return true; }
     /// Fails with too_many_filter_rules past MAX_GROUPS groups, and with
@@ -447,6 +453,7 @@ class XdpTransport final : public Transport
     TxHealth tx_health_;
     RefusalCounter refusals_;  ///< real-time -> any
     LaunchClock launch_clock_;
+    std::atomic<bool> reset_socket_stats_{false};  ///< any -> real-time: reset_counters() asked
 };
 
 /// A receive port's state: made on the control thread, used on the real-time thread from the

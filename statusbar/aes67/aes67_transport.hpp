@@ -88,6 +88,13 @@ class RefusalCounter
             .port_full = counts_[3].load(std::memory_order_relaxed),
         };
     }
+    /// Every count to zero (relaxed; a count landing meanwhile may be lost). Any thread.
+    void reset() noexcept
+    {
+        for (auto& count : counts_) {
+            count.store(0, std::memory_order_relaxed);
+        }
+    }
 
   private:
     std::array<std::atomic<uint64_t>, 4> counts_{};
@@ -206,6 +213,9 @@ class Transport
     [[nodiscard]] virtual auto send_error() const noexcept -> std::error_code { return {}; }
     /// Received frames refused before any receiver saw them, by reason. Any thread.
     [[nodiscard]] virtual auto receive_refusals() const noexcept -> ReceiveRefusals { return {}; }
+    /// Start the transport's counters afresh: receive_refusals() now, a socket's own at its next
+    /// tick; what it refuses meanwhile may go uncounted. Any thread. Default: nothing counted.
+    virtual void reset_counters() noexcept {}
 };
 
 }  // namespace statusbar::aes67

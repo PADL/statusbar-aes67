@@ -684,7 +684,18 @@ void XdpTransport::end_tick() noexcept
 {
     bool const ok = context_.tx_flush().has_value();
     tx_health_.record(ok, ok ? 0 : context_.stats().tx_flush_errno);
+    if (reset_socket_stats_.exchange(false, std::memory_order_relaxed)) {
+        context_.reset_stats();
+    }
     socket_stats_.store(context_.stats());
+}
+
+void XdpTransport::reset_counters() noexcept
+{
+    refusals_.reset();
+    tx_health_.reset_failures();
+    tx_pool_.reset_empty_count();
+    reset_socket_stats_.store(true, std::memory_order_relaxed);
 }
 
 }  // namespace statusbar::aes67
