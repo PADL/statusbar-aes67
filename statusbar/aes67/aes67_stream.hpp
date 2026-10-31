@@ -58,7 +58,13 @@ enum class SrClass : uint8_t
 /// The class measurement interval of `sr_class` in microseconds.
 [[nodiscard]] constexpr auto sr_class_interval_us(SrClass const sr_class) noexcept -> uint32_t
 {
-    return sr_class == SrClass::a ? 125 : 250;
+    switch (sr_class) {
+        case SrClass::a:
+            return 125;
+        case SrClass::b:
+            break;
+    }
+    return 250;
 }
 
 /// An MSRP TSpec (IEEE 802.1Q-2022 Clause 35.2.2.8.4).
