@@ -463,7 +463,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `launch_time_queue(tx_queues)` also puts PTP event traffic on `PTP_QUEUE` (2) with 4 TX queues or
   more (`net::tc::PTP_PRIORITY`, ptp4l's `socket_priority 7`), queue 1 idle and the rest on queue 3,
   as an SR shaper lays them, and keeps its root without launch time: `off` lays the root (a host
-  without launch time calls it before the socket opens) and removes only the etf.
+  without launch time calls it before the socket opens) and removes only the etf. The order
+  assumes the lowest queue has the highest priority, as on igb and igc (I210 Datasheet Section
+  7.2.7.4), the drivers with AF_XDP launch time; an mqprio root of another handle goes first.
 
 ## Further reading
 

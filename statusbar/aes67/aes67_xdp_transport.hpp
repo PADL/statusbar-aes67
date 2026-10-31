@@ -274,10 +274,9 @@ class XdpTransport final : public Transport
         };
     }
 
-    /// Bring `interface`'s qdiscs to `mode` for the socket's queue (net::tc::settle_launch_time_queue
-    /// over a TcClient; on igc putting the first offloaded etf, or removing the last, resets the adapter).
-    /// Off lays the root without an etf. Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails.
-    /// Unsupported: none, no lookup.
+    /// `interface`'s qdiscs to `mode` (net::tc::settle_launch_time_queue over a TcClient): off lays the root
+    /// without an etf, unsupported looks nothing up; on igc the first etf and the last removal reset the
+    /// adapter. Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails.
     [[nodiscard]] static auto settle_launch_time(std::string_view interface, net::tc::LaunchTimeMode mode)
         -> StatusValue<net::tc::LaunchTimeQueueAction>;
 
