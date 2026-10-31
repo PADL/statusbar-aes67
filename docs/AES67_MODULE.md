@@ -456,10 +456,14 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   only while the system clock follows this NIC's PHC: `XdpTransport::settle_launch_time(interface,
   mode)` lays core's mqprio root (`LAUNCH_TIME_QDISC_MAJOR`, every priority mapped away from
   `QUEUE`) with an offloaded etf on the socket's queue (`net::tc::settle_launch_time_queue`) when
-  the host finds the clocks agree, and removes them when they no longer do; on igc each switch
+  the host finds the clocks agree, and removes the etf when they no longer do; on igc each switch
   resets the adapter (its PHC time is kept across the reset, `igc_ptp_time_restore`), so the host
   says so. `unsupported` (igb) looks nothing up and sends nothing. None of this has run on an igc
   yet.
+- `launch_time_queue(tx_queues)` also puts PTP event traffic on `PTP_QUEUE` (2) with 4 TX queues or
+  more (`net::tc::PTP_PRIORITY`, ptp4l's `socket_priority 7`), queue 1 idle and the rest on queue 3,
+  as an SR shaper lays them, and keeps its root without launch time: `off` lays the root (a host
+  without launch time calls it before the socket opens) and removes only the etf.
 
 ## Further reading
 

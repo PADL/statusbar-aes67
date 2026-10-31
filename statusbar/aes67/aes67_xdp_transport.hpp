@@ -86,6 +86,9 @@ class XdpTransport final : public Transport
     static constexpr size_t MAX_RTCP_PORTS = 64;
     /// The handle major of the mqprio root launch_time_queue() lays.
     static constexpr uint16_t LAUNCH_TIME_QDISC_MAJOR = 0x9100;
+    /// PTP event traffic's own TX queue (net::tc::PTP_PRIORITY), with 4 TX queues or more: queue 1 stays
+    /// idle, as an SR class B queue would be, and the rest takes the queues past it.
+    static constexpr uint16_t PTP_QUEUE = 2;
 
     /// The launch time each frame on a socket with launch time carries (internal; public for tests):
     /// CLOCK_TAI now until a lead is in force, then departure plus lead, in commit order
@@ -257,16 +260,24 @@ class XdpTransport final : public Transport
     /// and bit 24 clear, RFC 1112 Section 6.4); the ports take their own groups' and count the rest unmatched.
     [[nodiscard]] static auto tagged_groups_rule(uint16_t vid) noexcept -> net::CompiledRule<32>;
 
-    /// The TX queue to keep for the socket's timed frames on an interface of `tx_queues` TX queues
-    /// (net::tc::settle_launch_time_queue): QUEUE under LAUNCH_TIME_QDISC_MAJOR.
+    /// The TX queues of an interface of `tx_queues` (net::tc::settle_launch_time_queue): QUEUE kept for the
+    /// socket's timed frames, PTP_QUEUE for PTP where there is one past it, under LAUNCH_TIME_QDISC_MAJOR, a
+    /// root that stays when launch time is off.
     [[nodiscard]] static constexpr auto launch_time_queue(uint16_t const tx_queues) noexcept -> net::tc::LaunchTimeQueue
     {
-        return net::tc::LaunchTimeQueue{.major = LAUNCH_TIME_QDISC_MAJOR, .queue = QUEUE, .tx_queues = tx_queues};
+        return net::tc::LaunchTimeQueue{
+            .major = LAUNCH_TIME_QDISC_MAJOR,
+            .queue = QUEUE,
+            .tx_queues = tx_queues,
+            .ptp_queue = PTP_QUEUE + 1 < tx_queues ? std::optional<uint16_t>{PTP_QUEUE} : std::nullopt,
+            .persistent_root = true,
+        };
     }
 
     /// Bring `interface`'s qdiscs to `mode` for the socket's queue (net::tc::settle_launch_time_queue
     /// over a TcClient; on igc putting the first offloaded etf, or removing the last, resets the adapter).
-    /// Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails. Unsupported: none, no lookup.
+    /// Off lays the root without an etf. Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails.
+    /// Unsupported: none, no lookup.
     [[nodiscard]] static auto settle_launch_time(std::string_view interface, net::tc::LaunchTimeMode mode)
         -> StatusValue<net::tc::LaunchTimeQueueAction>;
 

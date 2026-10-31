@@ -148,6 +148,10 @@ TEST(aes67_xdp, launch_time_asks_for_tx_metadata_on_the_socket_s_queue)
     EXPECT_EQ(queue.tx_queues, uint16_t{4});
     EXPECT_EQ(queue.etf_delta_ns, net::tc::DEFAULT_ETF_DELTA_NS);
     EXPECT_EQ(net::tc::launch_time_class(queue), net::tc::make_handle(XdpTransport::LAUNCH_TIME_QDISC_MAJOR, 1));
+    // PTP on queue 2 of 4, the root kept without launch time; with 3 queues PTP shares the rest.
+    EXPECT_TRUE(queue.ptp_queue == XdpTransport::PTP_QUEUE && queue.persistent_root);
+    EXPECT_FALSE(XdpTransport::launch_time_queue(3).ptp_queue.has_value());
+    EXPECT_TRUE(net::tc::launch_time_mqprio(queue).has_value() && net::tc::launch_time_mqprio(XdpTransport::launch_time_queue(3)));
     // Unsupported asks nothing of the kernel and looks nothing up: no interface, no privilege needed.
     auto const none = XdpTransport::settle_launch_time("no-such-interface-0", net::tc::LaunchTimeMode::unsupported);
     EXPECT_TRUE(none && *none == net::tc::LaunchTimeQueueAction::none);
