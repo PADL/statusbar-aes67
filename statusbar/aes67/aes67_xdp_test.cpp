@@ -136,6 +136,18 @@ TEST(aes67_xdp, a_kernel_refusing_tx_metadata_is_probed_before_the_open)
     EXPECT_FALSE(transport->launch_time());
 }
 
+TEST(aes67_xdp, a_busy_polled_queue_is_passed_to_the_socket)
+{
+    auto const transport = XdpTransport::unopened();
+    EXPECT_FALSE(transport->napi_busy_poll());
+    transport->set_napi_busy_poll(true);
+#if defined(__linux__) && defined(HAVE_XDP)
+    EXPECT_TRUE(transport->napi_busy_poll());
+#endif
+    transport->set_napi_busy_poll(false);
+    EXPECT_FALSE(transport->napi_busy_poll());
+}
+
 // Launch time asks the socket for TX metadata; the queue the etf goes on is the socket's, under our
 // mqprio handle, with the interface's TX queues.
 TEST(aes67_xdp, launch_time_asks_for_tx_metadata_on_the_socket_s_queue)
