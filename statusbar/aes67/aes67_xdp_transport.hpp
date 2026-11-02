@@ -328,6 +328,10 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
     /// The queue the socket is bound to.
     [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return QUEUE; }
+    /// The queue's NAPI busy polls from its kthread: zero-copy TX then needs no kick
+    /// (net::XdpSocket::set_napi_busy_poll()). Any thread.
+    void set_napi_busy_poll(bool const on) noexcept { context_.set_napi_busy_poll(on); }
+    [[nodiscard]] auto napi_busy_poll() const noexcept -> bool { return context_.napi_busy_poll(); }
     /// open()'s RSS steering: nullopt when Options::steer_rss was false; success when every bucket
     /// goes to queue_id(); else why not (operation_not_supported: the NIC has no RSS).
     [[nodiscard]] auto rss_status() const noexcept -> std::optional<Status> { return rss_status_; }
