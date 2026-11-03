@@ -423,6 +423,43 @@ TEST(aes67_sender, an_802_1as_grandmaster_is_named_without_a_domain)
     EXPECT_TRUE(parsed && parsed->names_clock(parsed->media.at(0), GRANDMASTER.reference()));  // domain 0, one clock
 }
 
+TEST(aes67_sender, a_traceable_grandmaster_is_named_and_said_traceable)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    sender.set_grandmaster(GRANDMASTER);
+    auto const version = sender.session()->session_version;
+    auto const info_block = sender.info_block_version();
+    EXPECT_TRUE(sdp::to_string(*sender.session()).find("traceable") == std::string::npos);
+    sender.set_grandmaster(Grandmaster{.identity = GRANDMASTER.identity, .domain = 0, .traceable = true});
+    EXPECT_EQ(sender.session()->session_version, version + 1);  // a change of synchronisation status (Clause 8.2)
+    EXPECT_EQ(sender.info_block_version(), info_block);         // its ts-refclk names the grandmaster alone
+    std::string const text = sdp::to_string(*sender.session());
+    auto const named = text.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n");
+    auto const traceable = text.find("a=ts-refclk:ptp=IEEE1588-2008:traceable\r\n");
+    EXPECT_TRUE(named != std::string::npos && traceable != std::string::npos && named < traceable);
+    auto const parsed = sdp::parse(text);
+    EXPECT_TRUE(parsed.has_value());
+    auto const clocks = parsed->effective_clocks(parsed->media.at(0));
+    EXPECT_EQ(clocks.size(), size_t{2});
+    EXPECT_TRUE(clocks.size() == 2 && clocks[0].grandmaster == GRANDMASTER.identity && clocks[1].traceable);
+}
+
+TEST(aes67_sender, a_traceable_802_1as_grandmaster_is_said_traceable_under_its_version)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    sender.set_grandmaster(
+        Grandmaster{.identity = GRANDMASTER.identity, .domain = 0, .version = sdp::PtpVersion::ieee802_1as, .traceable = true});
+    std::string const text = sdp::to_string(*sender.session());
+    EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE802.1AS-2011:00-1D-C1-FF-FE-12-34-56\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE802.1AS-2011:traceable\r\n") != std::string::npos);
+}
+
 TEST(aes67_sender, writes_a_125_us_ptime)
 {
     LoopTransport transport;

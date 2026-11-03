@@ -166,14 +166,18 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   filter naming this host for a multicast group, and `a=recvonly`, as AES67's examples and
   Dante write it. A `Grandmaster` whose `version` is `ieee802_1as` is written
   `ts-refclk:ptp=IEEE802.1AS-2011:<EUI-64>` with no domain and no `clock-domain`
-  (AES67-2018 Clause 8.2, Example 2); the IPMX Info Block's `ts-refclk` follows it.
+  (AES67-2023 Clause 8.2, Example 3); the IPMX Info Block's `ts-refclk` follows it. A
+  `traceable` grandmaster (its timeTraceable flag) adds a second, equivalent line,
+  `ts-refclk:ptp=<version>:traceable` (RFC 7273 Section 4.8; AES67-2023 Clause 8.2,
+  Example 2), so a receiver on another traceable grandmaster can connect too; the Info
+  Block keeps the grandmaster's line.
 - Session id and version: a receiver (Dante Controller, say) keys a session on the o=
   session id and origin, so a new id each start leaves stale sessions behind. The id is
   stable across restarts: `set_session_id()`, or by default `stable_session_id()`
   (FNV-1a) of the origin address and the name, so two senders on one host with the same
   name need ids of their own. The version starts at the wall clock's seconds (RFC 8866's
   suggestion, so it grows across restarts too) and goes up by one with each
-  `configure()`, grandmaster change and rename. Ids and versions are kept to 63 bits.
+  `configure()`, grandmaster change (`traceable` included) and rename. Ids and versions are kept to 63 bits.
   `continue_from()` carries the id and version (and the send offset, grandmaster, media
   clock and name) to a replacement sender, so its next `configure()` announces the same
   session one version on.

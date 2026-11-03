@@ -189,16 +189,28 @@ struct Destination
     auto operator==(Destination const&) const noexcept -> bool = default;
 };
 
-/// The PTP grandmaster a sender's ts-refclk names (AES67-2018 Clause 8.2): IEEE 1588-2008 unless the
+/// The PTP grandmaster a sender's ts-refclk names (AES67-2023 Clause 8.2): IEEE 1588-2008 unless the
 /// interface runs IEEE 802.1AS, whose grandmaster has the same EUI-64 and is written with no domain.
 struct Grandmaster
 {
     ieee::Eui64 identity{};
     uint8_t domain{0};  ///< 0-127; 0 for IEEE 802.1AS
     sdp::PtpVersion version{sdp::PtpVersion::ieee1588_2008};
+    bool traceable{false};  ///< its time is traceable to TAI (the grandmaster's timeTraceable)
 
     /// The RFC 7273 reference that names it.
     [[nodiscard]] auto reference() const -> sdp::PtpReference { return sdp::PtpReference::naming(identity, domain, version); }
+
+    /// The ts-refclk lines: reference(), then `ptp=<version>:traceable` while traceable (RFC 7273
+    /// Section 4.8; AES67-2023 Clause 8.2, Example 2).
+    [[nodiscard]] auto references() const -> sdp::ReferenceClocks
+    {
+        auto clocks = sdp::ReferenceClocks::of(reference());
+        if (traceable) {
+            clocks.ptp.push_back(sdp::PtpReference{.version = version, .traceable = true});
+        }
+        return clocks;
+    }
 
     auto operator==(Grandmaster const&) const noexcept -> bool = default;
 };
