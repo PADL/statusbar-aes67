@@ -150,8 +150,7 @@ TEST(aes67_veth, a_tagged_stream_is_received_through_the_tagged_group_rule)
         std::println("  skipped: cannot create a veth pair");
         return;
     }
-    XdpTransportOptions const options{
-        .bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic, .steer_rss = false};
+    XdpTransportOptions const options{.bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic};
     auto sending = XdpTransport::open("a67xveth0", options);
     auto receiving = XdpTransport::open("a67xveth1", options);
     if (!sending || !receiving) {
@@ -186,8 +185,7 @@ TEST(aes67_veth, a_group_joined_on_an_up_vlan_link_leaves_the_tagged_stream_to_t
     VethPair const pair{"a67yveth0", "a67yveth1", "10.234.0.1/24", "10.234.0.2/24"};
     bool const vlan =
         pair.ok() && std::system("ip link add link a67yveth1 name a67yveth1.2 type vlan id 2 && ip link set a67yveth1.2 up") == 0;
-    XdpTransportOptions const options{
-        .bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic, .steer_rss = false};
+    XdpTransportOptions const options{.bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic};
     auto sending = XdpTransport::open("a67yveth0", options);
     auto receiving = XdpTransport::open("a67yveth1", options);
     if (!vlan || !sending || !receiving) {
@@ -217,8 +215,7 @@ TEST(aes67_veth, a_priority_tagged_stream_is_not_received_over_xdp)
         return;
     }
     VethPair const pair{"a67zveth0", "a67zveth1", "10.235.0.1/24", "10.235.0.2/24"};
-    XdpTransportOptions const options{
-        .bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic, .steer_rss = false};
+    XdpTransportOptions const options{.bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic};
     auto sending = XdpTransport::open("a67zveth0", options);
     auto receiving = XdpTransport::open("a67zveth1", options);
     if (!pair.ok() || !sending || !receiving) {

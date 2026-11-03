@@ -326,6 +326,23 @@ auto XdpTransport::tagged_groups_rule(uint16_t const vid) noexcept -> net::Compi
     return rule;
 }
 
+namespace {
+
+/// `interface`'s RSS table back to `before` when steering changed it (the socket did not open).
+void put_back_rss(std::string_view const interface, StatusValue<net::RssIndirection> const& before)
+{
+    if (before && !net::rss_steered_to(*before, XdpTransport::QUEUE)) {
+        (void)net::set_rss_indirection(interface, *before);  // best effort: the open has failed already
+    }
+}
+
+}  // namespace
+
+auto XdpTransport::steer_rss(std::string_view const interface) -> Status
+{
+    return net::set_rss_indirection_all(interface, QUEUE).transform([](net::RssIndirection const&) {});
+}
+
 auto XdpTransport::open(std::string_view const interface, Options const& options) -> StatusValue<std::unique_ptr<XdpTransport>>
 {
     auto info = find_interface(interface);
@@ -333,16 +350,34 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    if (auto opened = transport->context_.open(
-            config_for(transport->interface_.name, transport->with_launch_time(options, net::probe_tx_metadata)));
-        !opened) {
+    if (auto opened = transport->open_steered(options); !opened) {
         return forward_failure(opened);
     }
-    if (options.steer_rss) {
-        transport->rss_status_ =
-            net::set_rss_indirection_all(transport->interface_.name, QUEUE).transform([](net::RssIndirection const&) {});
-    }
     return transport;
+}
+
+auto XdpTransport::open_steered(Options const& options) -> Status
+{
+    // Steered first, so a refusal attaches nothing (on igb an attach resets the adapter). The table is written in
+    // one ioctl: a refused steer leaves it as it was, and a socket that then fails to open puts it back.
+    auto const before = net::set_rss_indirection_all(interface_.name, QUEUE);
+    rss_status_ = before.transform([](net::RssIndirection const&) {});
+    if (auto const verdict = rss_verdict(rss_status_); !verdict) {
+        return verdict;
+    }
+    auto opened = context_.open(config_for(interface_.name, with_launch_time(options, net::probe_tx_metadata)));
+    if (!opened) {
+        put_back_rss(interface_.name, before);
+    }
+    return opened;
+}
+
+auto XdpTransport::rss_verdict(Status const& steered) noexcept -> Status
+{
+    if (steered || steered.error() == std::errc::operation_not_supported) {
+        return success();
+    }
+    return failure(Aes67Error::rss_not_steered);
 }
 
 auto XdpTransport::rules_status() const noexcept -> Status
