@@ -112,11 +112,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   descriptor that wakes for all its datagrams, and its owner calls `receive()` each
   reactor cycle. The base `Transport` refuses `open_rtcp()` (`operation_not_supported`),
   so test transports need not implement it.
-- RTCP DSCP (AES67-2018 §6.2): "Senders should mark outgoing RTCP packets with the same
-  DSCP value as the respective RTP stream packets. Receivers should mark outgoing RTCP
-  packets with the same DSCP value they would use on RTP packets if transmitting a
-  similar stream." `RtcpOptions::dscp` is that value; the caller passes the stream's (or
-  would-be stream's) `SendOptions::dscp`, not the RTCP class of its own.
+- RTCP DSCP (AES67-2023 Clause 6.2): a sender marks its RTCP as its RTP stream, a receiver
+  as it would mark a similar stream. `RtcpOptions::dscp` is that value; the caller passes
+  the stream's (or would-be stream's) `SendOptions::dscp`, not the RTCP class of its own.
 
 ### Sender
 
@@ -278,10 +276,11 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `SMPTE2110.(U64,U64,U08)`; the 8-bit channel count is clamped at 255; its version is `Sender::info_block_version()`, one on with every
   `configure()`, grandmaster and channel-order change. TR-10-3 allows sample sizes of
   16 and 24; an L32 stream says 32.
-- DSCP (AES67-2018 §6.2): a sender's session marks its reports with its stream's DSCP
+- DSCP (AES67-2023 Clause 6.2): a sender's session marks its reports with its stream's DSCP
   (`Sender::set_dscp()`); a receiver's with `RtcpSessionOptions::dscp`, the DSCP it would
-  send a similar stream with. §6.2 recommends AF41 (34) for media and EF (46) for clock;
-  `DSCP_MEDIA` is 46, as Dante marks media, and the caller chooses.
+  send a similar stream with. Table 1's defaults are AF41 (34) for media and EF (46) for
+  clock; `DSCP_MEDIA` is 34, and a caller on a network with another policy sets its own
+  (Dante marks media EF, 46).
 - Interval: a sender's minimum is `interval_ms` (1 s by default), between RFC 3550 §6.2's
   5 s and the reduced minimum an active sender may use; a receiver keeps the 5 s fixed
   minimum. `Rfc3550Interval` applies §6.3.1 with two members and one sender over 5 % of
@@ -335,7 +334,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - A sender's socket is unconnected and every message names the destination, so a unicast
   receiver's ICMP port-unreachable never fails a send. Multicast goes out of the
   interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, from
-  `Sender::set_dscp()`, by default `rtp::FrameAddressing::DSCP_MEDIA`, 46). A tick's packets are written straight
+  `Sender::set_dscp()`, by default `rtp::FrameAddressing::DSCP_MEDIA`, 34). A tick's packets are written straight
   into the `SEND_BATCH` slots of the sender's `sendmmsg()` batch.
 - An RTCP port is one socket for both directions. For a group it is bound to the group at
   the RTCP port, joined, and sends there with loopback on, so a session hears its own
