@@ -220,7 +220,8 @@ enum class State : uint8_t
     idle,     ///< not configured, or (a sender) configured but paused: no source feeds it (Sender::pause())
     ready,    ///< configured, nothing received or sent yet
     running,  ///< packets flowing
-    error,    ///< the transport refused the last configure(), or (a sender) refuses to send: Transport::send_error()
+    error,    ///< the transport refused the last configure(), refuses to send (Transport::send_error()) or cannot
+              ///< deliver a receiver's group (ReceivePort::error())
 };
 
 /// Why a receiver refused a packet.

@@ -110,6 +110,9 @@ class ReceivePort
     /// Up to `out.size()` datagrams that arrived since the last call; returns
     /// how many were written. Never blocks.
     [[nodiscard]] virtual auto receive(std::span<Datagram> out) noexcept -> size_t = 0;
+    /// Why the stream cannot arrive now (the transport's filter does not take its group), or none (the default).
+    /// The draining thread; it clears when the transport takes the group again.
+    [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX
