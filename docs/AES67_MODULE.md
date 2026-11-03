@@ -458,13 +458,14 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   catches up. The RTP timestamp is the frames' index (RFC 3550 Section 5.1, capture time) and does
   not move with the departure or the lead.
 - `XdpTransport` opened with `XdpTransportOptions::launch_time` (the host found that the driver
-  honours it, `net::launch_time_support`; a build without TX metadata opens without and records
-  `launch_time_error()`) gives every frame on the socket a launch time (`LaunchClock`): CLOCK_TAI
-  now until `set_launch_lead_ns()` puts a lead in force, then departure plus lead, never earlier than
-  the last time committed (`net::LaunchOrder`: igc's queue is a FIFO; a time over 1 ms behind is a
-  clock step; a time already past at commit, an overrunning tick, goes at now and is counted in
-  `launch_clock().order()`); `clear_launch_lead()` is now again. An untimed send (`send()`, a tick
-  without a time) goes at now. RTCP and SAP go by kernel sockets, never through the socket.
+  honours it, `net::netdev::launch_time_supported`; a build, kernel or NIC without it opens without
+  and records `launch_time_error()`) gives every frame on the socket a launch time (`LaunchClock`):
+  CLOCK_TAI now until `set_launch_lead_ns()` puts a lead in force, then departure plus lead, never
+  earlier than the last time committed (`net::LaunchOrder`: igc's queue is a FIFO; the last time a
+  second or more ahead of now is a clock step; a time already past at commit, an overrunning tick,
+  goes at once and is counted, as are holds and steps, in `launch_clock().order()`);
+  `clear_launch_lead()` is now again. An untimed send (`send()`, a tick without a time) goes at now.
+  RTCP and SAP go by kernel sockets, never through the socket.
 - The lead moves the wire time only: the packet leaves at departure plus lead, free of the sending
   CPU's jitter, while its timestamp and the receiver's placement are unchanged, so launch time
   changes no latency; it lets a receiver's link offset cover the lead plus the network transit

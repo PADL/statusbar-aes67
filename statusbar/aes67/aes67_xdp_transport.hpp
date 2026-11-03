@@ -52,7 +52,7 @@ struct XdpTransportOptions
     /// empty for none, or net::XdpProgram::pin_path_for(interface).
     std::string pin_path;
     /// Frames carry launch times (net::XdpConfig::tx_launch_time): the host found that the driver
-    /// honours them (net::launch_time_support). open() goes on without when this build lacks it.
+    /// honours them (net::netdev::launch_time_supported). open() goes on without when the build, kernel or NIC lacks it.
     bool launch_time{false};
 };
 
@@ -113,7 +113,7 @@ class XdpTransport final : public Transport
             uint64_t const wanted = lead < 0 || departure_ns == 0 ? 0 : departure_ns + static_cast<uint64_t>(lead);
             return order_.next(wanted, now);
         }
-        /// The ordering's counters: frames clamped, the largest clamp, steps.
+        /// The ordering's counters: frames held and late, the largest of each, clock steps.
         [[nodiscard]] auto order() const noexcept -> net::LaunchOrder const& { return order_; }
 
       private:
@@ -280,16 +280,16 @@ class XdpTransport final : public Transport
 
     /// Open AF_XDP on `interface`'s queue 0, adopting or attaching (and pinning) the program as net::XdpConfig
     /// says, then steer every RSS bucket to it (rss_verdict()). Fails without a supported NIC, libxdp or the
-    /// privileges, zero-copy when it was required, or the steering; without TX metadata: launch_time_error().
+    /// privileges, zero-copy when it was required, or the steering; without launch time: launch_time_error().
     [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
         -> StatusValue<std::unique_ptr<XdpTransport>>;
 
     /// Every receive and RTCP port must be gone first (asserted); the real-time
     /// thread must have stopped ticking the transport.
     ~XdpTransport() override;
-    /// `options` with launch_time kept only where @p probe (-> Status: net::probe_tx_metadata, the build
-    /// and the kernel) allows it, else off with the reason in launch_time_error_: the socket then opens
-    /// once, untimed, rather than failing on a kernel that refuses TX metadata.
+    /// `options` with launch_time kept only where @p probe (-> Status: net::probe_tx_metadata, then
+    /// net::probe_tx_launch_time for the NIC) allows it, else off with the reason in launch_time_error_:
+    /// the socket then opens once, untimed, rather than failing where the kernel or NIC refuses it.
     template <typename Probe>
     [[nodiscard]] auto with_launch_time(Options const& options, Probe const& probe) noexcept -> Options
     {
@@ -327,7 +327,7 @@ class XdpTransport final : public Transport
     /// The queue the socket is bound to.
     [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return QUEUE; }
     /// The queue's NAPI busy polls from its kthread: zero-copy TX then needs no kick
-    /// (net::XdpSocket::set_napi_busy_poll()). Any thread.
+    /// (net::XdpContext::set_napi_busy_poll()). Any thread.
     void set_napi_busy_poll(bool const on) noexcept { context_.set_napi_busy_poll(on); }
     [[nodiscard]] auto napi_busy_poll() const noexcept -> bool { return context_.napi_busy_poll(); }
     /// Every RSS bucket of `interface` to QUEUE, as open() steers it (net::set_rss_indirection_all, CAP_NET_ADMIN):

@@ -91,25 +91,33 @@ TEST(aes67_xdp, refused_kicks_are_counted_and_fail_the_transport_after_a_millise
 TEST(aes67_xdp, launch_times_are_now_until_the_lead_is_in_force_then_departure_plus_lead)
 {
     constexpr uint64_t T = 1'800'000'000ULL * 1'000'000'000ULL;
+    uint64_t now = T - 5'000'000;
+    auto const phc = [&now] { return now; };
     XdpTransport::LaunchClock clock;
     EXPECT_FALSE(clock.lead_ns().has_value());
-    EXPECT_EQ(clock.next(T, [] { return T - 5'000'000; }), T - 5'000'000);  // a departure, but no lead yet: now
+    EXPECT_EQ(clock.next(T, phc), T - 5'000'000);  // a departure, but no lead yet: now
     clock.set_lead_ns(125'000);
     EXPECT_EQ(clock.lead_ns(), std::optional<uint64_t>{125'000});
-    EXPECT_EQ(clock.next(T, [] { return uint64_t{0}; }), T + 125'000);
-    EXPECT_EQ(clock.next(T - 50'000, [] { return uint64_t{0}; }), T + 125'000);   // a second sender's, just behind: held
-    EXPECT_EQ(clock.order().clamped(), uint64_t{0});                              // under a packet: not counted
-    EXPECT_EQ(clock.next(T - 200'000, [] { return uint64_t{0}; }), T + 125'000);  // over a packet: counted
-    EXPECT_EQ(clock.next(0, [] { return T + 200'000; }), T + 200'000);            // untimed: now
-    EXPECT_EQ(clock.next(T - 3'000'000'000ULL, [] { return uint64_t{0}; }), T - 3'000'000'000ULL + 125'000);  // a step
+    EXPECT_EQ(clock.next(T, phc), T + 125'000);
+    EXPECT_EQ(clock.next(T - 50'000, phc), T + 125'000);   // a second sender's, just behind: held
+    EXPECT_EQ(clock.order().clamped(), uint64_t{0});       // under a packet: not counted
+    EXPECT_EQ(clock.next(T - 200'000, phc), T + 125'000);  // over a packet: counted
+    now = T + 200'000;
+    EXPECT_EQ(clock.next(0, phc), T + 200'000);  // untimed: now
+    now = T - 3'000'000'000ULL;                  // the PHC steps back
+    EXPECT_EQ(clock.next(T - 3'000'000'000ULL, phc), T - 3'000'000'000ULL + 125'000);
     EXPECT_EQ(clock.order().clamped(), uint64_t{1});
     EXPECT_EQ(clock.order().max_clamp_ns(), uint64_t{200'000});
     EXPECT_EQ(clock.order().steps(), uint64_t{1});
+    now = T + 1'100'000;
     clock.set_lead_ns(0);
-    EXPECT_EQ(clock.next(T + 1'000'000, [] { return uint64_t{0}; }), T + 1'000'000);
+    EXPECT_EQ(clock.next(T + 1'000'000, phc), T + 1'000'000);  // a lead of 0 is past: late, sent at once
+    EXPECT_EQ(clock.order().launched_late(), uint64_t{1});
+    EXPECT_EQ(clock.order().max_late_ns(), uint64_t{100'000});
     clock.clear_lead();  // the clock no longer agrees: now again
     EXPECT_FALSE(clock.lead_ns().has_value());
-    EXPECT_EQ(clock.next(T + 2'000'000, [] { return T + 1'500'000; }), T + 1'500'000);
+    now = T + 1'500'000;
+    EXPECT_EQ(clock.next(T + 2'000'000, phc), T + 1'500'000);
 }
 
 // A kernel refusing the UMEM's TX metadata is probed once before the open: launch time goes off with the

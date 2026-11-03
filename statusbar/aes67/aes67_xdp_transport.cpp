@@ -9,8 +9,30 @@
 
 #include <algorithm>
 #include <cassert>
+#include <ctime>
 
 namespace statusbar::aes67 {
+
+namespace {
+
+/// CLOCK_TAI now, in nanoseconds (1 when it cannot be read: a time, and past).
+auto tai_now_ns() noexcept -> uint64_t
+{
+    timespec ts{};
+    if (clock_gettime(CLOCK_TAI, &ts) != 0) {
+        return 1;
+    }
+    return (static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL) + static_cast<uint64_t>(ts.tv_nsec);
+}
+
+/// Whether the NIC at `index` can send timed frames: the build and kernel, then the driver.
+auto probe_launch_time(unsigned int const index) -> Status
+{
+    auto const metadata = net::probe_tx_metadata();
+    return metadata ? net::probe_tx_launch_time(index) : metadata;
+}
+
+}  // namespace
 
 /// The handle a receiver owns. receive() runs on the real-time thread; the
 /// destructor on the control thread, once the receiver is no longer drained.
@@ -237,10 +259,10 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .fill_ring_size = FILL_RING,
         .umem_frame_count = UMEM_FRAMES,
         .rx_drain_max = RECEIVE_BATCH,
+        .tx_launch_time = options.launch_time,
         .bind_mode = options.bind_mode,
         .attach_mode = options.attach_mode,
         .pin_path = options.pin_path,
-        .tx_launch_time = options.launch_time,
     };
 }
 
@@ -367,7 +389,8 @@ auto XdpTransport::open_steered(Options const& options) -> Status
     if (auto const verdict = rss_verdict(rss_status_); !verdict) {
         return verdict;
     }
-    auto opened = context_.open(config_for(interface_.name, with_launch_time(options, net::probe_tx_metadata)));
+    auto opened = context_.open(
+        config_for(interface_.name, with_launch_time(options, [this] { return probe_launch_time(interface_.index); })));
     if (!opened) {
         put_back_rss(interface_.name, before);
     }
@@ -657,9 +680,10 @@ auto XdpTransport::update_ports() noexcept -> bool
 auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, uint64_t const departure_ns) noexcept -> bool
 {
     // A pooled frame was taken untimed (tx_start): on a socket with launch time every frame gets its
-    // time now, since the driver may otherwise reuse the previous frame's.
+    // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
+    // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
-        context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure_ns, net::tai_now_ns)));
+        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure_ns, tai_now_ns)));
     }
     return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
 }
