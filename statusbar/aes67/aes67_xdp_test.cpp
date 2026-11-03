@@ -181,7 +181,7 @@ TEST(aes67_xdp, launch_time_asks_for_tx_metadata_on_the_socket_s_queue)
 TEST(aes67_xdp, binds_the_queue_rss_is_steered_to)
 {
     EXPECT_EQ(XdpTransport::config_for("eth0").queue_id, XdpTransport::QUEUE);
-    EXPECT_EQ(XdpTransport::config_for("eth0", XdpTransportOptions{.queue = 1}).queue_id, uint32_t{1});  // an SR class B queue
+    EXPECT_EQ(XdpTransport::config_for("eth0", XdpTransportOptions{.queue = 1}).queue_id, uint32_t{1});  // an SR class queue
     EXPECT_EQ(XdpTransport::unopened()->queue_id(), XdpTransport::QUEUE);
 }
 

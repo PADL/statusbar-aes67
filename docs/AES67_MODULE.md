@@ -415,7 +415,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   would lose groups silently. It steers before the program attaches (on igb an attach resets
   the adapter); the write is one ioctl, so a refusal leaves the table as it was, and a socket
   that then fails to open puts the table back. `steer_rss()` is that step alone. A queue other
-  than 0 (an SR class B queue under a credit-based shaper) takes the same steering; traffic the
+  than 0 (an SR class queue a credit-based shaper paces) takes the same steering; traffic the
   NIC does not hash (non-IP) stays on its default queue and the kernel.
   A NIC without RSS reports `operation_not_supported` in `rss_status()` and opens; it needs one
   combined channel or a flow-steering rule. The table is left steered at close. `UdpTransport`
