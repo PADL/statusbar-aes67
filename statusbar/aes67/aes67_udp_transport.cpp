@@ -44,8 +44,6 @@ class UdpReceivePort final : public ReceivePort
     UdpReceivePort(UdpReceivePort&&) = delete;
     auto operator=(UdpReceivePort&&) -> UdpReceivePort& = delete;
 
-    [[nodiscard]] auto fd() const noexcept -> int override { return fd_.get(); }
-
     auto receive(std::span<Datagram> const out) noexcept -> size_t override
     {
         size_t const want = std::min(out.size(), UdpTransport::RECEIVE_BATCH);

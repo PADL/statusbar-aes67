@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/aes67/aes67_error.hpp"
-#include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
 #include "statusbar/net/net_tcam_classifier.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
@@ -12,10 +11,8 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <memory>
 #include <print>
-#include <thread>
 #include <vector>
 
 using namespace statusbar;
@@ -424,9 +421,9 @@ TEST(aes67_xdp, the_tagged_rule_goes_last_so_a_vid_change_leaves_the_group_slots
         return a.mask == b.mask && a.match == b.match && a.result_flags == b.result_flags;
     };
     std::array<XdpTransport::PortState, 3> states{{
-        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5004}, nullptr},
-        {{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}, nullptr},
-        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5006}, nullptr},  // a group already ruled
+        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5004}, net::FileDescriptor{}},
+        {{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}, net::FileDescriptor{}},
+        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5006}, net::FileDescriptor{}},  // a group already ruled
     }};
     std::array<XdpTransport::PortState*, 3> const ports{&states[0], &states[1], &states[2]};
     std::array<net::CompiledRule<32>, 3> untagged{};
@@ -453,8 +450,8 @@ TEST(aes67_xdp, a_port_awaiting_retirement_past_max_groups_drops_its_group_not_t
     std::vector<std::unique_ptr<XdpTransport::PortState>> states;
     std::vector<XdpTransport::PortState*> ports;
     for (uint8_t i = 0; i <= XdpTransport::MAX_GROUPS; ++i) {
-        states.push_back(
-            std::make_unique<XdpTransport::PortState>(Endpoint{.address = IPv4Address{239, 69, 2, i}, .port = 5004}, nullptr));
+        states.push_back(std::make_unique<XdpTransport::PortState>(
+            Endpoint{.address = IPv4Address{239, 69, 2, i}, .port = 5004}, net::FileDescriptor{}));
         ports.push_back(states.back().get());
     }
     std::array<net::CompiledRule<32>, XdpTransport::MAX_GROUPS + 1> rules{};
@@ -470,7 +467,7 @@ TEST(aes67_xdp, a_port_awaiting_retirement_past_max_groups_drops_its_group_not_t
 TEST(aes67_xdp, a_tagged_frame_reaches_the_port_of_its_group)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState port{stream, nullptr};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     RefusalCounter refusals;
     EXPECT_TRUE(XdpTransport::dispatch_frame(rtp_frame_to(stream, ieee::make_vlan_tag(2, false, 3)), ports, {}, refusals));
@@ -519,7 +516,7 @@ TEST(aes67_xdp, frames_with_ipv4_options_are_redirected_and_reach_their_port)
     auto const tagged = with_ipv4_options(rtp_frame_to(stream, ieee::make_vlan_tag(2, false, 3)), true);
     EXPECT_TRUE((classifier.classify_first(untagged) & net::flag::process) != 0);
     EXPECT_TRUE((classifier.classify_first(tagged) & net::flag::process) != 0);
-    XdpTransport::PortState port{stream, nullptr};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     RefusalCounter refusals;
     EXPECT_TRUE(XdpTransport::dispatch_frame(untagged, ports, {}, refusals));
@@ -529,50 +526,15 @@ TEST(aes67_xdp, frames_with_ipv4_options_are_redirected_and_reach_their_port)
     EXPECT_TRUE(refusals.load() == ReceiveRefusals{});
 }
 
-// A priority-tagged frame (VID 0) belongs to the untagged VLAN (IEEE 802.1Q), but its destination address is past
-// the 32-octet window: the program passes it, the kernel strips the tag and the port's own socket receives it.
-TEST(aes67_xdp, a_priority_tagged_frame_is_left_to_the_kernel)
+// A priority-tagged frame (VID 0) has its destination address past the 32-octet window: no rule redirects it, and
+// the kernel, whose group socket nothing reads, does not deliver it either. Not received, by design.
+TEST(aes67_xdp, a_priority_tagged_frame_is_not_redirected)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
     std::array const rules{XdpTransport::group_rule(stream.address), XdpTransport::tagged_groups_rule(2)};
     net::TcamClassifier<32> classifier;
     classifier.set_rules(rules);
     EXPECT_EQ(classifier.classify_first(rtp_frame_to(stream, ieee::make_vlan_tag(0, false, 5))), uint64_t{0});
-}
-
-// What the program passes reaches the port through its kernel socket, read only once the tick found it readable.
-TEST(aes67_xdp, a_port_reads_its_kernel_socket_only_when_it_polled_readable)
-{
-    auto transport = UdpTransport::open("lo");
-    EXPECT_TRUE(transport.has_value());
-    if (!transport) {
-        return;
-    }
-    Endpoint const stream{.address = IPv4Address{239, 69, 7, 3}, .port = 45320};
-    auto kernel = (*transport)->open_receive(stream);
-    auto sender = (*transport)->open_send({.destination = stream, .ttl = 1});
-    if (!kernel || !sender) {
-        std::println("  skipped: cannot join a group on lo");
-        return;
-    }
-    XdpTransport::PortState port{stream, std::move(*kernel)};
-    EXPECT_TRUE(port.kernel_fd >= 0);
-    rtp::RtpHeader header{};
-    header.init(97, 1, 2, 3);
-    std::array<uint8_t, 12> const payload{};
-    EXPECT_TRUE((*sender)->send(header, payload));
-    EXPECT_EQ((*sender)->flush(), size_t{0});
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
-    std::array<Datagram, 4> out{};
-    EXPECT_EQ(port.receive_passed(out), size_t{0});  // not marked readable
-    port.kernel_ready = true;
-    size_t const got = port.receive_passed(out);
-    if (got == 0) {
-        std::println("  skipped: the host does not loop multicast back on lo");
-        return;
-    }
-    EXPECT_EQ(got, size_t{1});
-    EXPECT_FALSE(port.kernel_ready);
 }
 
 TEST(aes67_xdp, a_send_port_s_tag_changes_from_its_next_frame)
@@ -606,7 +568,7 @@ TEST(aes67_xdp, a_send_port_s_tag_changes_from_its_next_frame)
 TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState port{stream, nullptr};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
     XdpTransport::RtcpPipe pipe{rtcp_endpoint_of(stream)};
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     std::array<XdpTransport::RtcpPipe*, 1> const pipes{&pipe};
@@ -642,8 +604,8 @@ TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
 TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps_it)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState full{stream, nullptr};
-    XdpTransport::PortState open{stream, nullptr};
+    XdpTransport::PortState full{stream, net::FileDescriptor{}};
+    XdpTransport::PortState open{stream, net::FileDescriptor{}};
     full.pending_count = XdpTransport::PORT_BATCH;
     std::array<XdpTransport::PortState*, 2> const ports{&full, &open};
     RefusalCounter refusals;
@@ -666,7 +628,7 @@ TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps
 TEST(aes67_xdp, a_closed_port_takes_nothing_and_its_frames_are_unmatched)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState port{stream, nullptr};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
     port.closed.store(true);
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     RefusalCounter refusals;
