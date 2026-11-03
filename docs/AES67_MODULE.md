@@ -120,6 +120,11 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### Sender
 
+- Packet times (AES67-2023 Clause 7.2.0): a sender sends any whole number of frames per
+  packet whose payload fits `MAX_PAYLOAD`, 1440 octets (Clause 6.3); larger fails
+  `packet_too_large`. That covers 125 us, 250 us, 333 us, 1 ms and 4 ms (Clauses 7.2.1 and
+  7.2.2; 6, 12, 16, 48 and 192 frames at 48 kHz), 4 ms only for few channels (2 of L24 at
+  48 kHz). The packet time is fixed per `configure()`.
 - Packets lie on a grid of `frames_per_packet`: packet k carries indices
   `[k * fpp + phase, (k + 1) * fpp + phase)`. Its RTP timestamp is
   `PtpMediaClock::rtp_timestamp(first index, 0)`, so the SDP says `mediaclk:direct=0` and
@@ -200,9 +205,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   rate, an RFC 4570 source filter if any, and the RFC 7273 direct media clock offset. It
   prefers the offered format with the receiver's encoding (`Media::prefer()`), else the
   primary one; the encoding must be the receiver's (`encoding_mismatch`), and channels and
-  rate too (`format_mismatch`). The ptime need not match: any whole number of frames is
-  taken. A stream without a direct media clock is refused (`not_ptp_locked`): its
-  timestamps are not PTP time.
+  rate too (`format_mismatch`). The ptime need not match: any packet time is received,
+  each packet's frames counted from its payload (AES67-2023 Clause 7.2.0), up to the
+  transport's largest datagram (1500 octets). A stream without a direct media clock is
+  refused (`not_ptp_locked`): its timestamps are not PTP time.
 - `set_sender_clock(true)` before `configure()` takes only `mediaclk:sender` streams (any
   other fails `not_sender_clocked`, `direct` included, as a direct stream would drift in a
   foreign domain). Such a stream has no offset until `set_offset()`: `drain()` learns its
