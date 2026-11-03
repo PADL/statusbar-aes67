@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/aes67/aes67_error.hpp"
+#include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
 #include "statusbar/net/net_tcam_classifier.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
@@ -11,8 +12,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <memory>
 #include <print>
+#include <thread>
 #include <vector>
 
 using namespace statusbar;
@@ -342,12 +345,13 @@ TEST(aes67_xdp, the_rtcp_pipe_drops_datagrams_longer_than_it_keeps)
 TEST(aes67_xdp, group_rules_pin_the_whole_address)
 {
     auto const rule = XdpTransport::group_rule(IPv4Address{239, 69, 1, 2});
-    // Destination MAC 01:00:5e:45:01:02, IPv4, IHL 5, UDP, 239.69 in bytes 30-31.
+    // Destination MAC 01:00:5e:45:01:02, IPv4, version 4 (any IHL), UDP, 239.69 in bytes 30-31.
     EXPECT_EQ(rule.match[0], uint8_t{0x01});
     EXPECT_EQ(rule.match[3], uint8_t{0x45});
     EXPECT_EQ(rule.match[5], uint8_t{0x02});
     EXPECT_EQ(rule.match[12], uint8_t{0x08});
-    EXPECT_EQ(rule.match[14], uint8_t{0x45});
+    EXPECT_EQ(rule.match[14], uint8_t{0x40});
+    EXPECT_EQ(rule.mask[14], uint8_t{0xF0});
     EXPECT_EQ(rule.match[23], uint8_t{17});
     EXPECT_EQ(rule.match[30], uint8_t{239});
     EXPECT_EQ(rule.match[31], uint8_t{69});
@@ -420,9 +424,9 @@ TEST(aes67_xdp, the_tagged_rule_goes_last_so_a_vid_change_leaves_the_group_slots
         return a.mask == b.mask && a.match == b.match && a.result_flags == b.result_flags;
     };
     std::array<XdpTransport::PortState, 3> states{{
-        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5004}, net::FileDescriptor{}},
-        {{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}, net::FileDescriptor{}},
-        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5006}, net::FileDescriptor{}},  // a group already ruled
+        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5004}, nullptr},
+        {{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}, nullptr},
+        {{.address = IPv4Address{239, 69, 1, 1}, .port = 5006}, nullptr},  // a group already ruled
     }};
     std::array<XdpTransport::PortState*, 3> const ports{&states[0], &states[1], &states[2]};
     std::array<net::CompiledRule<32>, 3> untagged{};
@@ -449,8 +453,8 @@ TEST(aes67_xdp, a_port_awaiting_retirement_past_max_groups_drops_its_group_not_t
     std::vector<std::unique_ptr<XdpTransport::PortState>> states;
     std::vector<XdpTransport::PortState*> ports;
     for (uint8_t i = 0; i <= XdpTransport::MAX_GROUPS; ++i) {
-        states.push_back(std::make_unique<XdpTransport::PortState>(
-            Endpoint{.address = IPv4Address{239, 69, 2, i}, .port = 5004}, net::FileDescriptor{}));
+        states.push_back(
+            std::make_unique<XdpTransport::PortState>(Endpoint{.address = IPv4Address{239, 69, 2, i}, .port = 5004}, nullptr));
         ports.push_back(states.back().get());
     }
     std::array<net::CompiledRule<32>, XdpTransport::MAX_GROUPS + 1> rules{};
@@ -466,7 +470,7 @@ TEST(aes67_xdp, a_port_awaiting_retirement_past_max_groups_drops_its_group_not_t
 TEST(aes67_xdp, a_tagged_frame_reaches_the_port_of_its_group)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    XdpTransport::PortState port{stream, nullptr};
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     RefusalCounter refusals;
     EXPECT_TRUE(XdpTransport::dispatch_frame(rtp_frame_to(stream, ieee::make_vlan_tag(2, false, 3)), ports, {}, refusals));
@@ -475,6 +479,100 @@ TEST(aes67_xdp, a_tagged_frame_reaches_the_port_of_its_group)
     Endpoint const alias{.address = IPv4Address{239, 197, 1, 2}, .port = 5004};
     EXPECT_FALSE(XdpTransport::dispatch_frame(rtp_frame_to(alias, ieee::make_vlan_tag(2, false, 3)), ports, {}, refusals));
     EXPECT_EQ(refusals.load().unmatched, uint64_t{1});
+}
+
+namespace {
+
+/// `frame` (tagged when `tagged`) with one word of IPv4 options, four NOPs: IHL 6 (RFC 791).
+auto with_ipv4_options(std::vector<uint8_t> frame, bool const tagged) -> std::vector<uint8_t>
+{
+    size_t const ip = 14 + (tagged ? ieee::VlanTag::LENGTH : 0);
+    frame.insert(frame.begin() + static_cast<std::ptrdiff_t>(ip + 20), {0x01, 0x01, 0x01, 0x01});
+    frame[ip] = 0x46;
+    uint16_t const total = static_cast<uint16_t>(((frame[ip + 2] << 8U) | frame[ip + 3]) + 4);
+    frame[ip + 2] = static_cast<uint8_t>(total >> 8U);
+    frame[ip + 3] = static_cast<uint8_t>(total);
+    frame[ip + 10] = 0;
+    frame[ip + 11] = 0;
+    uint32_t sum = 0;
+    for (size_t i = 0; i < 24; i += 2) {
+        sum += static_cast<uint32_t>((frame[ip + i] << 8U) | frame[ip + i + 1]);
+    }
+    sum = (sum & 0xFFFFU) + (sum >> 16U);
+    sum = ~(sum + (sum >> 16U)) & 0xFFFFU;
+    frame[ip + 10] = static_cast<uint8_t>(sum >> 8U);
+    frame[ip + 11] = static_cast<uint8_t>(sum);
+    return frame;
+}
+
+}  // namespace
+
+// AES67-2023 Clause 6.3 asks nothing of the IPv4 header beyond RFC 791: options (IHL > 5) are valid, and the
+// destination address sits at the same offset with or without them.
+TEST(aes67_xdp, frames_with_ipv4_options_are_redirected_and_reach_their_port)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    std::array const rules{XdpTransport::group_rule(stream.address), XdpTransport::tagged_groups_rule(2)};
+    net::TcamClassifier<32> classifier;
+    classifier.set_rules(rules);
+    auto const untagged = with_ipv4_options(rtp_frame_to(stream), false);
+    auto const tagged = with_ipv4_options(rtp_frame_to(stream, ieee::make_vlan_tag(2, false, 3)), true);
+    EXPECT_TRUE((classifier.classify_first(untagged) & net::flag::process) != 0);
+    EXPECT_TRUE((classifier.classify_first(tagged) & net::flag::process) != 0);
+    XdpTransport::PortState port{stream, nullptr};
+    std::array<XdpTransport::PortState*, 1> const ports{&port};
+    RefusalCounter refusals;
+    EXPECT_TRUE(XdpTransport::dispatch_frame(untagged, ports, {}, refusals));
+    EXPECT_TRUE(XdpTransport::dispatch_frame(tagged, ports, {}, refusals));
+    EXPECT_EQ(port.pending_count, size_t{2});
+    EXPECT_EQ(port.pending[0].payload.size(), size_t{12 + 288});  // the RTP packet, past the options
+    EXPECT_TRUE(refusals.load() == ReceiveRefusals{});
+}
+
+// A priority-tagged frame (VID 0) belongs to the untagged VLAN (IEEE 802.1Q), but its destination address is past
+// the 32-octet window: the program passes it, the kernel strips the tag and the port's own socket receives it.
+TEST(aes67_xdp, a_priority_tagged_frame_is_left_to_the_kernel)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    std::array const rules{XdpTransport::group_rule(stream.address), XdpTransport::tagged_groups_rule(2)};
+    net::TcamClassifier<32> classifier;
+    classifier.set_rules(rules);
+    EXPECT_EQ(classifier.classify_first(rtp_frame_to(stream, ieee::make_vlan_tag(0, false, 5))), uint64_t{0});
+}
+
+// What the program passes reaches the port through its kernel socket, read only once the tick found it readable.
+TEST(aes67_xdp, a_port_reads_its_kernel_socket_only_when_it_polled_readable)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    if (!transport) {
+        return;
+    }
+    Endpoint const stream{.address = IPv4Address{239, 69, 7, 3}, .port = 45320};
+    auto kernel = (*transport)->open_receive(stream);
+    auto sender = (*transport)->open_send({.destination = stream, .ttl = 1});
+    if (!kernel || !sender) {
+        std::println("  skipped: cannot join a group on lo");
+        return;
+    }
+    XdpTransport::PortState port{stream, std::move(*kernel)};
+    EXPECT_TRUE(port.kernel_fd >= 0);
+    rtp::RtpHeader header{};
+    header.init(97, 1, 2, 3);
+    std::array<uint8_t, 12> const payload{};
+    EXPECT_TRUE((*sender)->send(header, payload));
+    EXPECT_EQ((*sender)->flush(), size_t{0});
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    std::array<Datagram, 4> out{};
+    EXPECT_EQ(port.receive_passed(out), size_t{0});  // not marked readable
+    port.kernel_ready = true;
+    size_t const got = port.receive_passed(out);
+    if (got == 0) {
+        std::println("  skipped: the host does not loop multicast back on lo");
+        return;
+    }
+    EXPECT_EQ(got, size_t{1});
+    EXPECT_FALSE(port.kernel_ready);
 }
 
 TEST(aes67_xdp, a_send_port_s_tag_changes_from_its_next_frame)
@@ -508,7 +606,7 @@ TEST(aes67_xdp, a_send_port_s_tag_changes_from_its_next_frame)
 TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    XdpTransport::PortState port{stream, nullptr};
     XdpTransport::RtcpPipe pipe{rtcp_endpoint_of(stream)};
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     std::array<XdpTransport::RtcpPipe*, 1> const pipes{&pipe};
@@ -544,8 +642,8 @@ TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
 TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps_it)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState full{stream, net::FileDescriptor{}};
-    XdpTransport::PortState open{stream, net::FileDescriptor{}};
+    XdpTransport::PortState full{stream, nullptr};
+    XdpTransport::PortState open{stream, nullptr};
     full.pending_count = XdpTransport::PORT_BATCH;
     std::array<XdpTransport::PortState*, 2> const ports{&full, &open};
     RefusalCounter refusals;
@@ -568,7 +666,7 @@ TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps
 TEST(aes67_xdp, a_closed_port_takes_nothing_and_its_frames_are_unmatched)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    XdpTransport::PortState port{stream, nullptr};
     port.closed.store(true);
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     RefusalCounter refusals;

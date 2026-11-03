@@ -9,12 +9,15 @@
 /// Multicast destinations only, at most MAX_GROUPS groups; ports and threads as aes67_transport.hpp.
 /// RTCP goes by kernel socket, except to a group whose frames the program redirects: begin_tick()
 /// copies those into the port's RtcpPipe. With launch time, every frame the socket sends is timed.
+/// A receive port also drains its group's kernel socket, so what the program passes still arrives.
 
 #include "statusbar/aes67/aes67_socket.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
+#include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/itc/itc_message_pipe.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/net/net_compiled_rule.hpp"
+#include "statusbar/net/net_fd_multiplexer.hpp"
 #include "statusbar/net/net_launch_order.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/net/net_rss.hpp"
@@ -414,8 +417,14 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto socket_stats() const noexcept -> net::XdpSocketStats { return socket_stats_.load(); }
     /// Sends that found no pooled TX frame. Any thread.
     [[nodiscard]] auto tx_pool_empty_count() const noexcept -> uint64_t { return tx_pool_.empty_count(); }
-    /// Redirected frames no receive port kept, by reason (RTCP pipes' drops are theirs). Any thread.
-    [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals_.load(); }
+    /// Redirected frames no receive port kept, by reason, and the kernel sockets' truncated datagrams
+    /// (malformed); RTCP pipes' drops are theirs. Any thread.
+    [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override
+    {
+        auto refusals = refusals_.load();
+        refusals.malformed += kernel_.receive_refusals().malformed;
+        return refusals;
+    }
     /// The refusals, refused kicks and pool misses now; the socket's counters at the next end_tick(). Any thread.
     void reset_counters() noexcept override;
     /// A port's datagrams last only the tick they arrived in.
@@ -459,10 +468,16 @@ class XdpTransport final : public Transport
     friend class Sender;
     friend class aes67::XdpRtcpPort;
 
-    explicit XdpTransport(InterfaceInfo interface) noexcept;
+    explicit XdpTransport(InterfaceInfo interface);
+    /// open(): the kernel sockets' epoll set made, and the socket opened with `options`.
+    [[nodiscard]] auto open_context(Options const& options) -> Status;
 
     /// Control thread: a port's handle is gone.
     void port_closed(PortState* state) noexcept;
+    /// Control thread: a closed port's kernel socket, unwatched and closed now rather than at retirement.
+    void close_kernel_port(PortState& state) noexcept;
+    /// Control thread: counts one port fewer on `group`.
+    void release_group(ip::IPv4Address const& group) noexcept;
     /// Control thread: free what the real-time thread retired.
     void collect_retired() noexcept;
     /// Control thread: an RTCP port's handle is gone.
@@ -479,12 +494,13 @@ class XdpTransport final : public Transport
     void delete_port_states() noexcept;
     /// Control thread: why a receive port for `destination` cannot open, if it cannot.
     [[nodiscard]] auto check_receive(Endpoint const& destination) const noexcept -> Status;
-    /// Control thread: a socket that joins `group`, so the switch sends it here.
-    [[nodiscard]] auto open_group_socket(ip::IPv4Address const& group) const -> StatusValue<net::FileDescriptor>;
+    /// Control thread: kernel_'s port for `destination` (bound and joined, so the switch sends the group here),
+    /// watched by kernel_ready_.
+    [[nodiscard]] auto open_kernel_port(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>>;
     /// Control thread: counts one more port on `group`.
     void retain_group(ip::IPv4Address const& group);
     /// Control thread: a new port's state, handed to the real-time thread.
-    [[nodiscard]] auto publish_port(Endpoint const& destination, net::FileDescriptor fd) -> PortState*;
+    [[nodiscard]] auto publish_port(Endpoint const& destination, std::unique_ptr<ReceivePort> kernel) -> PortState*;
     /// Control thread: a new RTCP pipe, handed to the real-time thread.
     [[nodiscard]] auto publish_rtcp_pipe(Endpoint const& destination) -> RtcpPipe*;
     /// Real-time thread: take new ports, retire closed ones; true when the set changed.
@@ -493,11 +509,15 @@ class XdpTransport final : public Transport
     void start_cycle() noexcept;
     /// Real-time thread: take the received frames, holding those a receive port kept.
     void receive_frames() noexcept;
+    /// Real-time thread: mark the `ports` whose kernel socket has datagrams (one epoll_wait()).
+    void note_kernel_ready(std::span<PortState* const> ports) noexcept;
     /// Real-time thread: put a written frame on the TX ring, timed for @p departure_ns (0: untimed)
     /// when the socket carries launch times; false when the ring is full (the frame is freed).
     [[nodiscard]] auto commit(net::EthernetTxSlot const& slot, size_t length, uint64_t departure_ns) noexcept -> bool;
 
     InterfaceInfo interface_;
+    UdpTransport kernel_;              ///< the ports' kernel sockets, for what the program passes
+    net::FdMultiplexer kernel_ready_;  ///< epoll over them, tagged by descriptor
     net::XdpContext context_;
     std::optional<Status> rss_status_;
     std::error_code launch_time_error_;
@@ -536,16 +556,29 @@ class XdpTransport final : public Transport
 /// tick that takes it until the tick that retires it, freed on the control thread.
 struct XdpTransport::PortState
 {
-    PortState(Endpoint const& d, net::FileDescriptor m) noexcept
+    PortState(Endpoint const& d, std::unique_ptr<ReceivePort> k) noexcept
         : destination{d}
-        , membership{std::move(m)}
+        , kernel{std::move(k)}
+        , kernel_fd{kernel ? kernel->fd() : -1}
     {}
 
     Endpoint destination;
-    net::FileDescriptor membership;  ///< keeps the kernel (and the NIC filter) joined
+    std::unique_ptr<ReceivePort> kernel;  ///< joined (so the NIC filter and switch let the group in); gets what is passed
+    int kernel_fd{-1};
     std::array<Datagram, PORT_BATCH> pending{};
     size_t pending_count{0};
+    bool kernel_ready{false};         ///< real-time: the kernel socket polled readable this tick
     std::atomic<bool> closed{false};  ///< set by the handle's destructor
+
+    /// From receive(): what the kernel socket holds, once note_kernel_ready() found it readable.
+    auto receive_passed(std::span<Datagram> const out) noexcept -> size_t
+    {
+        if (!kernel_ready || out.empty()) {
+            return 0;
+        }
+        kernel_ready = false;
+        return kernel->receive(out);
+    }
 
     /// From begin_tick(): false when full.
     auto offer(Datagram const& datagram) noexcept -> bool

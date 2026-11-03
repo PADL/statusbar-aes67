@@ -340,8 +340,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### XdpTransport
 
-- The XDP program redirects to the socket the untagged IPv4 (IHL 5) UDP frames whose
-  destination is exactly one of the joined groups (the rule matches the group's MAC and
+- The XDP program redirects to the socket the untagged IPv4 UDP frames, options or none
+  (the rules pin the version, not the IHL), whose destination is exactly one of the joined groups (the rule matches the group's MAC and
   the address's first two octets, which together are the whole address) and passes
   everything else to the kernel. With `set_receive_vid(vid)` one more rule, after the
   groups' (so setting or clearing the VID rewrites only the tail), redirects every IPv4
@@ -350,9 +350,15 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `unmatched`, and the kernel no longer sees tagged multicast on that VID. `begin_tick()`
   drains the RX ring once and hands each frame, parsed with `rtp::parse_rtp_frame()`, to the ports for its destination group and
   port; senders write whole frames into UMEM and `end_tick()` kicks the NIC.
-- Group membership is still the kernel's: each receive port holds a plain UDP socket
-  joined to its group, so IGMP reports go out and the NIC's multicast filter keeps the
-  group.
+- Group membership is still the kernel's: each receive port holds a `UdpTransport` port
+  (bound to its group and port, joined), so IGMP reports go out and the NIC's multicast
+  filter keeps the group. That socket also receives whatever of the stream the program
+  passes: a priority-tagged frame (VID 0, which IEEE 802.1Q makes untagged, its address
+  past the 32-octet window; the kernel strips the tag), or a frame on a queue other than
+  `QUEUE`. `begin_tick()` asks one epoll set over the ports' sockets which are readable
+  (one `epoll_wait()`, no wait), and `receive()` reads only those, after the redirected
+  frames; their truncated datagrams count `malformed`. Frames tagged with another VID are
+  not the interface's and reach no socket, as over `UdpTransport`.
 - `begin_tick()` is the only place the port list and the installed rules change: it takes
   new ports from a bounded queue, drops closed ones (handing their state back on a retire
   queue, freed on the control thread's next `open_*()` or port destruction, or by the
@@ -394,7 +400,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   (`net::tcam_default_capacity`) holds them: the tagged rule keeps its slot, and a group
   past the room left is dropped and reported by `rules_status()`; a joined group's frames to ports no
   receiver here listens on do not reach the kernel (the rule cannot see the UDP port), so
-  other listeners on the same group miss them; tagged frames with one VID only; one queue
+  other listeners on the same group miss them; tagged frames with one VID only (and VID 0
+  through the kernel); one queue
   (`QUEUE`, 0), so the NIC must deliver the groups there, and a NIC that strips VLAN tags
   (`rxvlan`) delivers them untagged.
 - RSS: a NIC with several RX queues hashes UDP flows over all of them, so `open()` steers
