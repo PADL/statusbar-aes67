@@ -55,12 +55,15 @@ struct XdpTransportOptions
     /// Frames carry launch times (net::XdpConfig::tx_launch_time): the host found that the driver
     /// honours them (net::netdev::launch_time_supported). open() goes on without when the build, kernel or NIC lacks it.
     bool launch_time{false};
+    /// The NIC queue the socket binds and RSS is steered to: XdpTransport::QUEUE, or an SR class's queue
+    /// for streams its credit-based shaper paces (IEEE 802.1Q-2022 Clause 8.6.8.2).
+    uint32_t queue{0};
 };
 
 class XdpTransport final : public Transport
 {
   public:
-    /// The NIC queue the socket binds.
+    /// The NIC queue the socket binds unless Options::queue says another.
     static constexpr uint32_t QUEUE = 0;
     /// Frames begin_tick() takes from the RX ring at most (XdpConfig::rx_drain_max).
     static constexpr size_t RECEIVE_BATCH = 64;
@@ -249,7 +252,7 @@ class XdpTransport final : public Transport
     using Options = XdpTransportOptions;
 
     /// The XdpConfig open() uses on `interface`: UMEM_FRAMES frames, a
-    /// FILL_RING fill ring, queue 0, no rules yet, and `options` (its pin path
+    /// FILL_RING fill ring, `options.queue`, no rules yet, and `options` (its pin path
     /// by view: `options` must outlive the config).
     [[nodiscard]] static auto config_for(std::string_view interface, Options const& options = {}) noexcept -> net::XdpConfig;
 
@@ -279,7 +282,7 @@ class XdpTransport final : public Transport
     [[nodiscard]] static auto settle_launch_time(std::string_view interface, net::tc::LaunchTimeMode mode)
         -> StatusValue<net::tc::LaunchTimeQueueAction>;
 
-    /// Open AF_XDP on `interface`'s queue 0, adopting or attaching (and pinning) the program as net::XdpConfig
+    /// Open AF_XDP on `interface`'s queue `options.queue`, adopting or attaching (and pinning) the program as net::XdpConfig
     /// says, then steer every RSS bucket to it (rss_verdict()). Fails without a supported NIC, libxdp or the
     /// privileges, zero-copy when it was required, or the steering; without launch time: launch_time_error().
     [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
@@ -326,15 +329,15 @@ class XdpTransport final : public Transport
     /// True when the program is pinned (adopted from, or pinned at, Options::pin_path).
     [[nodiscard]] auto pinned() const noexcept -> bool { return context_.program().pinned(); }
     /// The queue the socket is bound to.
-    [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return QUEUE; }
+    [[nodiscard]] auto queue_id() const noexcept -> uint32_t { return queue_; }
     /// The queue's NAPI busy polls from its kthread: zero-copy TX then needs no kick
     /// (net::XdpContext::set_napi_busy_poll()). Any thread.
     void set_napi_busy_poll(bool const on) noexcept { context_.set_napi_busy_poll(on); }
     [[nodiscard]] auto napi_busy_poll() const noexcept -> bool { return context_.napi_busy_poll(); }
-    /// Every RSS bucket of `interface` to QUEUE, as open() steers it (net::set_rss_indirection_all, CAP_NET_ADMIN):
+    /// Every RSS bucket of `interface` to `queue`, as open() steers it (net::set_rss_indirection_all, CAP_NET_ADMIN):
     /// success, operation_not_supported for a NIC without RSS, or the ioctl's error.
-    [[nodiscard]] static auto steer_rss(std::string_view interface) -> Status;
-    /// Whether open() goes on after steering RSS (@p steered): yes when every bucket went to QUEUE or the NIC has
+    [[nodiscard]] static auto steer_rss(std::string_view interface, uint32_t queue = QUEUE) -> Status;
+    /// Whether open() goes on after steering RSS (@p steered): yes when every bucket went to its queue or the NIC has
     /// no RSS (operation_not_supported); else rss_not_steered, since a spread table would lose groups.
     [[nodiscard]] static auto rss_verdict(Status const& steered) noexcept -> Status;
     /// open()'s RSS steering: success (every bucket goes to queue_id()) or operation_not_supported (no RSS).
@@ -468,7 +471,7 @@ class XdpTransport final : public Transport
     friend class aes67::XdpRtcpPort;
 
     explicit XdpTransport(InterfaceInfo interface) noexcept;
-    /// open(): every RSS bucket steered to QUEUE (rss_verdict()), then the socket opened with `options`; a socket
+    /// open(): every RSS bucket steered to queue_ (`options.queue`, rss_verdict()), then the socket opened with `options`; a socket
     /// that does not open puts the table back.
     [[nodiscard]] auto open_steered(Options const& options) -> Status;
 
@@ -510,6 +513,7 @@ class XdpTransport final : public Transport
 
     InterfaceInfo interface_;
     net::XdpContext context_;
+    uint32_t queue_{QUEUE};  ///< the queue open() bound
     Status rss_status_;
     std::error_code launch_time_error_;
 
