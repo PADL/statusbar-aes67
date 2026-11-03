@@ -69,7 +69,8 @@ class Receiver
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
     /// Every counter to zero; the stream, its source and sequence go on. The draining thread.
     void reset_counters() noexcept { counters_ = {}; }
-    /// Why the transport refused the last configure(), for State::error.
+    /// Why the transport refused the last configure(), or (since the last drain()) why its port cannot
+    /// receive (ReceivePort::error()), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     /// The SSRC learnt from the stream's first packet.
@@ -104,6 +105,8 @@ class Receiver
     /// The RTCP endpoints for the media (RFC 3605), without the DSCP; fails rtcp_multiplexed or no_rtcp_peer.
     [[nodiscard]] auto rtcp_options_for(
         sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection) const -> StatusValue<RtcpOptions>;
+    /// State::error while the port reports one (ReceivePort::error()), ready again once it does not.
+    void note_port_error() noexcept;
     /// Receives and accepts up to MAX_BATCHES batches; true when every batch came back full (more may wait).
     [[nodiscard]] auto receive_batches(uint64_t now_index) noexcept -> bool;
     /// Sets the due-tick gate after a drain: open after a backlog, else a tick before the next packet is due.

@@ -156,6 +156,7 @@ class LoopTransport final : public Transport
             }
             return n;
         }
+        [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.port_error; }
         LoopTransport& transport;
         Endpoint destination;
         std::deque<std::vector<uint8_t>> held;
@@ -230,6 +231,7 @@ class LoopTransport final : public Transport
     Endpoint source{.address = IPv4Address{192, 168, 1, 10}, .port = 5004};
     bool refuse{false};                 ///< every send_rendered() finds no TX buffer
     std::error_code failing;            ///< send_error()
+    std::error_code port_error;         ///< every receive port's error()
     bool every_tick{false};             ///< drain_every_tick()
     bool refuse_tag{false};             ///< set_vlan() refuses a tag, as a socket does
     std::optional<ieee::VlanTag> vlan;  ///< the open port's tag
@@ -1139,6 +1141,30 @@ TEST(aes67_receiver, a_receiver_taking_the_senders_clock_refuses_a_direct_stream
     Receiver direct{STEREO_L24, {}, transport};
     EXPECT_TRUE(direct.configure(stream_session(group, 0x1000)).has_value());
     EXPECT_TRUE(direct.offset() == std::optional<uint32_t>{0x1000});
+}
+
+// A port that cannot deliver its group (an XDP filter without its rule) puts the receiver in error from the next
+// drain, with the port's reason; once the port says nothing it is ready, its stream afresh, and running from its
+// next packet.
+TEST(aes67_receiver, a_port_error_holds_the_receiver_in_error_until_it_clears)
+{
+    LoopTransport transport;
+    transport.every_tick = true;  // as XdpTransport, the one whose ports report errors
+    Receiver receiver{STEREO_L24, {}, transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)).has_value());
+    transport.queue.push_back({group, rtp_packet(1, 952, 0x1234, 97)});
+    receiver.drain(952);
+    EXPECT_TRUE(receiver.state() == State::running && receiver.ssrc().has_value());
+    transport.port_error = make_error_code(std::errc::no_buffer_space);
+    receiver.drain(1000);
+    EXPECT_TRUE(receiver.state() == State::error && receiver.error() == std::errc::no_buffer_space);
+    transport.port_error.clear();
+    receiver.drain(1048);
+    EXPECT_TRUE(receiver.state() == State::ready && !receiver.error() && !receiver.ssrc().has_value());
+    transport.queue.push_back({group, rtp_packet(1, 1096, 0x1234, 97)});
+    receiver.drain(1096);
+    EXPECT_TRUE(receiver.state() == State::running);
 }
 
 TEST(aes67_receiver, refuses_streams_it_cannot_take)

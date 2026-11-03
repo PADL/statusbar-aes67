@@ -474,6 +474,36 @@ TEST(aes67_xdp, a_port_awaiting_retirement_past_max_groups_drops_its_group_not_t
     EXPECT_FALSE(std::ranges::any_of(rules, [&](net::CompiledRule<32> const& rule) { return same(rule, dropped); }));
 }
 
+// A port whose group got no rule says so (ReceivePort::error()), as does one sharing that group; the rest, and
+// every port once the groups fit again, say nothing.
+TEST(aes67_xdp, a_port_whose_group_has_no_rule_reports_it_until_one_is_installed)
+{
+    std::vector<std::unique_ptr<XdpTransport::PortState>> states;
+    std::vector<XdpTransport::PortState*> ports;
+    auto add = [&](uint8_t const group, uint16_t const port) {
+        states.push_back(std::make_unique<XdpTransport::PortState>(
+            Endpoint{.address = IPv4Address{239, 69, 3, group}, .port = port}, net::FileDescriptor{}));
+        ports.push_back(states.back().get());
+    };
+    for (uint8_t i = 0; i <= XdpTransport::MAX_GROUPS; ++i) {
+        add(i, 5004);
+    }
+    add(0, 5006);                         // shares a ruled group
+    add(XdpTransport::MAX_GROUPS, 5006);  // shares the group past MAX_GROUPS
+    std::array<net::CompiledRule<32>, XdpTransport::MAX_RULES> rules{};
+    (void)XdpTransport::compile_rules(ports, std::nullopt, rules);
+    auto const unruled = [](XdpTransport::PortState const* port) {
+        return port->rule_error == net::XdpError::too_many_filter_rules;
+    };
+    EXPECT_EQ(std::ranges::count_if(ports, unruled), std::ptrdiff_t{2});
+    EXPECT_TRUE(unruled(ports[XdpTransport::MAX_GROUPS]) && unruled(ports.back()));
+    EXPECT_FALSE(ports[0]->rule_error || ports[XdpTransport::MAX_GROUPS + 1]->rule_error);
+    std::erase_if(ports, [](XdpTransport::PortState const* port) { return port->destination.address.octet(3) == 0; });
+    (void)XdpTransport::compile_rules(ports, std::nullopt, rules);
+    EXPECT_FALSE(
+        std::ranges::any_of(ports, [](XdpTransport::PortState const* port) { return static_cast<bool>(port->rule_error); }));
+}
+
 TEST(aes67_xdp, a_tagged_frame_reaches_the_port_of_its_group)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};

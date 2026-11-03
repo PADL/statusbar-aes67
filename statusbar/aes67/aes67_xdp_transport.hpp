@@ -444,7 +444,7 @@ class XdpTransport final : public Transport
 
     /// Writes into `rules` a rule per distinct group of `ports` (up to MAX_GROUPS) from slot 0, then, with a
     /// VID, tagged_groups_rule(`vid`) in a slot kept for it: how many, and too_many_filter_rules when a group
-    /// did not fit (internal; public for tests).
+    /// did not fit, as each port's rule_error says (internal; public for tests).
     [[nodiscard]] static auto compile_rules(
         std::span<PortState* const> ports, std::optional<uint16_t> vid, std::span<net::CompiledRule<32>> rules) noexcept
         -> std::pair<size_t, std::error_code>;
@@ -551,6 +551,7 @@ struct XdpTransport::PortState
     net::FileDescriptor membership;  ///< keeps the kernel (and the NIC filter) joined; control thread only
     std::array<Datagram, PORT_BATCH> pending{};
     size_t pending_count{0};
+    std::error_code rule_error;       ///< real-time: why no installed rule takes its group, or none
     std::atomic<bool> closed{false};  ///< set by the handle's destructor
 
     /// From begin_tick(): false when full.

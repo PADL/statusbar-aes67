@@ -43,6 +43,8 @@ class XdpTransport::Port final : public ReceivePort
         return n;
     }
 
+    [[nodiscard]] auto error() const noexcept -> std::error_code override { return state_->rule_error; }
+
   private:
     XdpTransport& transport_;
     PortState* state_;
@@ -536,33 +538,51 @@ auto XdpTransport::open_send(SendOptions const& options) -> StatusValue<std::uni
 void XdpTransport::install_rules() noexcept
 {
     installed_vid_ = receive_vid();
-    auto [count, error] = compile_rules(std::span<PortState* const>{ports_}.first(port_count_), installed_vid_, rules_);
-    if (auto installed = context_.set_rules(std::span{rules_}.first(count)); !installed && !error) {
-        error = installed.error();
+    auto const ports = std::span<PortState* const>{ports_}.first(port_count_);
+    auto [count, error] = compile_rules(ports, installed_vid_, rules_);
+    if (auto installed = context_.set_rules(std::span{rules_}.first(count)); !installed) {
+        error = error ? error : installed.error();
+        for (auto* const port : ports) {
+            port->rule_error = port->rule_error ? port->rule_error : installed.error();  // a port past the room keeps that
+        }
     }
     rules_error_.store(error);
 }
 
 namespace {
 
-/// A rule per distinct group of `ports`, at most MAX_GROUPS, in `rules` from slot 0: how many, and whether all fit.
+/// `port`'s group's rule into `rules` at `count`, advanced, unless an `earlier` port has the group (then its outcome):
+/// none, or too_many_filter_rules past MAX_GROUPS or the room in `rules`.
+auto rule_group(
+    std::span<XdpTransport::PortState* const> const earlier,
+    XdpTransport::PortState const& port,
+    std::span<net::CompiledRule<32>> const rules,
+    size_t& count) noexcept -> std::error_code
+{
+    auto const address = [](XdpTransport::PortState const* other) { return other->destination.address; };
+    if (auto const same = std::ranges::find(earlier, port.destination.address, address); same != earlier.end()) {
+        return (*same)->rule_error;
+    }
+    if (count == std::min(rules.size(), XdpTransport::MAX_GROUPS)) {
+        return make_error_code(net::XdpError::too_many_filter_rules);
+    }
+    rules[count++] = XdpTransport::group_rule(port.destination.address);
+    return {};
+}
+
+/// A rule per distinct group of `ports`, at most MAX_GROUPS, in `rules` from slot 0, and each port's rule_error
+/// said: how many, and whether all fit.
 auto compile_group_rules(
     std::span<XdpTransport::PortState* const> const ports, std::span<net::CompiledRule<32>> const rules) noexcept
     -> std::pair<size_t, bool>
 {
     size_t count = 0;
+    bool all = true;
     for (size_t i = 0; i < ports.size(); ++i) {
-        auto const& group = ports[i]->destination.address;
-        auto const address = [](XdpTransport::PortState const* port) { return port->destination.address; };
-        if (std::ranges::contains(ports.first(i), group, address)) {
-            continue;
-        }
-        if (count == std::min(rules.size(), XdpTransport::MAX_GROUPS)) {
-            return {count, false};
-        }
-        rules[count++] = XdpTransport::group_rule(group);
+        ports[i]->rule_error = rule_group(ports.first(i), *ports[i], rules, count);
+        all = all && !ports[i]->rule_error;
     }
-    return {count, true};
+    return {count, all};
 }
 
 }  // namespace

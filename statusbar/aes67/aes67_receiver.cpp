@@ -198,6 +198,7 @@ void Receiver::drain(uint64_t const now_index) noexcept
         return;
     }
     bool const backlog = receive_batches(now_index);
+    note_port_error();
     if (this_drain_.heard && ssrc_) {
         receive_state_.store({
             .ssrc = *ssrc_,
@@ -211,6 +212,20 @@ void Receiver::drain(uint64_t const now_index) noexcept
         });
     }
     set_gate(now_index, backlog);
+}
+
+void Receiver::note_port_error() noexcept
+{
+    if (auto const error = port_->error()) {
+        state_ = State::error;
+        error_ = error;
+        return;
+    }
+    if (state_ == State::error) {
+        state_ = State::ready;  // a stream afresh from its next packet, as after configure()
+        error_.clear();
+        reset_stream();
+    }
 }
 
 auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
