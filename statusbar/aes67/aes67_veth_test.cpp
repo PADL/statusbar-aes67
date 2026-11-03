@@ -4,7 +4,7 @@
 /// Two UdpTransports on two veth pairs receiving the same group: a datagram arriving on one
 /// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
 /// tagged stream is received through the tagged group rule, a membership on an up VLAN link
-/// beside, and a priority-tagged one through the port's kernel socket. Needs root; skips without it.
+/// beside; a priority-tagged one is not received. Needs root; skips without it.
 
 #include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
@@ -208,9 +208,9 @@ TEST(aes67_veth, a_group_joined_on_an_up_vlan_link_leaves_the_tagged_stream_to_t
     sender->reset();
 }
 
-// A priority-tagged stream (VID 0): the program cannot see its group in the window and passes it, the kernel takes it
-// as untagged (IEEE 802.1Q), and the receive port gets it from its own socket; one on another VID stays out.
-TEST(aes67_veth, a_priority_tagged_stream_is_received_through_the_kernel_socket)
+// A priority-tagged stream (VID 0): the program cannot see its group in the window and passes it, and nothing
+// reads the port's group socket, so only the untagged stream arrives; another VID's stays out as well.
+TEST(aes67_veth, a_priority_tagged_stream_is_not_received_over_xdp)
 {
     if (::geteuid() != 0) {
         std::println("  skipped: needs root to create veth pairs");
@@ -227,12 +227,14 @@ TEST(aes67_veth, a_priority_tagged_stream_is_received_through_the_kernel_socket)
     }
     Endpoint const stream{.address = IPv4Address{239, 69, 235, 1}, .port = 45220};
     auto port = (*receiving)->open_receive(stream);
-    auto sender = (*sending)->open_send({.destination = stream, .vlan = ieee::make_vlan_tag(0, false, 5)});
+    auto sender = (*sending)->open_send({.destination = stream});
     EXPECT_TRUE(port && sender);
     if (!port || !sender) {
         return;
     }
     EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{1});
+    EXPECT_TRUE((*sender)->set_vlan(ieee::make_vlan_tag(0, false, 5)));
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{0});
     EXPECT_TRUE((*sender)->set_vlan(ieee::make_vlan_tag(7, false, 5)));
     EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{0});
     port->reset();
@@ -285,8 +287,8 @@ TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arri
     EXPECT_EQ((*first_rtcp)->dropped() + (*second_rtcp)->dropped(), uint64_t{0});
 }
 
-// What XdpTransport's receive ports rely on for what the program passes: the kernel takes a priority-tagged
-// frame (VID 0) as untagged (IEEE 802.1Q) and the group's socket receives it; another VID's never reaches it.
+// Over UdpTransport the kernel takes a priority-tagged frame (VID 0) as untagged (IEEE 802.1Q) and the group's
+// socket receives it; another VID's never reaches it.
 TEST(aes67_veth, a_priority_tagged_datagram_reaches_the_group_socket)
 {
     if (::geteuid() != 0) {

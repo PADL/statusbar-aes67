@@ -110,8 +110,6 @@ class ReceivePort
     /// Up to `out.size()` datagrams that arrived since the last call; returns
     /// how many were written. Never blocks.
     [[nodiscard]] virtual auto receive(std::span<Datagram> out) noexcept -> size_t = 0;
-    /// A descriptor that polls readable when receive() has datagrams waiting, or -1 (the default): none.
-    [[nodiscard]] virtual auto fd() const noexcept -> int { return -1; }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX
