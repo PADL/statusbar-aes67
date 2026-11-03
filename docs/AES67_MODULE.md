@@ -38,8 +38,8 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
 - `RtcpCadence` — when the next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
-- `SrClass`, `SrpTSpec`, `srp_format()`, `srp_tspec()`, `multicast_mac_aliases()` — a stream
-  under SRP (AES67-2018 Annex C.1.1): its framing cut to the class interval, its MSRP TSpec, and
+- `SrClass`, `SrpTSpec`, `srp_frames_per_packet()`, `srp_tspec()`, `multicast_mac_aliases()` — a stream
+  under SRP (AES67-2018 Annex C.1.1): the framing of its class's interval, its MSRP TSpec, and
   whether two groups share an Ethernet address. `SendOptions::vlan`, `SendPort::set_vlan()` and
   `Sender::set_vlan()` tag a stream; `XdpTransport::set_receive_vid()` receives tagged ones.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
@@ -360,7 +360,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   NIC's multicast filter keeps the group. Nothing reads it, and the tick makes no system
   call for receive ports beyond the RX ring. What the program passes is not received: a
   priority-tagged frame (VID 0, see Limits), a frame tagged with a VID other than
-  `set_receive_vid()`'s, or a frame on a queue other than `QUEUE` (RSS below).
+  `set_receive_vid()`'s, or a frame on a queue other than `queue_id()` (RSS below).
 - `begin_tick()` is the only place the port list and the installed rules change: it takes
   new ports from a bounded queue, drops closed ones (handing their state back on a retire
   queue, freed on the control thread's next `open_*()` or port destruction, or by the
@@ -403,18 +403,20 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   past the room left is dropped and reported by `rules_status()`; a joined group's frames to ports no
   receiver here listens on do not reach the kernel (the rule cannot see the UDP port), so
   other listeners on the same group miss them; tagged frames with one VID only; one queue
-  (`QUEUE`, 0), so the NIC must deliver the groups there, and a NIC that strips VLAN tags
+  (`Options::queue`, by default `QUEUE`, 0), so the NIC must deliver the groups there, and a NIC that strips VLAN tags
   (`rxvlan`) delivers them untagged.
 - Priority-tagged frames (VID 0, untagged by IEEE 802.1Q) are not received, by design: with
   the tag the destination address lies past the 32-octet window, so no rule can classify
   them by group, and no sender known on AES67 networks sends them. A TCAM of 64 rules (a
   second rule per group, keyed on the MAC) is the path if one appears.
 - RSS: a NIC with several RX queues hashes UDP flows over all of them, so `open()` always
-  steers every RSS bucket to `QUEUE` (`net::set_rss_indirection_all`, `CAP_NET_ADMIN`), and
+  steers every RSS bucket to its queue (`net::set_rss_indirection_all`, `CAP_NET_ADMIN`), and
   fails with `Aes67Error::rss_not_steered` when it cannot (`rss_verdict()`): a spread table
   would lose groups silently. It steers before the program attaches (on igb an attach resets
   the adapter); the write is one ioctl, so a refusal leaves the table as it was, and a socket
-  that then fails to open puts the table back. `steer_rss()` is that step alone.
+  that then fails to open puts the table back. `steer_rss()` is that step alone. A queue other
+  than 0 (an SR class B queue under a credit-based shaper) takes the same steering; traffic the
+  NIC does not hash (non-IP) stays on its default queue and the kernel.
   A NIC without RSS reports `operation_not_supported` in `rss_status()` and opens; it needs one
   combined channel or a flow-steering rule. The table is left steered at close. `UdpTransport`
   never touches RSS: the kernel's sockets take every queue.
@@ -438,10 +440,11 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   payload and one spare octet, no Ethernet overhead (Annex C.1.1.1); MaxIntervalFrames the packets
   that can start in one class interval (125 us for class A, 250 us for B, Clause 34.4).
 - A packet time longer than the interval would reserve a whole frame every interval for one sent
-  each packet time, so `srp_format()` cuts the frames per packet to the fewest whose packet time
-  reaches the interval: 6 at 48 kHz (exactly 125 us) and at 44.1 kHz (136 us, one frame per
-  interval) in class A, 12 at 96 kHz. A packet time already that short is kept. The caller sends
-  and announces the cut format.
+  each packet time. `srp_frames_per_packet(rate, class)` is the fewest frames whose packet time
+  reaches the interval, AES67-2023 Table 2's "125 microseconds" in class A (6 at 48 kHz, exactly
+  125 us; 6 at 44.1 kHz, 136 us, one frame per interval; 12 at 96 kHz) and "250 microseconds" in
+  class B (12, 12, 24), for which MaxIntervalFrames is 1. Which packet times a caller sends or
+  accepts under SRP is its own policy.
 - A tagged stream: `SendOptions::vlan` opens a port tagged; `SendPort::set_vlan()` switches it between
   tagged and untagged from the next frame (`XdpTransport`: one atomic word, wait-free for the
   tick, read per frame), and the sender's run, sequence and timestamps go on. `UdpTransport` cannot tag and

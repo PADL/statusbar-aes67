@@ -80,31 +80,27 @@ struct SrpTSpec
     auto operator==(SrpTSpec const&) const noexcept -> bool = default;
 };
 
-/// `format` as it is sent under SRP in `sr_class`: frames per packet cut to the fewest whose packet
-/// time reaches the class interval (6 at 44.1 or 48 kHz in class A) when it has more; else kept.
-[[nodiscard]] constexpr auto srp_format(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> StreamFormat
+/// The frames per packet a stream at `sample_rate` sends under SRP in `sr_class`: the fewest whose packet time
+/// reaches the class measurement interval (IEEE 802.1Q-2022 Clause 34.4), as AES67-2023 Table 2 counts "125
+/// microseconds" (class A) and "250 microseconds" (class B) at 44.1, 48 and 96 kHz; at least one.
+[[nodiscard]] constexpr auto srp_frames_per_packet(uint32_t const sample_rate, SrClass const sr_class) noexcept -> uint32_t
 {
-    uint64_t const interval = uint64_t{format.sample_rate} * sr_class_interval_us(sr_class);
-    uint64_t const interval_frames = (interval + 999'999) / 1'000'000;
-    StreamFormat scaled = format;
-    if (scaled.frames_per_packet > interval_frames) {
-        scaled.frames_per_packet = static_cast<uint32_t>(interval_frames == 0 ? 1 : interval_frames);
-    }
-    return scaled;
+    uint64_t const interval = uint64_t{sample_rate} * sr_class_interval_us(sr_class);
+    uint64_t const frames = (interval + 999'999) / 1'000'000;
+    return frames == 0 ? 1 : static_cast<uint32_t>(frames);
 }
 
-/// The TSpec of `format` sent as srp_format() sends it in `sr_class` (AES67-2018 Annex C.1.1.1):
-/// MaxIntervalFrames is the packets that can start in one interval; zero for an empty format.
+/// The TSpec of `format` sent in `sr_class` (AES67-2018 Annex C.1.1.1): MaxIntervalFrames is the packets that
+/// can start in one interval (1 at srp_frames_per_packet()); zero for an empty format.
 [[nodiscard]] constexpr auto srp_tspec(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> SrpTSpec
 {
-    StreamFormat const sent = srp_format(format, sr_class);
-    uint64_t const packet = uint64_t{sent.frames_per_packet} * 1'000'000;
-    if (packet == 0 || sent.bytes_per_packet() == 0) {
+    uint64_t const packet = uint64_t{format.frames_per_packet} * 1'000'000;
+    if (packet == 0 || format.bytes_per_packet() == 0) {
         return {};
     }
-    uint64_t const interval = uint64_t{sent.sample_rate} * sr_class_interval_us(sr_class);
+    uint64_t const interval = uint64_t{format.sample_rate} * sr_class_interval_us(sr_class);
     return {
-        .max_frame_size = static_cast<uint16_t>(SrpTSpec::FRAME_OVERHEAD + sent.bytes_per_packet()),
+        .max_frame_size = static_cast<uint16_t>(SrpTSpec::FRAME_OVERHEAD + format.bytes_per_packet()),
         .max_interval_frames = static_cast<uint16_t>((interval + packet - 1) / packet),
     };
 }

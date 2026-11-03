@@ -1075,20 +1075,17 @@ TEST(aes67_sender, a_tag_is_kept_for_the_next_configure_and_a_refused_one_is_not
     EXPECT_FALSE(transport.vlan.has_value());
 }
 
-TEST(aes67_stream, srp_reserves_the_packet_time_cut_to_the_class_interval)
+TEST(aes67_stream, an_sr_class_sends_the_packet_time_of_its_interval)
 {
-    auto const format = [](uint32_t const rate, uint32_t const fpp) {
-        return StreamFormat{.encoding = sdp::Encoding::l24, .channels = 8, .sample_rate = rate, .frames_per_packet = fpp};
-    };
-    EXPECT_EQ(srp_format(format(48000, 48)).frames_per_packet, uint32_t{6});               // 1 ms -> 125 us
-    EXPECT_EQ(srp_format(format(48000, 48), SrClass::b).frames_per_packet, uint32_t{12});  // 1 ms -> 250 us
-    EXPECT_EQ(srp_format(format(48000, 16)).frames_per_packet, uint32_t{6});               // 333 us -> 125 us
-    EXPECT_EQ(srp_format(format(96000, 96)).frames_per_packet, uint32_t{12});
-    EXPECT_EQ(srp_format(format(192000, 192)).frames_per_packet, uint32_t{24});
-    EXPECT_EQ(srp_format(format(44100, 44)).frames_per_packet, uint32_t{6});               // 1 ms -> 136 us
-    EXPECT_EQ(srp_format(format(88200, 88), SrClass::b).frames_per_packet, uint32_t{23});  // 22.05 frames up
-    EXPECT_TRUE(srp_format(format(48000, 6), SrClass::b) == format(48000, 6));             // 125 us kept in class B
-    EXPECT_EQ(srp_format(format(8000, 8)).frames_per_packet, uint32_t{1});                 // never none
+    EXPECT_EQ(srp_frames_per_packet(48000, SrClass::a), uint32_t{6});   // 125 us
+    EXPECT_EQ(srp_frames_per_packet(48000, SrClass::b), uint32_t{12});  // 250 us
+    EXPECT_EQ(srp_frames_per_packet(96000, SrClass::a), uint32_t{12});
+    EXPECT_EQ(srp_frames_per_packet(96000, SrClass::b), uint32_t{24});
+    EXPECT_EQ(srp_frames_per_packet(192000, SrClass::a), uint32_t{24});
+    EXPECT_EQ(srp_frames_per_packet(44100, SrClass::a), uint32_t{6});   // ~136 us, AES67-2023 Table 2
+    EXPECT_EQ(srp_frames_per_packet(44100, SrClass::b), uint32_t{12});  // ~272 us
+    EXPECT_EQ(srp_frames_per_packet(8000, SrClass::a), uint32_t{1});    // never none
+    EXPECT_EQ(srp_frames_per_packet(0, SrClass::b), uint32_t{1});
 }
 
 TEST(aes67_stream, srp_tspecs_count_ip_udp_rtp_the_payload_and_a_spare_octet)
@@ -1105,11 +1102,10 @@ TEST(aes67_stream, srp_tspecs_count_ip_udp_rtp_the_payload_and_a_spare_octet)
     EXPECT_TRUE(srp_tspec(format(l24, 64, 48000, 6)) == (SrpTSpec{1193, 1}));
     EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 12), SrClass::b) == (SrpTSpec{329, 1}));
     EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 6), SrClass::b) == (SrpTSpec{185, 2}));
-    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 16)) == (SrpTSpec{185, 1}));  // 333 us, scaled
-    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48)) == (SrpTSpec{185, 1}));  // 1 ms, scaled
-    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48), SrClass::b) == (SrpTSpec{329, 1}));
-    EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 44)) == (SrpTSpec{77, 1}));  // 6 frames, 136 us
-    EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 6)) == (SrpTSpec{77, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48)) == (SrpTSpec{1193, 1}));  // 1 ms: taken as it is
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 96000, 24), SrClass::b) == (SrpTSpec{617, 1}));
+    EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 6)) == (SrpTSpec{77, 1}));  // 136 us
+    EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 12), SrClass::b) == (SrpTSpec{113, 1}));
     EXPECT_TRUE(srp_tspec(format(l24, 2, 48000, 0)) == SrpTSpec{});
 }
 

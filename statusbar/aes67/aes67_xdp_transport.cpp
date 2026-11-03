@@ -244,7 +244,7 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .interface_name = interface,
         .filter_rules = {},
         .default_action = net::XdpAction::pass_kernel,
-        .queue_id = QUEUE,
+        .queue_id = options.queue,
         .fill_ring_size = FILL_RING,
         .umem_frame_count = UMEM_FRAMES,
         .rx_drain_max = RECEIVE_BATCH,
@@ -341,19 +341,19 @@ auto XdpTransport::tagged_groups_rule(uint16_t const vid) noexcept -> net::Compi
 
 namespace {
 
-/// `interface`'s RSS table back to `before` when steering changed it (the socket did not open).
-void put_back_rss(std::string_view const interface, StatusValue<net::RssIndirection> const& before)
+/// `interface`'s RSS table back to `before` when steering to `queue` changed it (the socket did not open).
+void put_back_rss(std::string_view const interface, StatusValue<net::RssIndirection> const& before, uint32_t const queue)
 {
-    if (before && !net::rss_steered_to(*before, XdpTransport::QUEUE)) {
+    if (before && !net::rss_steered_to(*before, queue)) {
         (void)net::set_rss_indirection(interface, *before);  // best effort: the open has failed already
     }
 }
 
 }  // namespace
 
-auto XdpTransport::steer_rss(std::string_view const interface) -> Status
+auto XdpTransport::steer_rss(std::string_view const interface, uint32_t const queue) -> Status
 {
-    return net::set_rss_indirection_all(interface, QUEUE).transform([](net::RssIndirection const&) {});
+    return net::set_rss_indirection_all(interface, queue).transform([](net::RssIndirection const&) {});
 }
 
 auto XdpTransport::open(std::string_view const interface, Options const& options) -> StatusValue<std::unique_ptr<XdpTransport>>
@@ -363,6 +363,7 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
+    transport->queue_ = options.queue;
     if (auto opened = transport->open_steered(options); !opened) {
         return forward_failure(opened);
     }
@@ -373,7 +374,7 @@ auto XdpTransport::open_steered(Options const& options) -> Status
 {
     // Steered first, so a refusal attaches nothing (on igb an attach resets the adapter). The table is written in
     // one ioctl: a refused steer leaves it as it was, and a socket that then fails to open puts it back.
-    auto const before = net::set_rss_indirection_all(interface_.name, QUEUE);
+    auto const before = net::set_rss_indirection_all(interface_.name, queue_);
     rss_status_ = before.transform([](net::RssIndirection const&) {});
     if (auto const verdict = rss_verdict(rss_status_); !verdict) {
         return verdict;
@@ -381,7 +382,7 @@ auto XdpTransport::open_steered(Options const& options) -> Status
     auto opened = context_.open(
         config_for(interface_.name, with_launch_time(options, [this] { return probe_launch_time(interface_.index); })));
     if (!opened) {
-        put_back_rss(interface_.name, before);
+        put_back_rss(interface_.name, before, queue_);
     }
     return opened;
 }
