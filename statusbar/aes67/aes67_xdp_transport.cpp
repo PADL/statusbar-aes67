@@ -40,7 +40,7 @@ class XdpTransport::Port final : public ReceivePort
             s.pending.begin() + static_cast<std::ptrdiff_t>(s.pending_count),
             s.pending.begin());
         s.pending_count -= n;
-        return n;
+        return n + s.receive_passed(out.subspan(n));
     }
 
   private:
@@ -193,8 +193,10 @@ auto XdpTransport::render_frame(
     return std::pair{*slot, *offset + payload_length};
 }
 
-XdpTransport::XdpTransport(InterfaceInfo interface) noexcept
+XdpTransport::XdpTransport(InterfaceInfo interface)
     : interface_{std::move(interface)}
+    , kernel_{interface_}
+    , kernel_ready_{MAX_PORTS}
 {}
 
 XdpTransport::~XdpTransport()
@@ -287,19 +289,18 @@ auto XdpTransport::group_rule(ip::IPv4Address const& group) noexcept -> net::Com
                     .vlan_untagged()
                     .result(net::flag::process)
                     .build()[0];
-    // Past what the builder writes: IHL 5 (so the offsets below hold), and the
-    // destination address's first two octets, the bytes of the 32-byte window
-    // the MAC does not already pin (it carries the low 23 bits).
+    // Past what the builder writes: version 4, any IHL (options follow the addresses), and the
+    // destination's first two octets, the window's bytes the MAC (its low 23 bits) leaves unpinned.
     constexpr size_t VERSION_IHL = 14;
     constexpr size_t DESTINATION = 14 + 16;
-    std::array<std::pair<size_t, uint8_t>, 3> const bytes{{
-        {VERSION_IHL, 0x45},
-        {DESTINATION, group.octet(0)},
-        {DESTINATION + 1, group.octet(1)},
+    std::array<std::array<uint8_t, 3>, 3> const bytes{{
+        {VERSION_IHL, 0xF0, 0x40},
+        {DESTINATION, 0xFF, group.octet(0)},
+        {DESTINATION + 1, 0xFF, group.octet(1)},
     }};
-    for (auto const& [at, value] : bytes) {
-        rule.mask[at] = 0xFF;
-        rule.match[at] = value;
+    for (auto const& [at, mask, match] : bytes) {
+        rule.mask[at] = mask;
+        rule.match[at] = match;
     }
     return rule;
 }
@@ -312,13 +313,13 @@ auto XdpTransport::tagged_groups_rule(uint16_t const vid) noexcept -> net::Compi
                     .vlan_tagged_exact(vid)
                     .result(net::flag::process)
                     .build()[0];
-    constexpr size_t VERSION_IHL = 14 + ieee::VlanTag::LENGTH;  // IHL 5, as the untagged rule pins
+    constexpr size_t VERSION_IHL = 14 + ieee::VlanTag::LENGTH;  // version 4, any IHL, as the untagged rule
     std::array<std::array<uint8_t, 3>, 5> const bytes{{
         {0, 0xFF, 0x01},  // 01:00:5e, then bit 24 clear: an IPv4 group's MAC
         {1, 0xFF, 0x00},
         {2, 0xFF, 0x5E},
         {3, 0x80, 0x00},
-        {VERSION_IHL, 0xFF, 0x45},
+        {VERSION_IHL, 0xF0, 0x40},
     }};
     for (auto const& [at, mask, match] : bytes) {
         rule.mask[at] = mask;
@@ -334,16 +335,22 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    if (auto opened = transport->context_.open(
-            config_for(transport->interface_.name, transport->with_launch_time(options, net::probe_tx_metadata)));
-        !opened) {
-        return failure(opened.error());
+    if (auto opened = transport->open_context(options); !opened) {
+        return forward_failure(opened);
     }
     if (options.steer_rss) {
         transport->rss_status_ =
             net::set_rss_indirection_all(transport->interface_.name, QUEUE).transform([](net::RssIndirection const&) {});
     }
     return transport;
+}
+
+auto XdpTransport::open_context(Options const& options) -> Status
+{
+    if (!kernel_ready_.valid()) {
+        return failure(net::errno_code());  // epoll_create1()'s, in the constructor
+    }
+    return context_.open(config_for(interface_.name, with_launch_time(options, net::probe_tx_metadata)));
 }
 
 auto XdpTransport::rules_status() const noexcept -> Status
@@ -361,12 +368,12 @@ auto XdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std:
     if (auto const checked = check_receive(destination); !checked) {
         return forward_failure(checked);
     }
-    auto fd = open_group_socket(destination.address);
-    if (!fd) {
-        return failure(fd.error());
+    auto kernel = open_kernel_port(destination);
+    if (!kernel) {
+        return forward_failure(kernel);
     }
     retain_group(destination.address);
-    return std::make_unique<Port>(*this, publish_port(destination, std::move(*fd)));
+    return std::make_unique<Port>(*this, publish_port(destination, std::move(*kernel)));
 }
 
 auto XdpTransport::check_receive(Endpoint const& destination) const noexcept -> Status
@@ -385,16 +392,17 @@ auto XdpTransport::check_receive(Endpoint const& destination) const noexcept -> 
     return success();
 }
 
-auto XdpTransport::open_group_socket(ip::IPv4Address const& group) const -> StatusValue<net::FileDescriptor>
+auto XdpTransport::open_kernel_port(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>>
 {
-    auto fd = net::make_udp_socket();
-    if (!fd) {
-        return failure(fd.error());
+    auto port = kernel_.open_receive(destination);
+    if (!port) {
+        return forward_failure(port);
     }
-    if (auto joined = net::join_group(fd->get(), group, interface_.index); !joined) {
-        return failure(joined.error());
+    int const fd = (*port)->fd();
+    if (auto const watched = kernel_ready_.add(fd, static_cast<uint32_t>(fd), true, false); !watched) {
+        return forward_failure(watched);
     }
-    return std::move(*fd);
+    return std::move(*port);
 }
 
 void XdpTransport::retain_group(ip::IPv4Address const& group)
@@ -407,9 +415,9 @@ void XdpTransport::retain_group(ip::IPv4Address const& group)
     ++it->second;
 }
 
-auto XdpTransport::publish_port(Endpoint const& destination, net::FileDescriptor fd) -> PortState*
+auto XdpTransport::publish_port(Endpoint const& destination, std::unique_ptr<ReceivePort> kernel) -> PortState*
 {
-    auto* const state = new PortState{destination, std::move(fd)};
+    auto* const state = new PortState{destination, std::move(kernel)};
     added_.publish(state);
     ++live_ports_;
     return state;
@@ -417,13 +425,27 @@ auto XdpTransport::publish_port(Endpoint const& destination, net::FileDescriptor
 
 void XdpTransport::port_closed(PortState* const state) noexcept
 {
+    close_kernel_port(*state);
     state->closed.store(true, std::memory_order_release);
-    auto const group = std::ranges::find(groups_, state->destination.address, &std::pair<ip::IPv4Address, size_t>::first);
-    if (group != groups_.end() && --group->second == 0) {
-        groups_.erase(group);  // no allocation
-    }
+    release_group(state->destination.address);
     --live_ports_;
     collect_retired();
+}
+
+void XdpTransport::close_kernel_port(PortState& state) noexcept
+{
+    if (state.kernel) {
+        kernel_ready_.remove(state.kernel_fd);
+        state.kernel.reset();  // the real-time thread reads it only through the gone handle's receive()
+    }
+}
+
+void XdpTransport::release_group(ip::IPv4Address const& group) noexcept
+{
+    auto const it = std::ranges::find(groups_, group, &std::pair<ip::IPv4Address, size_t>::first);
+    if (it != groups_.end() && --it->second == 0) {
+        groups_.erase(it);  // no allocation
+    }
 }
 
 void XdpTransport::collect_retired() noexcept
@@ -641,6 +663,20 @@ void XdpTransport::receive_frames() noexcept
             (void)context_.rx_release(rx.handle);
         }
     }
+    note_kernel_ready(ports);
+}
+
+void XdpTransport::note_kernel_ready(std::span<PortState* const> const ports) noexcept
+{
+    if (ports.empty()) {
+        return;
+    }
+    (void)kernel_ready_.drain([ports](net::FdMultiplexer::Event const& event) {
+        auto const port = std::ranges::find(ports, static_cast<int>(event.tag), &PortState::kernel_fd);
+        if (port != ports.end()) {
+            (*port)->kernel_ready = true;
+        }
+    });
 }
 
 namespace {
@@ -745,6 +781,7 @@ void XdpTransport::end_tick() noexcept
 void XdpTransport::reset_counters() noexcept
 {
     refusals_.reset();
+    kernel_.reset_counters();
     tx_health_.reset_failures();
     tx_pool_.reset_empty_count();
     reset_socket_stats_.store(true, std::memory_order_relaxed);

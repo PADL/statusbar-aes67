@@ -4,7 +4,7 @@
 /// Two UdpTransports on two veth pairs receiving the same group: a datagram arriving on one
 /// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
 /// tagged stream is received through the tagged group rule, a membership on an up VLAN link
-/// beside. Needs root; skips without it.
+/// beside, and a priority-tagged one through the port's kernel socket. Needs root; skips without it.
 
 #include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <format>
 #include <memory>
+#include <optional>
 #include <print>
 #include <string>
 #include <thread>
@@ -68,13 +69,19 @@ class VethPair
     bool ok_{false};
 };
 
-/// Send one UDP datagram to `group`:`port` from `source` as a raw frame on `interface`.
-auto inject(std::string const& interface, IPv4Address const& source, IPv4Address const& group, uint16_t const port) -> bool
+/// Send one UDP datagram to `group`:`port` from `source` as a raw frame on `interface`, tagged with `vlan` if given.
+auto inject(
+    std::string const& interface,
+    IPv4Address const& source,
+    IPv4Address const& group,
+    uint16_t const port,
+    std::optional<ieee::VlanTag> const vlan = std::nullopt) -> bool
 {
     net::FileDescriptor const fd{::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP))};
     rtp::FrameAddressing const addressing{
         .destination_mac = rtp::multicast_mac(group),
         .source_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x02},
+        .vlan = vlan,
         .source_address = source,
         .destination_address = group,
         .source_port = port,
@@ -201,6 +208,37 @@ TEST(aes67_veth, a_group_joined_on_an_up_vlan_link_leaves_the_tagged_stream_to_t
     sender->reset();
 }
 
+// A priority-tagged stream (VID 0): the program cannot see its group in the window and passes it, the kernel takes it
+// as untagged (IEEE 802.1Q), and the receive port gets it from its own socket; one on another VID stays out.
+TEST(aes67_veth, a_priority_tagged_stream_is_received_through_the_kernel_socket)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67zveth0", "a67zveth1", "10.235.0.1/24", "10.235.0.2/24"};
+    XdpTransportOptions const options{
+        .bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic, .steer_rss = false};
+    auto sending = XdpTransport::open("a67zveth0", options);
+    auto receiving = XdpTransport::open("a67zveth1", options);
+    if (!pair.ok() || !sending || !receiving) {
+        std::println("  skipped: no veth pair, or AF_XDP unavailable");
+        return;
+    }
+    Endpoint const stream{.address = IPv4Address{239, 69, 235, 1}, .port = 45220};
+    auto port = (*receiving)->open_receive(stream);
+    auto sender = (*sending)->open_send({.destination = stream, .vlan = ieee::make_vlan_tag(0, false, 5)});
+    EXPECT_TRUE(port && sender);
+    if (!port || !sender) {
+        return;
+    }
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{1});
+    EXPECT_TRUE((*sender)->set_vlan(ieee::make_vlan_tag(7, false, 5)));
+    EXPECT_EQ(sent_and_received(**sending, **sender, **receiving, **port), size_t{0});
+    port->reset();
+    sender->reset();
+}
+
 TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arrives)
 {
     if (::geteuid() != 0) {
@@ -245,6 +283,36 @@ TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arri
     EXPECT_EQ(received(**first_rtcp), size_t{0});
     EXPECT_EQ(received(**second_rtcp), size_t{1});
     EXPECT_EQ((*first_rtcp)->dropped() + (*second_rtcp)->dropped(), uint64_t{0});
+}
+
+// What XdpTransport's receive ports rely on for what the program passes: the kernel takes a priority-tagged
+// frame (VID 0) as untagged (IEEE 802.1Q) and the group's socket receives it; another VID's never reaches it.
+TEST(aes67_veth, a_priority_tagged_datagram_reaches_the_group_socket)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67wveth0", "a67wveth1", "10.236.0.1/24"};
+    if (!pair.ok()) {
+        std::println("  skipped: cannot create a veth pair");
+        return;
+    }
+    auto transport = UdpTransport::open("a67wveth0");
+    EXPECT_TRUE(transport.has_value());
+    if (!transport) {
+        return;
+    }
+    Endpoint const rtp{.address = IPv4Address{239, 69, 236, 1}, .port = 45230};
+    auto port = (*transport)->open_receive(rtp);
+    EXPECT_TRUE(port.has_value());
+    if (!port) {
+        return;
+    }
+    EXPECT_TRUE(inject("a67wveth1", IPv4Address{10, 236, 0, 2}, rtp.address, rtp.port, ieee::make_vlan_tag(0, false, 5)));
+    EXPECT_EQ(received(**port), size_t{1});
+    EXPECT_TRUE(inject("a67wveth1", IPv4Address{10, 236, 0, 2}, rtp.address, rtp.port, ieee::make_vlan_tag(7, false, 5)));
+    EXPECT_EQ(received(**port), size_t{0});
 }
 
 TEST_MAIN(statusbar_aes67, aes67_veth_test)
