@@ -25,3 +25,4 @@ statusbar_add_module(
 
 # Fuzz harnesses (built only when -DENABLE_FUZZING=ON).
 add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtcp_parse_fuzzer.cpp)
+add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtp_frame_parse_fuzzer.cpp)
