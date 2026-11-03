@@ -221,9 +221,11 @@ void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
     if (grandmaster == grandmaster_) {
         return;
     }
+    // The Info Block names the grandmaster alone: a change of `traceable` only is not its change.
+    bool const renamed = grandmaster.transform(&Grandmaster::reference) != grandmaster_.transform(&Grandmaster::reference);
     grandmaster_ = grandmaster;
     bump_session_version();  // the SDP changed: a receiver keying on o= sees a new version
-    ++info_block_version_;
+    info_block_version_ += renamed ? 1 : 0;
 }
 
 void Sender::set_sender_clock(bool const sender)
@@ -459,7 +461,7 @@ auto Sender::media_description(ip::IPv4Address const& origin, bool const multica
         .channels = format_.channels,
         .packet_time_us = format_.packet_time_us(),
         .direction = sdp::Direction::recvonly,
-        .clocks = sdp::ReferenceClocks::of(grandmaster_.transform(&Grandmaster::reference)),
+        .clocks = grandmaster_ ? grandmaster_->references() : sdp::ReferenceClocks{},
         .media_clock = media_clock(),
         .source_filter =
             multicast ? std::optional{sdp::SourceFilter{.destination = destination_.address, .source = origin}} : std::nullopt,
