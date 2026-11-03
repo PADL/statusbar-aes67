@@ -170,10 +170,20 @@ TEST(aes67_xdp, launch_time_asks_for_tx_metadata_on_the_socket_s_queue)
     EXPECT_FALSE(XdpTransport::settle_launch_time("no-such-interface-0", net::tc::LaunchTimeMode::off).has_value());
 }
 
-TEST(aes67_xdp, steers_rss_to_the_socket_queue_by_default)
+TEST(aes67_xdp, binds_the_queue_rss_is_steered_to)
 {
-    EXPECT_TRUE(XdpTransport::Options{}.steer_rss);
     EXPECT_EQ(XdpTransport::config_for("eth0").queue_id, XdpTransport::QUEUE);
+}
+
+// A NIC with RSS whose table cannot be steered would spread groups over queues the socket never sees: open() fails,
+// so a caller falls back to UDP. A NIC without RSS delivers everything to the one queue.
+TEST(aes67_xdp, a_failed_rss_steer_refuses_the_open)
+{
+    EXPECT_TRUE(XdpTransport::rss_verdict(success()).has_value());
+    EXPECT_TRUE(XdpTransport::rss_verdict(failure(std::errc::operation_not_supported)).has_value());
+    auto const refused = XdpTransport::rss_verdict(failure(std::errc::operation_not_permitted));
+    EXPECT_TRUE(!refused && refused.error() == Aes67Error::rss_not_steered);
+    EXPECT_FALSE(XdpTransport::rss_verdict(failure(std::errc::invalid_argument)).has_value());
 }
 
 TEST(aes67_xdp, passes_the_bind_mode_through)
@@ -650,7 +660,7 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     EXPECT_TRUE((*transport)->bind_mode() == net::XdpBindMode::copy);
     EXPECT_TRUE((*transport)->drain_every_tick());
     auto const rss = (*transport)->rss_status();
-    EXPECT_TRUE(rss && !*rss && rss->error() == std::errc::operation_not_supported);  // lo has no RSS
+    EXPECT_TRUE(!rss && rss.error() == std::errc::operation_not_supported);  // lo has no RSS
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};
     EXPECT_TRUE((*transport)->open_receive(unicast).error() == Aes67Error::unsupported_destination);
     EXPECT_TRUE((*transport)->open_send({.destination = unicast}).error() == Aes67Error::unsupported_destination);
@@ -682,12 +692,11 @@ TEST(aes67_xdp, joins_and_ticks_when_privileged)
         std::println("  skipped: not root");
         return;
     }
-    auto transport = XdpTransport::open("lo", {.steer_rss = false});
+    auto transport = XdpTransport::open("lo");
     if (!transport) {
         std::println("  skipped: AF_XDP unavailable ({})", transport.error().message());
         return;
     }
-    EXPECT_FALSE((*transport)->rss_status().has_value());  // not asked for
     Endpoint const group{.address = IPv4Address{239, 69, 250, 2}, .port = 5004};
     auto port = (*transport)->open_receive(group);
     if (!port) {

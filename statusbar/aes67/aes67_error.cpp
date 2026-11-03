@@ -36,6 +36,8 @@ auto Aes67ErrorCategory::message(int const ev) const -> std::string
             return "no stream configured";
         case Aes67Error::not_sender_clocked:
             return "stream has no sender (asynchronous) media clock";
+        case Aes67Error::rss_not_steered:
+            return "RSS could not be steered to the AF_XDP queue";
     }
     return "unknown aes67 error";
 }

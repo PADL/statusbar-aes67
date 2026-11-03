@@ -409,11 +409,15 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   the tag the destination address lies past the 32-octet window, so no rule can classify
   them by group, and no sender known on AES67 networks sends them. A TCAM of 64 rules (a
   second rule per group, keyed on the MAC) is the path if one appears.
-- RSS: a NIC with several RX queues hashes UDP flows over all of them, so `open()` steers
-  every RSS bucket to `QUEUE` (`XdpTransportOptions::steer_rss`, on by default;
-  `net::set_rss_indirection_all`, `CAP_NET_ADMIN`) and `rss_status()` says whether it could.
-  A NIC without RSS reports `operation_not_supported` and needs one combined channel or a
-  flow-steering rule instead. The table is left steered at close.
+- RSS: a NIC with several RX queues hashes UDP flows over all of them, so `open()` always
+  steers every RSS bucket to `QUEUE` (`net::set_rss_indirection_all`, `CAP_NET_ADMIN`), and
+  fails with `Aes67Error::rss_not_steered` when it cannot (`rss_verdict()`): a spread table
+  would lose groups silently. It steers before the program attaches (on igb an attach resets
+  the adapter); the write is one ioctl, so a refusal leaves the table as it was, and a socket
+  that then fails to open puts the table back. `steer_rss()` is that step alone.
+  A NIC without RSS reports `operation_not_supported` in `rss_status()` and opens; it needs one
+  combined channel or a flow-steering rule. The table is left steered at close. `UdpTransport`
+  never touches RSS: the kernel's sockets take every queue.
 - RTCP: the program steals every frame to a redirected group, whatever its port, so an
   RTCP port's kernel socket would miss reports to a group a receiver here has joined.
   `begin_tick()` therefore parses each frame as UDP (`rtp::parse_udp_frame()`; the RTP
