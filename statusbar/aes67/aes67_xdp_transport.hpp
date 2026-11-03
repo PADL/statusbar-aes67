@@ -18,6 +18,7 @@
 #include "statusbar/net/net_compiled_rule.hpp"
 #include "statusbar/net/net_launch_order.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rss.hpp"
 #include "statusbar/net/net_tc_launch_time.hpp"
 #include "statusbar/net/net_tcam_classifier.hpp"
@@ -89,7 +90,7 @@ class XdpTransport final : public Transport
     static constexpr uint16_t PTP_QUEUE = 2;
 
     /// The launch time each frame on a socket with launch time carries (internal; public for tests):
-    /// CLOCK_TAI now until a lead is in force, then departure plus lead, in commit order
+    /// the PHC's now until a lead is in force, then departure plus lead, in commit order
     /// (net::LaunchOrder). next() on the real-time thread; set_lead_ns() and the accessors any thread.
     class LaunchClock
     {
@@ -343,12 +344,16 @@ class XdpTransport final : public Transport
     /// Why open() went on without the launch time it was asked for (empty: it did not).
     [[nodiscard]] auto launch_time_error() const noexcept -> std::error_code { return launch_time_error_; }
     /// Launch times in force: each RTP packet leaves at its departure plus @p ns; before this, and after
-    /// clear_launch_lead(), every frame goes at CLOCK_TAI now (sent at once in launch-time mode). The
-    /// host sets it while the system clock follows the NIC's PHC and the queue's etf is on. Any thread.
+    /// clear_launch_lead(), every frame goes at now (sent at once in launch-time mode). The host sets it
+    /// while the NIC's PHC is locked to the domain (on stock igc, also followed by the system clock) and
+    /// the queue's etf is on. Any thread.
     void set_launch_lead_ns(uint64_t const ns) noexcept { launch_clock_.set_lead_ns(ns); }
     void clear_launch_lead() noexcept { launch_clock_.clear_lead(); }
     /// The launch lead in force (nullopt: not yet); the ordering's counters. Any thread.
     [[nodiscard]] auto launch_clock() const noexcept -> LaunchClock const& { return launch_clock_; }
+    /// The sending PHC's clock, which stamps an untimed frame and judges a late one (net::phc_now_ns);
+    /// without one every frame is untimed (0), lead or none. Control thread, before ticking starts.
+    auto set_phc_clock(net::ClockFn phc) noexcept -> void { phc_clock_ = std::move(phc); }
     /// Redirect groups' frames tagged with `vid` (an SR class VID) as well as untagged ones, or untagged
     /// only (nullopt), from the next tick. Control thread; a TCAM too small for it: rules_status().
     void set_receive_vid(std::optional<uint16_t> const vid) noexcept
@@ -533,6 +538,7 @@ class XdpTransport final : public Transport
     TxHealth tx_health_;
     RefusalCounter refusals_;  ///< real-time -> any
     LaunchClock launch_clock_;
+    net::ClockFn phc_clock_{};
     std::atomic<bool> reset_socket_stats_{false};  ///< any -> real-time: reset_counters() asked
     std::atomic<int32_t> receive_vid_{-1};         ///< control -> real-time: set_receive_vid(), -1 for none
     std::optional<uint16_t> installed_vid_;        ///< real-time: the VID rules_ were compiled for

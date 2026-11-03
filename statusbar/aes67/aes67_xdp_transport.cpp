@@ -9,21 +9,10 @@
 
 #include <algorithm>
 #include <cassert>
-#include <ctime>
 
 namespace statusbar::aes67 {
 
 namespace {
-
-/// CLOCK_TAI now, in nanoseconds (1 when it cannot be read: a time, and past).
-auto tai_now_ns() noexcept -> uint64_t
-{
-    timespec ts{};
-    if (clock_gettime(CLOCK_TAI, &ts) != 0) {
-        return 1;
-    }
-    return (static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL) + static_cast<uint64_t>(ts.tv_nsec);
-}
 
 /// Whether the NIC at `index` can send timed frames: the build and kernel, then the driver.
 auto probe_launch_time(unsigned int const index) -> Status
@@ -683,7 +672,9 @@ auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, 
     // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
     // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
-        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure_ns, tai_now_ns)));
+        uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (now reads 0)
+        auto const now = [this] { return net::phc_now_ns(phc_clock_); };
+        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, now)));
     }
     return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
 }

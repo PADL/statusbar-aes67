@@ -459,28 +459,30 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   not move with the departure or the lead.
 - `XdpTransport` opened with `XdpTransportOptions::launch_time` (the host found that the driver
   honours it, `net::netdev::launch_time_supported`; a build, kernel or NIC without it opens without
-  and records `launch_time_error()`) gives every frame on the socket a launch time (`LaunchClock`):
-  CLOCK_TAI now until `set_launch_lead_ns()` puts a lead in force, then departure plus lead, never
-  earlier than the last time committed (`net::LaunchOrder`: igc's queue is a FIFO; the last time a
-  second or more ahead of now is a clock step; a time already past at commit, an overrunning tick,
-  goes at once and is counted, as are holds and steps, in `launch_clock().order()`);
-  `clear_launch_lead()` is now again. An untimed send (`send()`, a tick without a time) goes at now.
-  RTCP and SAP go by kernel sockets, never through the socket.
+  and records `launch_time_error()`) gives every frame on the socket a launch time (`LaunchClock`),
+  in the NIC's PHC time: now (`net::phc_now_ns()` of the clock the host gives `set_phc_clock()`;
+  without one, 0: untimed, so every frame goes at once and a lead has no effect) until
+  `set_launch_lead_ns()` puts a lead in force, then departure plus lead, never earlier than the last
+  time committed (`net::LaunchOrder`: igc's queue is a FIFO; the last time a second or more ahead of
+  now is a clock step; a time already past at commit, an overrunning tick, goes at once and is
+  counted, as are holds and steps, in `launch_clock().order()`); `clear_launch_lead()` is now again.
+  An untimed send (`send()`, a tick without a time) goes at now. RTCP and SAP go by kernel sockets,
+  never through the socket.
 - The lead moves the wire time only: the packet leaves at departure plus lead, free of the sending
   CPU's jitter, while its timestamp and the receiver's placement are unchanged, so launch time
   changes no latency; it lets a receiver's link offset cover the lead plus the network transit
   instead of the sender's jitter as well (AES67-2018 Section 7.4). A lead of 0 would be past when
   the tick commits the frame (the NIC sends at once, as without launch time), so the lead is a
   whole tick or more.
-- The NIC honours the time only with the socket's queue in launch-time mode, and igc places a
-  frame by CLOCK_TAI's offset in its cycle against its own PHC, so the queue may be in that mode
-  only while the system clock follows this NIC's PHC: `XdpTransport::settle_launch_time(interface,
-  mode)` lays core's mqprio root (`LAUNCH_TIME_QDISC_MAJOR`, every priority mapped away from
-  `QUEUE`) with an offloaded etf on the socket's queue (`net::tc::settle_launch_time_queue`) when
-  the host finds the clocks agree, and removes the etf when they no longer do; on igc each switch
-  resets the adapter (its PHC time is kept across the reset, `igc_ptp_time_restore`), so the host
-  says so. `unsupported` (igb) looks nothing up and sends nothing. None of this has run on an igc
-  yet.
+- The NIC honours the time only with the socket's queue in launch-time mode:
+  `XdpTransport::settle_launch_time(interface, mode)` lays core's mqprio root
+  (`LAUNCH_TIME_QDISC_MAJOR`, every priority mapped away from `QUEUE`) with an offloaded etf on the
+  socket's queue (`net::tc::settle_launch_time_queue`). On igc the first etf and the removal of the
+  last each reset the adapter (its PHC time is kept across the reset, `igc_ptp_time_restore`), so a
+  host settles it once, before anything streams, and pauses launch time by clearing the lead, not by
+  removing the etf. Stock igc estimates its cycle from CLOCK_TAI, so on it that holds only while the
+  system clock follows the PHC. `unsupported` (igb) looks nothing up and sends nothing. None of this
+  has run on an igc yet.
 - `launch_time_queue(tx_queues)` also puts PTP event traffic on `PTP_QUEUE` (2) with 4 TX queues or
   more (`net::tc::PTP_PRIORITY`, ptp4l's `socket_priority 7`), queue 1 idle and the rest on queue 3,
   as an SR shaper lays them, and keeps its root without launch time: `off` lays the root (a host
