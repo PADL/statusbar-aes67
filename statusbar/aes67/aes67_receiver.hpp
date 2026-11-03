@@ -76,7 +76,7 @@ class Receiver
     [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t> { return ssrc_; }
 
     /// Where this stream's RTCP goes and arrives (the SDP's a=rtcp, else port + 1), marked `dscp`:
-    /// the DSCP this host would send a similar stream with (AES67-2018 Section 6.2). Fails
+    /// the DSCP this host would send a similar stream with (AES67-2023 Clause 6.2). Fails
     /// not_configured, rtcp_multiplexed or no_rtcp_peer. Off the real-time thread.
     [[nodiscard]] auto rtcp_options(uint8_t dscp = rtp::FrameAddressing::DSCP_MEDIA) const -> StatusValue<RtcpOptions>;
     /// The latest ReceiveState, published by drain(). Any thread.

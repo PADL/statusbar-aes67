@@ -150,7 +150,7 @@ class Sender
     /// or channel-order change, mod 256.
     [[nodiscard]] auto info_block_version() const noexcept -> uint8_t { return info_block_version_; }
 
-    /// The DSCP the stream and its RTCP are marked with (AES67-2018 Section 6.2), DSCP_MEDIA until set.
+    /// The DSCP the stream and its RTCP are marked with (AES67-2023 Clause 6.2), DSCP_MEDIA until set.
     /// Call before configure(), off the real-time thread.
     void set_dscp(uint8_t const dscp) noexcept { dscp_ = dscp; }
     [[nodiscard]] auto dscp() const noexcept -> uint8_t { return dscp_; }
@@ -161,7 +161,7 @@ class Sender
     [[nodiscard]] auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status;
     [[nodiscard]] auto vlan() const noexcept -> std::optional<ieee::VlanTag> const& { return vlan_; }
 
-    /// Where this stream's RTCP goes and how it is marked (AES67-2018 Section 6.2: as the stream),
+    /// Where this stream's RTCP goes and how it is marked (AES67-2023 Clause 6.2: as the stream),
     /// or nullopt when not configured.
     [[nodiscard]] auto rtcp_options() const noexcept -> std::optional<RtcpOptions>;
     /// The latest SendState, published by tick(). Any thread.

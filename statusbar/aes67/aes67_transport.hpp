@@ -175,7 +175,7 @@ struct RtcpOptions
     /// transport's) and port (0: destination.port). A group is its own local endpoint.
     Endpoint local{};
     uint8_t ttl{32};  ///< multicast TTL
-    /// AES67-2018 Section 6.2: a sender's stream DSCP; a receiver's, the DSCP it would send a similar stream with.
+    /// AES67-2023 Clause 6.2: a sender's stream DSCP; a receiver's, the DSCP it would send a similar stream with.
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};
 };
 

@@ -246,14 +246,25 @@ TEST(aes67_rtcp, a_senders_dscp_marks_its_stream_and_its_rtcp)
 {
     FakeTransport transport;
     Sender sender{STEREO_L24, {}, transport, "Out"};
-    sender.set_dscp(34);
+    sender.set_dscp(46);  // a Dante network's media class, not the default
     EXPECT_TRUE(sender.configure(Destination{.address = GROUP.address, .port = GROUP.port}).has_value());
     auto const session = RtcpSession::open_sender(sender, transport, options("bridge@10.0.0.2"));
     EXPECT_TRUE(session.has_value());
     EXPECT_EQ(transport.sends.size(), size_t{1});
-    EXPECT_EQ(transport.sends[0].dscp, uint8_t{34});
+    EXPECT_EQ(transport.sends[0].dscp, uint8_t{46});
     EXPECT_EQ(transport.opened.size(), size_t{1});
-    EXPECT_EQ(transport.opened[0].dscp, uint8_t{34});
+    EXPECT_EQ(transport.opened[0].dscp, uint8_t{46});
+}
+
+TEST(aes67_rtcp, media_and_rtcp_default_to_af41)
+{
+    FakeTransport transport;
+    Sender sender{STEREO_L24, {}, transport, "Out"};
+    EXPECT_EQ(sender.dscp(), uint8_t{34});  // AES67-2023 Clause 6.2 Table 1
+    EXPECT_EQ(RtcpSessionOptions{}.dscp, uint8_t{34});
+    EXPECT_EQ(SendOptions{}.dscp, uint8_t{34});
+    EXPECT_EQ(RtcpOptions{}.dscp, uint8_t{34});
+    EXPECT_EQ(rtp::FrameAddressing{}.dscp, uint8_t{34});
 }
 
 TEST(aes67_rtcp, a_sender_sends_an_ipmx_sr_and_its_cname)

@@ -1719,7 +1719,7 @@ TEST(aes67_udp, an_rtcp_port_sends_to_and_receives_from_its_group)
     int tos = 0;
     socklen_t length = sizeof(tos);
     EXPECT_EQ(::getsockopt((*a)->fd(), IPPROTO_IP, IP_TOS, &tos, &length), 0);
-    EXPECT_EQ(tos, 34 << 2);  // AES67-2018 Section 6.2: the stream's DSCP
+    EXPECT_EQ(tos, 34 << 2);  // AES67-2023 Clause 6.2: the stream's DSCP
 
     std::array<uint8_t, 8> const packet{0x80, 0xC9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x07};
     EXPECT_TRUE((*a)->send(packet).has_value());

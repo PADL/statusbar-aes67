@@ -105,7 +105,7 @@ struct RtcpSessionOptions
 {
     std::string cname;           ///< RFC 3550 Section 6.5.1: "<identity>@<address>", at most 255 bytes
     uint32_t interval_ms{1000};  ///< a sender's SR interval (Tmin); a receiver's RR interval is RECEIVER_INTERVAL_MS
-    /// A receiver's RTCP DSCP: what it would send a similar stream with (AES67-2018 Section 6.2).
+    /// A receiver's RTCP DSCP: what it would send a similar stream with (AES67-2023 Clause 6.2).
     /// A sender's is its stream's.
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};
     std::unique_ptr<RtcpCadence> cadence;  ///< null: Rfc3550Interval with a random seed
