@@ -62,9 +62,9 @@ enum class SrClass : uint8_t
         case SrClass::a:
             return 125;
         case SrClass::b:
-            break;
+            return 250;
     }
-    return 250;
+    return 0;
 }
 
 /// An MSRP TSpec (IEEE 802.1Q-2022 Clause 35.2.2.8.4).
