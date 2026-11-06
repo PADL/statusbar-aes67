@@ -674,8 +674,8 @@ auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, 
     // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
         uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (now reads 0)
-        auto const now = [this] { return net::phc_now_ns(phc_clock_); };
-        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, now)));
+        uint64_t const now_ns = net::phc_now_ns(phc_clock_);
+        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, now_ns)));
     }
     return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
 }
@@ -693,8 +693,9 @@ void XdpTransport::receive_frames() noexcept
 {
     auto const ports = std::span<PortState* const>{ports_}.first(port_count_);
     auto const pipes = std::span<RtcpPipe* const>{rtcp_pipes_}.first(rtcp_count_);
+    net::RxTimePoint const now = net::rx_clock_now();  // the pass's one read of the RX clock
     while (held_count_ < RECEIVE_BATCH) {
-        auto slot = context_.rx_start();
+        auto slot = context_.rx_start(now);
         if (!slot || !*slot) {
             break;
         }
