@@ -205,12 +205,24 @@ UdpTransport::~UdpTransport()
 
 auto UdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>>
 {
+    return open_port(destination, std::nullopt);
+}
+
+auto UdpTransport::open_receive_from(Endpoint const& destination, ip::IPv4Address const& source)
+    -> StatusValue<std::unique_ptr<ReceivePort>>
+{
+    return open_port(destination, destination.address.is_multicast() ? std::optional{source} : std::nullopt);
+}
+
+auto UdpTransport::open_port(Endpoint const& destination, std::optional<ip::IPv4Address> const& source)
+    -> StatusValue<std::unique_ptr<ReceivePort>>
+{
     if (!destination.address.is_multicast() && std::ranges::find(unicast_, destination) != unicast_.end()) {
         return failure(std::errc::address_in_use);  // one unicast receiver per address and port
     }
     // Bound to the destination address itself: a group's socket sees only that group, and a
     // unicast receiver's specific bind wins its address:port over the group sockets on the port.
-    auto fd = open_receive_socket(interface_, destination, true);
+    auto fd = open_receive_socket(interface_, destination, true, source);
     if (!fd) {
         return failure(fd.error());
     }

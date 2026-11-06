@@ -194,6 +194,7 @@ void Sender::continue_from(Sender const& previous)
     session_version_ = previous.session_version_;
     dscp_ = previous.dscp_;
     channel_order_ = previous.channel_order_;
+    st2110_ = previous.st2110_;
     info_block_version_ = previous.info_block_version_;
 }
 
@@ -245,6 +246,18 @@ void Sender::set_channel_order(std::string order)
     }
     channel_order_ = std::move(order);
     ++info_block_version_;
+    if (st2110_) {
+        bump_session_version();  // session() names it too
+    }
+}
+
+void Sender::set_st2110(bool const st2110)
+{
+    if (st2110 == st2110_) {
+        return;
+    }
+    st2110_ = st2110;
+    bump_session_version();
 }
 
 auto Sender::channel_order() const -> std::string
@@ -259,6 +272,12 @@ auto Sender::channel_order() const -> std::string
         left -= group;
     }
     return order + ")";
+}
+
+auto Sender::described_channel_order() const -> std::string
+{
+    auto order = channel_order();
+    return sdp::channel_order_channels(order) == format_.channels ? order : std::string{};
 }
 
 auto Sender::rtcp_options() const noexcept -> std::optional<RtcpOptions>
@@ -480,12 +499,14 @@ auto Sender::media_description(ip::IPv4Address const& origin, bool const multica
         .sample_rate = format_.sample_rate,
         .channels = format_.channels,
         .packet_time_us = format_.packet_time_us(),
+        .max_packet_time_us = st2110_ ? std::optional{format_.packet_time_us()} : std::nullopt,
         .direction = sdp::Direction::recvonly,
         .clocks = grandmaster_ ? grandmaster_->references() : sdp::ReferenceClocks{},
         .media_clock = media_clock(),
         .source_filter =
             multicast ? std::optional{sdp::SourceFilter{.destination = destination_.address, .source = origin}} : std::nullopt,
         .clock_domain = clock_domain(),
+        .channel_order = st2110_ ? described_channel_order() : std::string{},
     };
 }
 

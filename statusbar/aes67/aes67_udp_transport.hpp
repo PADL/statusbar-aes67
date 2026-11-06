@@ -11,6 +11,7 @@
 #include "statusbar/aes67/aes67_transport.hpp"
 
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -45,6 +46,9 @@ class UdpTransport final : public Transport
         return is_local(interface_, address);
     }
     [[nodiscard]] auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override;
+    /// A group's socket joined for `source` alone: the kernel delivers nothing else to it.
+    [[nodiscard]] auto open_receive_from(Endpoint const& destination, ip::IPv4Address const& source)
+        -> StatusValue<std::unique_ptr<ReceivePort>> override;
     /// Fails operation_not_supported for a SendOptions::vlan: a socket cannot tag.
     [[nodiscard]] auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override;
     /// A socket bound to the group (joined) or to RtcpOptions::local, marked
@@ -64,6 +68,9 @@ class UdpTransport final : public Transport
   private:
     /// Counts a new receive port, and claims a unicast destination for it.
     void retain(Endpoint const& destination);
+    /// A receive port for `destination`, its group joined for `source` alone when given.
+    [[nodiscard]] auto open_port(Endpoint const& destination, std::optional<ip::IPv4Address> const& source)
+        -> StatusValue<std::unique_ptr<ReceivePort>>;
 
     InterfaceInfo interface_;
     std::vector<Endpoint> unicast_;  ///< destinations of the unicast receive ports (control thread)
