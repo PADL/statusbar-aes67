@@ -406,11 +406,24 @@ auto XdpTransport::rules_status() const noexcept -> Status
 
 auto XdpTransport::open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>>
 {
+    return open_port(destination, std::nullopt);
+}
+
+auto XdpTransport::open_receive_from(Endpoint const& destination, ip::IPv4Address const& source)
+    -> StatusValue<std::unique_ptr<ReceivePort>>
+{
+    return open_port(destination, source);
+}
+
+auto XdpTransport::open_port(Endpoint const& destination, std::optional<ip::IPv4Address> const& source)
+    -> StatusValue<std::unique_ptr<ReceivePort>>
+{
     collect_retired();
     if (auto const checked = check_receive(destination); !checked) {
         return forward_failure(checked);
     }
-    auto membership = net::open_group_membership(destination.address, interface_.index);
+    auto membership = source ? net::open_source_group_membership(destination.address, *source, interface_.index)
+                             : net::open_group_membership(destination.address, interface_.index);
     if (!membership) {
         return forward_failure(membership);
     }

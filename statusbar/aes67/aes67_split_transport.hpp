@@ -41,6 +41,11 @@ class SplitTransport final : public Transport
     {
         return for_address(destination.address).open_receive(destination);
     }
+    [[nodiscard]] auto open_receive_from(Endpoint const& destination, ip::IPv4Address const& source)
+        -> StatusValue<std::unique_ptr<ReceivePort>> override
+    {
+        return for_address(destination.address).open_receive_from(destination, source);
+    }
     /// A unicast destination's port is untagged whatever `options.vlan` says (IEEE 802.1Q-2022 Clause 35.2.2.8.3).
     [[nodiscard]] auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override;
     [[nodiscard]] auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>> override

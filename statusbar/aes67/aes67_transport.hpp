@@ -180,6 +180,9 @@ struct RtcpOptions
     uint8_t ttl{32};  ///< multicast TTL
     /// AES67-2023 Clause 6.2: a sender's stream DSCP; a receiver's, the DSCP it would send a similar stream with.
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};
+    /// A source-specific group's sender (RFC 4607): the group is joined for it alone, as its stream's is, so the
+    /// interface's report stays INCLUDE; nullopt: any source.
+    std::optional<ip::IPv4Address> source;
 };
 
 /// One RTCP session's datagrams. Control or reactor thread only, never the real-time thread;
@@ -213,6 +216,14 @@ class Transport
     }
     /// Receive datagrams sent to `destination`, joining it if it is a group.
     [[nodiscard]] virtual auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> = 0;
+    /// open_receive() of group `destination` joined for `source` alone (RFC 4607 Section 4.1), as a source-specific
+    /// group needs; by default an any-source open_receive(), the receiver filtering by source itself.
+    [[nodiscard]] virtual auto open_receive_from(Endpoint const& destination, ip::IPv4Address const& source)
+        -> StatusValue<std::unique_ptr<ReceivePort>>
+    {
+        (void)source;
+        return open_receive(destination);
+    }
     /// Send to `options.destination`.
     [[nodiscard]] virtual auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> = 0;
     /// RTCP to and from `options.destination`, joining it if it is a group. Not supported by default.

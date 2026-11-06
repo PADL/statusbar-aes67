@@ -137,8 +137,8 @@ class Sender
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
 
-    /// Take `previous`'s send offset, grandmaster, media clock, name, SDP session id and version, DSCP,
-    /// channel order and Info Block version, so this sender's next configure() announces the same session one version on.
+    /// Take `previous`'s send offset, grandmaster, media clock, name, SDP session id and version, DSCP, channel order,
+    /// ST 2110 form and Info Block version, so this sender's next configure() announces the same session one version on.
     /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);
 
@@ -146,6 +146,11 @@ class Sender
     /// empty, the default, gives undefined groups of up to 64: "SMPTE2110.(U64,U64,U08)". Off the real-time thread.
     void set_channel_order(std::string order);
     [[nodiscard]] auto channel_order() const -> std::string;
+    /// Describe the stream as ST 2110-30 Section 6.2 does: session() adds the channel order (`a=fmtp:<pt>
+    /// channel-order=`) and `a=maxptime`, the packet time; off, the default, it has AES67's attributes alone.
+    /// A change bumps the session version. Off the real-time thread.
+    void set_st2110(bool st2110);
+    [[nodiscard]] auto st2110() const noexcept -> bool { return st2110_; }
     /// The IPMX Info Block's version (TR-10-1 Section 8.7): one on with each configure(), grandmaster
     /// or channel-order change, mod 256.
     [[nodiscard]] auto info_block_version() const noexcept -> uint8_t { return info_block_version_; }
@@ -234,6 +239,8 @@ class Sender
     void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
     /// Adds `packets` sent to the SR's counts and publishes them.
     void report_sent(uint32_t packets, uint32_t run_ssrc) noexcept;
+    /// channel_order() when it names the format's channels (else none: an order for other channels misleads).
+    [[nodiscard]] auto described_channel_order() const -> std::string;
     /// The SDP media section this sender describes.
     [[nodiscard]] auto media_description(ip::IPv4Address const& origin, bool multicast) const -> sdp::Media;
 
@@ -242,6 +249,7 @@ class Sender
     bool paused_{false};  ///< pause() since the last tick()
     uint16_t sequence_{0};
     std::string channel_order_;
+    bool st2110_{false};
     uint8_t info_block_version_{0};
     /// Since the run began: the SR's counts (real-time thread).
     struct RtcpCounts
