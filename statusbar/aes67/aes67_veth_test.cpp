@@ -4,10 +4,13 @@
 /// Two UdpTransports on two veth pairs receiving the same group: a datagram arriving on one
 /// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
 /// tagged stream is received through the tagged group rule, a membership on an up VLAN link
-/// beside; a priority-tagged one is not received. Needs root; skips without it.
+/// beside; a priority-tagged one is not received. A UdpTransport: an offer is received from its sender
+/// alone. Needs root (or a user and network namespace, but for AF_XDP); skips without it.
 
+#include "statusbar/aes67/aes67_receiver.hpp"
 #include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
+#include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/test/test.hpp"
@@ -29,6 +32,7 @@
 #include <linux/if_packet.h>
 #include <net/ethernet.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 
 using namespace statusbar;
@@ -69,17 +73,19 @@ class VethPair
     bool ok_{false};
 };
 
-/// Send one UDP datagram to `group`:`port` from `source` as a raw frame on `interface`, tagged with `vlan` if given.
+/// Send one UDP datagram to `group`:`port` from `source` as a raw frame on `interface`, tagged with `vlan` if given;
+/// to `mac` if given, else the group's MAC.
 auto inject(
     std::string const& interface,
     IPv4Address const& source,
     IPv4Address const& group,
     uint16_t const port,
-    std::optional<ieee::VlanTag> const vlan = std::nullopt) -> bool
+    std::optional<ieee::VlanTag> const vlan = std::nullopt,
+    std::optional<ieee::Eui48> const mac = std::nullopt) -> bool
 {
     net::FileDescriptor const fd{::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP))};
     rtp::FrameAddressing const addressing{
-        .destination_mac = rtp::multicast_mac(group),
+        .destination_mac = mac.value_or(rtp::multicast_mac(group)),
         .source_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x02},
         .vlan = vlan,
         .source_address = source,
@@ -135,6 +141,18 @@ auto sent_and_received(XdpTransport& sending, SendPort& sender, XdpTransport& re
         receiving.end_tick();
     }
     return total;
+}
+
+/// `interface`'s MAC address (SIOCGIFHWADDR, which a network namespace answers and sysfs may not).
+auto mac_of(std::string const& interface) -> std::optional<ieee::Eui48>
+{
+    ifreq request{};
+    if (!net::ifreq_ioctl(interface, SIOCGIFHWADDR, request)) {
+        return std::nullopt;
+    }
+    ieee::Eui48 mac{};
+    std::ranges::copy(net::hwaddr_bytes(request), mac.value.begin());
+    return mac;
 }
 
 }  // namespace
@@ -312,6 +330,39 @@ TEST(aes67_veth, a_priority_tagged_datagram_reaches_the_group_socket)
     EXPECT_EQ(received(**port), size_t{1});
     EXPECT_TRUE(inject("a67wveth1", IPv4Address{10, 236, 0, 2}, rtp.address, rtp.port, ieee::make_vlan_tag(7, false, 5)));
     EXPECT_EQ(received(**port), size_t{0});
+}
+
+// An offer (AES67-2023 Clause 8.5.2) arriving on the wire at the interface's MAC and address reaches the receiver's
+// kernel socket, from its sender alone. Runs unprivileged in a user and network namespace too.
+TEST(aes67_veth, an_offer_is_received_at_the_interface_from_its_sender_alone)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67oveth1", "a67oveth0", "10.238.0.2/24"};
+    auto transport = pair.ok() ? UdpTransport::open("a67oveth1") : StatusValue<std::unique_ptr<UdpTransport>>{nullptr};
+    auto const mac = mac_of("a67oveth1");
+    if (!transport || !*transport || !mac) {
+        std::println("  skipped: cannot create a veth pair");
+        return;
+    }
+    IPv4Address const sender{10, 238, 0, 9};
+    sdp::Session offer{.origin_address = "10.238.0.9", .connection = sdp::Connection{.address = sender}};
+    offer.media.push_back(
+        {.port = 45250,
+         .payload_type = 97,
+         .encoding = sdp::Encoding::l24,
+         .channels = 2,
+         .media_clock = sdp::MediaClock::direct(0)});
+    Receiver receiver{{.encoding = sdp::Encoding::l24, .channels = 2}, {}, **transport};
+    EXPECT_TRUE(receiver.configure(offer).has_value());
+    EXPECT_TRUE(inject("a67oveth0", IPv4Address{10, 238, 0, 8}, IPv4Address{10, 238, 0, 2}, 45250, std::nullopt, mac));
+    EXPECT_TRUE(inject("a67oveth0", sender, IPv4Address{10, 238, 0, 2}, 45250, std::nullopt, mac));
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    receiver.drain(0);
+    EXPECT_EQ(receiver.counters().drops.source, uint64_t{1});
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
 }
 
 TEST_MAIN(statusbar_aes67, aes67_veth_test)

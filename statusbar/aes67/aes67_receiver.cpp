@@ -49,6 +49,20 @@ static_assert(WINDOW <= 128);
 
 }  // namespace
 
+auto receive_endpoint(
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Transport const& transport)
+    -> StatusValue<Endpoint>
+{
+    auto const& address = connection.address;
+    if (address.is_multicast() || (!address.is_unspecified() && transport.is_local_address(address))) {
+        return Endpoint{.address = address, .port = media.port};
+    }
+    if (!address.is_unspecified() && ip::parse_ipv4(session.origin_address) == address) {
+        return Endpoint{.address = transport.local_address(), .port = media.port};
+    }
+    return failure(Aes67Error::foreign_destination);
+}
+
 Receiver::Receiver(StreamFormat const& format, FrameHandler handler, Transport& transport) noexcept
     : format_{format}
     , handler_{std::move(handler)}
@@ -73,21 +87,26 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
 
 auto Receiver::open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection) -> Status
 {
-    if (auto const opened = reopen({.address = connection.address, .port = media.port}); !opened) {
+    auto const endpoint = receive_endpoint(session, media, connection, transport_);
+    if (auto const opened = endpoint ? reopen(*endpoint) : refused(endpoint.error()); !opened) {
         return opened;
     }
-    apply_media(session, media, connection);
+    apply_media(session, media, connection, *endpoint);
     state_ = State::ready;
     error_.clear();
     return success();
 }
 
-void Receiver::apply_media(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
+void Receiver::apply_media(
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
 {
     payload_type_ = media.payload_type;
     offset_.store(initial_offset(session.effective_media_clock(media)), std::memory_order_release);
     source_filter_ = matching_source(session.effective_source_filter(media), connection.address);
-    set_rtcp(session, media, connection);
+    if (!source_filter_ && endpoint.address != connection.address) {
+        source_filter_ = connection.address;  // an offer: c= is the sender (AES67-2023 Clause 8.5.2)
+    }
+    set_rtcp(session, media, connection, endpoint);
 }
 
 auto Receiver::reopen(Endpoint const& destination) -> Status
@@ -96,12 +115,17 @@ auto Receiver::reopen(Endpoint const& destination) -> Status
     receive_state_.store({});  // not drained while cleared, so drain() is not storing too
     auto port = transport_.open_receive(destination);
     if (!port) {
-        state_ = State::error;
-        error_ = port.error();
-        return failure(port.error());
+        return refused(port.error());
     }
     port_ = std::move(*port);
     return success();
+}
+
+auto Receiver::refused(std::error_code const error) noexcept -> Status
+{
+    state_ = State::error;
+    error_ = error;
+    return failure(error);
 }
 
 auto Receiver::initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t
@@ -109,9 +133,10 @@ auto Receiver::initial_offset(std::optional<sdp::MediaClock> const& clock) const
     return !sender_clock_ && clock && clock->direct_offset ? OFFSET_SET | *clock->direct_offset : 0;
 }
 
-void Receiver::set_rtcp(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
+void Receiver::set_rtcp(
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
 {
-    auto const options = rtcp_options_for(session, media, connection);
+    auto const options = rtcp_options_for(session, media, connection, endpoint);
     rtcp_.reset();
     rtcp_error_.clear();
     if (options) {
@@ -121,15 +146,16 @@ void Receiver::set_rtcp(sdp::Session const& session, sdp::Media const& media, sd
     }
 }
 
-auto Receiver::rtcp_options_for(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection) const
+auto Receiver::rtcp_options_for(
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& received) const
     -> StatusValue<RtcpOptions>
 {
     if (media.rtcp_mux) {
         return failure(Aes67Error::rtcp_multiplexed);
     }
     Endpoint const endpoint = media.rtcp
-        ? Endpoint{.address = media.rtcp->address.value_or(connection.address), .port = media.rtcp->port}
-        : rtcp_endpoint_of({.address = connection.address, .port = media.port});
+        ? Endpoint{.address = media.rtcp->address.value_or(received.address), .port = media.rtcp->port}
+        : rtcp_endpoint_of(received);
     RtcpOptions options{
         .destination = endpoint,
         .local = {},
@@ -137,8 +163,7 @@ auto Receiver::rtcp_options_for(sdp::Session const& session, sdp::Media const& m
     };
     if (media.rtcp && media.rtcp->address && !endpoint.address.is_multicast()) {
         // RFC 3605: the address is where reports go; they arrive here at the same port.
-        options.local = {
-            .address = connection.address.is_multicast() ? ip::IPv4Address{} : connection.address, .port = endpoint.port};
+        options.local = {.address = received.address.is_multicast() ? ip::IPv4Address{} : received.address, .port = endpoint.port};
     } else if (!endpoint.address.is_multicast()) {
         // A unicast stream: reports arrive at this address and go to the sender, at the same port.
         auto const peer = source_filter_ ? source_filter_ : ip::parse_ipv4(session.origin_address);

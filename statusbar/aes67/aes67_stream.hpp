@@ -190,7 +190,7 @@ struct Destination
     ip::IPv4Address address;  ///< multicast or unicast
     uint16_t port{5004};
     uint8_t payload_type{96};
-    uint8_t ttl{sdp::Connection::DEFAULT_MULTICAST_TTL};  ///< for a multicast address
+    uint8_t ttl{sdp::Connection::DEFAULT_MULTICAST_TTL};  ///< the IPv4 TTL; only a group's goes in the SDP
 
     auto operator==(Destination const&) const noexcept -> bool = default;
 };
