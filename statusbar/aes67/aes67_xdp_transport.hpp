@@ -73,9 +73,11 @@ class XdpTransport final : public Transport
     static constexpr size_t TX_POOL = 64;
     /// The fill ring's entries.
     static constexpr size_t FILL_RING = 1024;
+    /// Frames receive ports may keep past their tick at once (ReceivePort::hold()).
+    static constexpr size_t MAX_KEPT = 512;
     /// UMEM frames: the fill ring's worth plus as many again for frames in the
-    /// RX ring, held for receivers, in the TX pool and in flight.
-    static constexpr size_t UMEM_FRAMES = 2 * FILL_RING;
+    /// RX ring, held for receivers, in the TX pool and in flight, plus those kept.
+    static constexpr size_t UMEM_FRAMES = (2 * FILL_RING) + MAX_KEPT;
     /// Distinct groups the receivers may join.
     static constexpr size_t MAX_GROUPS = 16;
     /// Rules installed at most: a group's each, then the tagged rule, as far as the TCAM holds them.
@@ -194,6 +196,29 @@ class XdpTransport final : public Transport
         Endpoint destination_;
         itc::QueuedPipe<Frame, DEPTH + 1> queue_;
         std::atomic<uint64_t> dropped_{0};  ///< written by the real-time thread only
+    };
+
+    /// Which received frames are this tick's and which receive ports keep past it, by UMEM frame index
+    /// (internal; public for tests). Real-time thread.
+    class FrameKeeper
+    {
+      public:
+        /// Frame `index` arrived this tick: its next begin_tick() releases it unless kept.
+        void arrived(size_t const index) noexcept { counts_[index] |= THIS_TICK; }
+        /// One more hold on `index`; false (nothing changed) once MAX_KEPT frames are kept and it is not one.
+        [[nodiscard]] auto keep(size_t index) noexcept -> bool;
+        /// One hold fewer on `index`: true when the frame goes back now (its last, and not this tick's).
+        [[nodiscard]] auto drop(size_t index) noexcept -> bool;
+        /// The tick of `index` ends: true when it goes back now (not kept).
+        [[nodiscard]] auto tick_ended(size_t index) noexcept -> bool;
+        /// Frames kept past their tick, or this tick's with a hold.
+        [[nodiscard]] auto kept() const noexcept -> size_t { return kept_; }
+
+      private:
+        static constexpr uint16_t THIS_TICK = 0x8000;
+        static constexpr uint16_t HOLDS = 0x7FFF;
+        std::array<uint16_t, UMEM_FRAMES> counts_{};  ///< per frame: THIS_TICK, and its holds
+        size_t kept_{0};
     };
 
     /// Frames held back for senders (internal; public for tests).
@@ -457,13 +482,16 @@ class XdpTransport final : public Transport
         std::span<PortState* const> ports, std::optional<uint16_t> vid, std::span<net::CompiledRule<32>> rules) noexcept
         -> std::pair<size_t, std::error_code>;
 
-    /// Offers one received Ethernet frame to `ports` and `pipes`, as begin_tick() does, counting a
-    /// refusal in `refusals`; true when a port kept it, to be held until the next tick (internal; public for tests).
+    /// Offers one received Ethernet frame, UMEM handle `handle`, to `ports` and `pipes`, as begin_tick() does, counting
+    /// a refusal in `refusals`; true when a port kept it, to be held until the next tick (internal; public for tests).
     [[nodiscard]] static auto dispatch_frame(
         std::span<uint8_t const> frame,
         std::span<PortState* const> ports,
         std::span<RtcpPipe* const> pipes,
-        RefusalCounter& refusals) noexcept -> bool;
+        RefusalCounter& refusals,
+        uint64_t handle = NO_FRAME) noexcept -> bool;
+    /// Frames receive ports keep past their tick now (ReceivePort::hold()). Real-time thread.
+    [[nodiscard]] auto kept_frames() const noexcept -> size_t { return keeper_.kept(); }
 
   private:
     friend class Port;
@@ -477,6 +505,11 @@ class XdpTransport final : public Transport
 
     /// Control thread: a port's handle is gone.
     void port_closed(PortState* state) noexcept;
+    /// Real-time thread: ReceivePort::hold() and release() of a datagram's frame.
+    [[nodiscard]] auto keep(uint64_t frame) noexcept -> bool;
+    void unkeep(uint64_t frame) noexcept;
+    /// The UMEM frame index of `frame`, or nullopt for none of this socket's.
+    [[nodiscard]] auto frame_index(uint64_t frame) const noexcept -> std::optional<size_t>;
     /// Control thread: counts one port fewer on `group`.
     void release_group(ip::IPv4Address const& group) noexcept;
     /// Control thread: free what the real-time thread retired.
@@ -537,6 +570,7 @@ class XdpTransport final : public Transport
     size_t rtcp_count_{0};
     std::array<uint64_t, RECEIVE_BATCH> held_{};
     size_t held_count_{0};
+    FrameKeeper keeper_;
     TxPool tx_pool_;
     std::array<net::CompiledRule<32>, MAX_RULES> rules_{};
     TxHealth tx_health_;

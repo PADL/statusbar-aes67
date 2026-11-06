@@ -56,6 +56,9 @@ class XdpTransport::Port final : public ReceivePort
 
     [[nodiscard]] auto error() const noexcept -> std::error_code override { return state_->rule_error; }
 
+    [[nodiscard]] auto hold(Datagram const& datagram) noexcept -> bool override { return transport_.keep(datagram.frame); }
+    void release(uint64_t const frame) noexcept override { transport_.unkeep(frame); }
+
   private:
     XdpTransport& transport_;
     PortState* state_;
@@ -616,9 +619,65 @@ auto XdpTransport::compile_rules(
 void XdpTransport::release_held() noexcept
 {
     for (size_t i = 0; i < held_count_; ++i) {
-        (void)context_.rx_release(held_[i]);
+        auto const index = frame_index(held_[i]);
+        if (!index || keeper_.tick_ended(*index)) {
+            (void)context_.rx_release(held_[i]);
+        }
     }
     held_count_ = 0;
+}
+
+auto XdpTransport::frame_index(uint64_t const frame) const noexcept -> std::optional<size_t>
+{
+    size_t const size = context_.umem_frame_size();
+    if (size == 0 || frame == NO_FRAME || frame / size >= UMEM_FRAMES) {
+        return std::nullopt;
+    }
+    return static_cast<size_t>(frame / size);
+}
+
+auto XdpTransport::keep(uint64_t const frame) noexcept -> bool
+{
+    auto const index = frame_index(frame);
+    return index && keeper_.keep(*index);
+}
+
+void XdpTransport::unkeep(uint64_t const frame) noexcept
+{
+    if (auto const index = frame_index(frame); index && keeper_.drop(*index)) {
+        (void)context_.rx_release(frame);
+    }
+}
+
+auto XdpTransport::FrameKeeper::keep(size_t const index) noexcept -> bool
+{
+    if ((counts_[index] & HOLDS) == 0) {
+        if (kept_ == MAX_KEPT) {
+            return false;
+        }
+        ++kept_;
+    }
+    ++counts_[index];
+    return true;
+}
+
+auto XdpTransport::FrameKeeper::drop(size_t const index) noexcept -> bool
+{
+    if ((counts_[index] & HOLDS) == 0) {
+        return false;  // not kept: nothing to give back
+    }
+    --counts_[index];
+    if ((counts_[index] & HOLDS) != 0) {
+        return false;
+    }
+    --kept_;
+    return (counts_[index] & THIS_TICK) == 0;  // this tick's goes back at its end
+}
+
+auto XdpTransport::FrameKeeper::tick_ended(size_t const index) noexcept -> bool
+{
+    counts_[index] &= static_cast<uint16_t>(~THIS_TICK);
+    return (counts_[index] & HOLDS) == 0;
 }
 
 void XdpTransport::refill_tx_pool() noexcept
@@ -701,8 +760,11 @@ void XdpTransport::receive_frames() noexcept
             break;
         }
         auto const& rx = **slot;
-        if (dispatch_frame(rx.buffer, ports, pipes, refusals_)) {
+        if (dispatch_frame(rx.buffer, ports, pipes, refusals_, rx.handle)) {
             held_[held_count_++] = rx.handle;
+            if (auto const index = frame_index(rx.handle)) {
+                keeper_.arrived(*index);
+            }
         } else {
             (void)context_.rx_release(rx.handle);
         }
@@ -767,13 +829,13 @@ auto offer_to_rtcp(
     return matched;
 }
 
-/// A frame's destination, and its datagram with its source.
-auto addressed(rtp::UdpFrame const& frame) noexcept -> std::pair<Endpoint, Datagram>
+/// A frame's destination, and its datagram with its source, in UMEM frame `handle`.
+auto addressed(rtp::UdpFrame const& frame, uint64_t const handle) noexcept -> std::pair<Endpoint, Datagram>
 {
     auto const& a = frame.addressing;
     return {
         Endpoint{.address = a.destination_address, .port = a.destination_port},
-        Datagram{.payload = frame.datagram, .source = {.address = a.source_address, .port = a.source_port}},
+        Datagram{.payload = frame.datagram, .source = {.address = a.source_address, .port = a.source_port}, .frame = handle},
     };
 }
 
@@ -783,14 +845,15 @@ auto XdpTransport::dispatch_frame(
     std::span<uint8_t const> const frame,
     std::span<PortState* const> const ports,
     std::span<RtcpPipe* const> const pipes,
-    RefusalCounter& refusals) noexcept -> bool
+    RefusalCounter& refusals,
+    uint64_t const handle) noexcept -> bool
 {
     auto const udp = rtp::parse_udp_frame(frame);
     if (!udp) {
         refusals.count(Refusal::malformed);
         return false;
     }
-    auto const [destination, datagram] = addressed(*udp);
+    auto const [destination, datagram] = addressed(*udp, handle);
     auto const offered = offer_to_ports(ports, destination, datagram, refusals);
     if (!offer_to_rtcp(pipes, destination, datagram) && offered == Offered::unmatched) {
         refusals.count(Refusal::unmatched);

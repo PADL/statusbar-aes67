@@ -35,6 +35,42 @@ TEST(aes67_xdp, ships_a_umem_sized_for_the_rings_and_the_tx_pool)
     EXPECT_TRUE(config.pin_path.empty());
 }
 
+// A frame a port keeps outlives its tick; one released within its tick goes back at the tick's end, not twice.
+TEST(aes67_xdp, a_kept_frame_goes_back_on_its_last_release_and_never_twice)
+{
+    XdpTransport::FrameKeeper keeper;
+    keeper.arrived(7);
+    EXPECT_TRUE(keeper.keep(7));
+    EXPECT_TRUE(keeper.keep(7));  // two receivers of one stream
+    EXPECT_FALSE(keeper.tick_ended(7));
+    EXPECT_FALSE(keeper.drop(7));
+    EXPECT_EQ(keeper.kept(), size_t{1});
+    EXPECT_TRUE(keeper.drop(7));
+    EXPECT_EQ(keeper.kept(), size_t{0});
+    EXPECT_FALSE(keeper.drop(7));  // released already: nothing to give back
+    keeper.arrived(8);
+    EXPECT_TRUE(keeper.keep(8));
+    EXPECT_FALSE(keeper.drop(8));  // still this tick's: its end gives it back
+    EXPECT_TRUE(keeper.tick_ended(8));
+    keeper.arrived(9);
+    EXPECT_TRUE(keeper.tick_ended(9));  // never kept
+}
+
+// Past MAX_KEPT frames a hold is refused (the receiver copies instead), so the fill ring keeps its share.
+TEST(aes67_xdp, holds_past_max_kept_frames_are_refused)
+{
+    XdpTransport::FrameKeeper keeper;
+    for (size_t i = 0; i < XdpTransport::MAX_KEPT; ++i) {
+        EXPECT_TRUE(keeper.keep(i));
+    }
+    EXPECT_FALSE(keeper.keep(XdpTransport::MAX_KEPT));
+    EXPECT_TRUE(keeper.keep(0));  // a frame already kept takes another hold
+    EXPECT_FALSE(keeper.drop(0));
+    EXPECT_TRUE(keeper.drop(1));
+    EXPECT_TRUE(keeper.keep(XdpTransport::MAX_KEPT));
+    EXPECT_TRUE(XdpTransport::UMEM_FRAMES >= (2 * XdpTransport::FILL_RING) + XdpTransport::MAX_KEPT);
+}
+
 TEST(aes67_xdp, a_whole_frame_fits_a_receive_buffer_sized_in_kib)
 {
     // igb writes RX buffers in 1 KiB units below the UMEM frame less the kernel's
@@ -531,6 +567,18 @@ TEST(aes67_xdp, a_tagged_frame_reaches_the_port_of_its_group)
     Endpoint const alias{.address = IPv4Address{239, 197, 1, 2}, .port = 5004};
     EXPECT_FALSE(XdpTransport::dispatch_frame(rtp_frame_to(alias, ieee::make_vlan_tag(2, false, 3)), ports, {}, refusals));
     EXPECT_EQ(refusals.load().unmatched, uint64_t{1});
+}
+
+// A port's datagram carries the frame it lies in, for ReceivePort::hold().
+TEST(aes67_xdp, a_dispatched_datagram_names_its_frame)
+{
+    Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    XdpTransport::PortState port{stream, net::FileDescriptor{}};
+    std::array<XdpTransport::PortState*, 1> const ports{&port};
+    RefusalCounter refusals;
+    EXPECT_TRUE(XdpTransport::dispatch_frame(rtp_frame_to(stream, std::nullopt), ports, {}, refusals, 0x3000 + 256));
+    EXPECT_EQ(port.pending_count, size_t{1});
+    EXPECT_EQ(port.pending[0].frame, uint64_t{0x3000 + 256});
 }
 
 namespace {

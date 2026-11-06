@@ -41,8 +41,8 @@ class Receiver
     void set_sender_clock(bool const sender) noexcept { sender_clock_ = sender; }
     [[nodiscard]] auto sender_clock() const noexcept -> bool { return sender_clock_; }
 
-    /// Receive the stream `session.media[media_index]`, replacing any before. A direct stream's offset
-    /// is the SDP's; a sender-clocked stream has none until set_offset().
+    /// Receive the stream `session.media[media_index]`, replacing any before (release its kept frames first).
+    /// A direct stream's offset is the SDP's; a sender-clocked stream has none until set_offset().
     [[nodiscard]] auto configure(sdp::Session const& session, size_t media_index = 0) -> Status;
     /// The RTP offset (timestamp minus sample index, mod 2^32) drain() places packets by, replacing
     /// any before; a sender-clocked stream's packets are learnt but dropped until it is set, and a new
@@ -54,8 +54,14 @@ class Receiver
         uint64_t const value = offset_.load(std::memory_order_acquire);
         return (value & OFFSET_SET) != 0 ? std::optional{static_cast<uint32_t>(value)} : std::nullopt;
     }
-    /// Stop receiving: leave the group, forget the stream.
+    /// Stop receiving: leave the group, forget the stream. Release every kept frame (hold_frame()) first.
     void clear() noexcept;
+
+    /// From a FrameHandler: keep the frame the frames being handled lie in (ReceivePort::hold()), their bytes
+    /// valid until release_frame() of the frame returned; nullopt when the port cannot keep it.
+    [[nodiscard]] auto hold_frame() noexcept -> std::optional<uint64_t>;
+    /// Give back a frame hold_frame() kept (ReceivePort::release()). The draining thread.
+    void release_frame(uint64_t frame) noexcept;
 
     /// Take what has arrived and hand it on, with indices about `now_index`
     /// (the media clock's index at the current PTP time), behind the due-tick gate.
@@ -125,8 +131,9 @@ class Receiver
     [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames) noexcept -> bool;
     /// Notes an accepted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.
     void note_arrival(uint32_t timestamp, uint64_t now_index) noexcept;
-    /// Hands a placed packet to the handler at its sample index and counts it.
-    void deliver(rtp::RtpPacket const& packet, uint32_t frames, uint64_t offset, uint64_t now_index) noexcept;
+    /// Hands a placed packet of `datagram` to the handler at its sample index and counts it.
+    void deliver(
+        Datagram const& datagram, rtp::RtpPacket const& packet, uint32_t frames, uint64_t offset, uint64_t now_index) noexcept;
     /// Restarts the reorder window at `sequence`.
     void start_window(uint16_t sequence) noexcept;
     /// Moves the window `ahead` to `sequence`, counting the packets skipped as lost.
@@ -171,6 +178,7 @@ class Receiver
         bool heard{false};          ///< a packet of the learnt source was accepted
     };
     DrainState this_drain_{};
+    Datagram const* handling_{nullptr};  ///< the datagram whose frames the handler is given (hold_frame())
 
     // RFC 3550 Appendix A.8 interarrival jitter, and what drain() publishes.
     uint32_t jitter_x16_{0};

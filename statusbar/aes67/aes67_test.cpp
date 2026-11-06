@@ -152,11 +152,20 @@ class LoopTransport final : public Transport
                     continue;
                 }
                 held.push_back(std::move(packet.bytes));
-                out[n++] = {.payload = held.back(), .source = transport.source};
+                out[n++] = {.payload = held.back(), .source = transport.source, .frame = transport.next_frame++};
             }
             return n;
         }
         [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.port_error; }
+        [[nodiscard]] auto hold(Datagram const& datagram) noexcept -> bool override
+        {
+            if (!transport.holdable) {
+                return false;
+            }
+            transport.kept.push_back(datagram.frame);
+            return true;
+        }
+        void release(uint64_t const frame) noexcept override { transport.released.push_back(frame); }
         LoopTransport& transport;
         Endpoint destination;
         std::deque<std::vector<uint8_t>> held;
@@ -236,6 +245,10 @@ class LoopTransport final : public Transport
     bool refuse_tag{false};             ///< set_vlan() refuses a tag, as a socket does
     std::optional<ieee::VlanTag> vlan;  ///< the open port's tag
     size_t receives{0};                 ///< receive() calls
+    bool holdable{false};               ///< receive ports keep frames (ReceivePort::hold())
+    uint64_t next_frame{0};             ///< the next datagram's frame
+    std::vector<uint64_t> kept;         ///< frames held, in order
+    std::vector<uint64_t> released;     ///< frames released, in order
 };
 
 auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
@@ -1291,6 +1304,30 @@ TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
     receiver.drain(later + FPP);
     EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{0x5555});
     EXPECT_EQ(sink.blocks.back().first_index, later + FPP);
+}
+
+// A handler may keep the frame of the packet it is handed, through the receiver, and only then.
+TEST(aes67_receiver, a_handler_keeps_the_frame_of_the_packet_it_is_handed)
+{
+    LoopTransport transport;
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    std::vector<std::optional<uint64_t>> holds;
+    Receiver* self = nullptr;
+    Receiver receiver{
+        STEREO_L24, [&](uint64_t, uint32_t, std::span<uint8_t const>) { holds.push_back(self->hold_frame()); }, transport};
+    self = &receiver;
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    EXPECT_FALSE(receiver.hold_frame().has_value());  // no packet being handled
+    transport.queue.push_back({group, rtp_packet(1, 1000, 0x1234, 97)});
+    receiver.drain(1048);
+    transport.holdable = true;
+    transport.queue.push_back({group, rtp_packet(2, 1048, 0x1234, 97)});
+    receiver.drain(1096);
+    EXPECT_EQ(holds.size(), size_t{2});
+    EXPECT_FALSE(holds[0].has_value());  // the port could not keep it
+    EXPECT_TRUE(holds[1].has_value() && *holds[1] == 1 && transport.kept == std::vector<uint64_t>{1});
+    receiver.release_frame(1);
+    EXPECT_TRUE(transport.released == std::vector<uint64_t>{1});
 }
 
 TEST(aes67_receiver, each_refused_packet_is_counted_under_its_reason)
