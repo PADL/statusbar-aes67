@@ -159,11 +159,9 @@ class SendPort
         (void)departure_ns;
         return send_rendered(header, payload_length, render);
     }
-    /// Queue a packet whose payload is `payload`'s buffers one after another, sent where they lie, not copied
-    /// (a transport whose transmit shares its receive frames: XdpTransport on a shared UMEM); `departure_ns` as
-    /// send_rendered_at(). With `headers_before` the bytes before the first buffer are the caller's to overwrite
-    /// (a held frame's own headers), so the headers may go there. False, nothing queued, when it cannot (the
-    /// default): the caller sends otherwise.
+    /// Queue a packet of `payload`'s buffers sent where they lie (XdpTransport on a shared UMEM), as send_rendered_at();
+    /// with `headers_before` the bytes before the first buffer are the caller's to write the headers over. False, nothing
+    /// queued, when it cannot (the default).
     [[nodiscard]] virtual auto send_gathered_at(
         rtp::RtpHeader const& header,
         std::span<std::span<uint8_t const> const> const payload,
@@ -260,12 +258,17 @@ class Transport
     /// Start the transport's counters afresh: receive_refusals() now, a socket's own at its next
     /// tick; what it refuses meanwhile may go uncounted. Any thread. Default: nothing counted.
     virtual void reset_counters() noexcept {}
+    /// Whether its receive ports keep frames past their tick (ReceivePort::hold()). Default: false.
+    [[nodiscard]] virtual auto holds_frames() const noexcept -> bool { return false; }
     /// Whether the frames its receive ports hold lie where another transport sharing them can send them from
     /// (a UMEM shared across sockets). Default: false.
     [[nodiscard]] virtual auto frames_shared() const noexcept -> bool { return false; }
-    /// The buffers one packet's payload may be sent from (SendPort::send_gathered_at()), its headers written
-    /// before the first; 0: none (the default).
+    /// The buffers one packet's payload may be sent from (SendPort::send_gathered_at()), its headers in a frame
+    /// of their own; 0: none (the default).
     [[nodiscard]] virtual auto gather_buffers() const noexcept -> size_t { return 0; }
+    /// Whether a gathered packet's headers may go over the bytes before its first buffer instead, one buffer
+    /// more for its payload (SendPort::send_gathered_at()'s `headers_before`). Default: false.
+    [[nodiscard]] virtual auto writes_headers_before() const noexcept -> bool { return false; }
 };
 
 }  // namespace statusbar::aes67

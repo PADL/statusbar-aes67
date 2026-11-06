@@ -145,9 +145,10 @@ class Receiver
     FrameHandler handler_;
     Transport& transport_;
     std::unique_ptr<ReceivePort> port_;
+    Datagram const* handling_{nullptr};  ///< the datagram whose frames the handler is given (hold_frame())
 
-    uint8_t payload_type_{0};
     std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet
+    uint8_t payload_type_{0};
     bool sender_clock_{false};
     std::optional<ip::IPv4Address> source_filter_;
     std::optional<RtcpOptions> rtcp_;  ///< from configure(), without the DSCP
@@ -178,7 +179,6 @@ class Receiver
         bool heard{false};          ///< a packet of the learnt source was accepted
     };
     DrainState this_drain_{};
-    Datagram const* handling_{nullptr};  ///< the datagram whose frames the handler is given (hold_frame())
 
     // RFC 3550 Appendix A.8 interarrival jitter, and what drain() publishes.
     uint32_t jitter_x16_{0};
