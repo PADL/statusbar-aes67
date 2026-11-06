@@ -502,14 +502,18 @@ class XdpTransport final : public Transport
         uint64_t handle = NO_FRAME) noexcept -> bool;
     /// Frames receive ports keep past their tick now (ReceivePort::hold()). Real-time thread.
     [[nodiscard]] auto kept_frames() const noexcept -> size_t { return keeper_.kept(); }
+    /// Its receive ports keep frames (FrameKeeper).
+    [[nodiscard]] auto holds_frames() const noexcept -> bool override { return true; }
     /// On a shared UMEM (Options::shared_umem): true.
     [[nodiscard]] auto frames_shared() const noexcept -> bool override { return shared_ != nullptr; }
-    /// On a shared UMEM, the socket's buffers a frame (net::XdpContext::tx_segments()); else 0.
+    /// On a shared UMEM, the socket's buffers a frame (net::XdpContext::tx_segments()) but the headers'; else 0.
     [[nodiscard]] auto gather_buffers() const noexcept -> size_t override
     {
         size_t const segments = context_.tx_segments();
-        return shared_ != nullptr && segments > 1 ? segments : 0;
+        return shared_ != nullptr && segments > 1 ? segments - 1 : 0;
     }
+    /// Whenever it gathers.
+    [[nodiscard]] auto writes_headers_before() const noexcept -> bool override { return gather_buffers() != 0; }
 
   private:
     friend class Port;
@@ -578,7 +582,7 @@ class XdpTransport final : public Transport
         rtp::RtpHeader const& header,
         std::span<std::span<uint8_t const> const> payload,
         size_t length,
-        int64_t launch) noexcept -> bool;
+        uint64_t departure_ns) noexcept -> bool;
     /// The RTP frame's headers for a `length`-octet payload written over the bytes before `first`, in its frame
     /// with room below for the launch time: the headers and `first` as one buffer, or nullopt.
     [[nodiscard]] auto headers_before(
@@ -592,7 +596,7 @@ class XdpTransport final : public Transport
         rtp::RtpHeader const& header,
         std::span<std::span<uint8_t const> const> payload,
         size_t length,
-        int64_t launch) noexcept -> bool;
+        uint64_t departure_ns) noexcept -> bool;
 
     InterfaceInfo interface_;
     net::XdpContext context_;

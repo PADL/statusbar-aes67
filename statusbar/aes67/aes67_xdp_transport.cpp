@@ -785,9 +785,9 @@ auto XdpTransport::send_gathered(
     size_t const length =
         std::ranges::fold_left(payload, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
     if (payload.size() < segments) {
-        return gather_after_headers(addressing, header, payload, length, launch_for(departure_ns));
+        return gather_after_headers(addressing, header, payload, length, departure_ns);
     }
-    return headers_before && gather_in_place(addressing, header, payload, length, launch_for(departure_ns));
+    return headers_before && gather_in_place(addressing, header, payload, length, departure_ns);
 }
 
 auto XdpTransport::gather_after_headers(
@@ -795,7 +795,7 @@ auto XdpTransport::gather_after_headers(
     rtp::RtpHeader const& header,
     std::span<std::span<uint8_t const> const> const payload,
     size_t const length,
-    int64_t const launch) noexcept -> bool
+    uint64_t const departure_ns) noexcept -> bool
 {
     auto slot = tx_pool_.take();
     if (!slot) {
@@ -806,7 +806,9 @@ auto XdpTransport::gather_after_headers(
         (void)tx_pool_.put(*slot);
         return false;
     }
-    return context_.tx_commit_gather(slot->handle, *offset, payload, launch).has_value();  // a refusal frees the slot
+    // Timed only now, so a packet that goes otherwise reads the PHC, and takes a place in the order, once.
+    return context_.tx_commit_gather(slot->handle, *offset, payload, launch_for(departure_ns))
+        .has_value();  // a refusal frees the slot
 }
 
 auto XdpTransport::gather_in_place(
@@ -814,7 +816,7 @@ auto XdpTransport::gather_in_place(
     rtp::RtpHeader const& header,
     std::span<std::span<uint8_t const> const> const payload,
     size_t const length,
-    int64_t const launch) noexcept -> bool
+    uint64_t const departure_ns) noexcept -> bool
 {
     auto const first = headers_before(addressing, header, length, payload[0]);
     if (!first) {
@@ -823,7 +825,8 @@ auto XdpTransport::gather_in_place(
     std::array<std::span<uint8_t const>, MAX_GATHER> pieces{};
     pieces[0] = *first;
     std::ranges::copy(payload.subspan(1), pieces.begin() + 1);
-    return context_.tx_commit_gather(std::nullopt, 0, std::span{pieces}.first(payload.size()), launch).has_value();
+    return context_.tx_commit_gather(std::nullopt, 0, std::span{pieces}.first(payload.size()), launch_for(departure_ns))
+        .has_value();
 }
 
 auto XdpTransport::headers_before(
