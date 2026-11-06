@@ -117,6 +117,8 @@ TEST(aes67_xdp, launch_times_are_now_until_the_lead_is_in_force_then_departure_p
     EXPECT_FALSE(clock.lead_ns().has_value());
     now = T + 1'500'000;
     EXPECT_EQ(clock.next(T + 2'000'000, now), T + 1'500'000);
+    EXPECT_EQ(clock.next(0, 0), uint64_t{0});  // no PHC reading: untimed, and no clock step
+    EXPECT_EQ(clock.order().steps(), uint64_t{1});
 }
 
 // A kernel refusing the UMEM's TX metadata is probed once before the open: launch time goes off with the
