@@ -109,13 +109,13 @@ class XdpTransport final : public Transport
             return lead < 0 ? std::nullopt : std::optional{static_cast<uint64_t>(lead)};
         }
         /// The time for a frame departing at @p departure_ns (0, or no lead in force: untimed, at
-        /// @p now()): departure plus lead, never before the last time given.
-        template <typename Now>
-        [[nodiscard]] auto next(uint64_t const departure_ns, Now const& now) noexcept -> uint64_t
+        /// @p now_ns, the launch clock as the caller read it): departure plus lead, never before the
+        /// last time given.
+        [[nodiscard]] auto next(uint64_t const departure_ns, uint64_t const now_ns) noexcept -> uint64_t
         {
             int64_t const lead = lead_ns_.load(std::memory_order_relaxed);
             uint64_t const wanted = lead < 0 || departure_ns == 0 ? 0 : departure_ns + static_cast<uint64_t>(lead);
-            return order_.next(wanted, now);
+            return order_.next(wanted, now_ns);
         }
         /// The ordering's counters: frames held and late, the largest of each, clock steps.
         [[nodiscard]] auto order() const noexcept -> net::LaunchOrder const& { return order_; }
