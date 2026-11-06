@@ -12,6 +12,7 @@
 /// A receive port's kernel socket only holds its group's membership: nothing reads it.
 
 #include "statusbar/aes67/aes67_socket.hpp"
+#include "statusbar/aes67/aes67_stream.hpp"
 #include "statusbar/aes67/aes67_transport.hpp"
 #include "statusbar/itc/itc_message_pipe.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
@@ -88,8 +89,6 @@ class XdpTransport final : public Transport
     static constexpr size_t MAX_GROUPS = 16;
     /// An RTP frame's headers at most: Ethernet with an 802.1Q tag, IPv4 with options, UDP and RTP.
     static constexpr size_t MAX_HEADERS = 128;
-    /// Buffers one gathered packet takes at most.
-    static constexpr size_t MAX_GATHER = 32;
     /// Rules installed at most: a group's each, then the tagged rule, as far as the TCAM holds them.
     static constexpr size_t MAX_RULES = std::min(MAX_GROUPS + 1, net::tcam_default_capacity);
     /// Receive ports at most (several may share a group).
@@ -506,14 +505,20 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto holds_frames() const noexcept -> bool override { return true; }
     /// On a shared UMEM (Options::shared_umem): true.
     [[nodiscard]] auto frames_shared() const noexcept -> bool override { return shared_ != nullptr; }
-    /// On a shared UMEM, the socket's buffers a frame (net::XdpContext::tx_segments()) but the headers'; else 0.
+    /// On a shared UMEM, the socket's buffers a frame (net::XdpContext::tx_segments()) but the headers', up to
+    /// MAX_GATHER_BUFFERS; else 0.
     [[nodiscard]] auto gather_buffers() const noexcept -> size_t override
     {
         size_t const segments = context_.tx_segments();
-        return shared_ != nullptr && segments > 1 ? segments - 1 : 0;
+        return shared_ != nullptr && segments > 1 ? std::min(segments - 1, MAX_GATHER_BUFFERS) : 0;
     }
-    /// Whenever it gathers.
-    [[nodiscard]] auto writes_headers_before() const noexcept -> bool override { return gather_buffers() != 0; }
+    /// Whenever it gathers untimed: a launch time goes in a frame of the sender's own, before the payload.
+    [[nodiscard]] auto writes_headers_before() const noexcept -> bool override
+    {
+        return gather_buffers() != 0 && !context_.tx_launch_time();
+    }
+    /// Frames its receive ports keep (ReceivePort::hold()) given back.
+    void release_frame(uint64_t const frame) noexcept override { unkeep(frame); }
 
   private:
     friend class Port;
@@ -522,7 +527,7 @@ class XdpTransport final : public Transport
 
     explicit XdpTransport(InterfaceInfo interface) noexcept;
     /// open(): the queue and the shared UMEM of `options` (invalid_argument for a share not UMEM_FRAMES frames).
-    [[nodiscard]] auto take_options(Options const& options) noexcept -> Status;
+    [[nodiscard]] auto apply_options(Options const& options) noexcept -> Status;
     /// open(): every RSS bucket steered to queue_ (`options.queue`, rss_verdict()), then the socket opened with `options`; a socket
     /// that does not open puts the table back.
     [[nodiscard]] auto open_steered(Options const& options) -> Status;
@@ -583,6 +588,9 @@ class XdpTransport final : public Transport
         std::span<std::span<uint8_t const> const> payload,
         size_t length,
         uint64_t departure_ns) noexcept -> bool;
+    /// Whether `offset` bytes of headers may go before the buffer at UMEM address `at`: within its frame above the
+    /// TX metadata, and no transmit pointing into the frame.
+    [[nodiscard]] auto headers_fit_before(uint64_t at, size_t offset) const noexcept -> bool;
     /// The RTP frame's headers for a `length`-octet payload written over the bytes before `first`, in its frame
     /// with room below for the launch time: the headers and `first` as one buffer, or nullopt.
     [[nodiscard]] auto headers_before(

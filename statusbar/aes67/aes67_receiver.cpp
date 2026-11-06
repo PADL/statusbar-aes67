@@ -294,9 +294,7 @@ auto Receiver::hold_frame() noexcept -> std::optional<uint64_t>
 
 void Receiver::release_frame(uint64_t const frame) noexcept
 {
-    if (port_) {
-        port_->release(frame);
-    }
+    transport_.release_frame(frame);  // the port may be gone (clear()): the transport keeps the frame until now
 }
 
 void Receiver::drop(DropReason const reason) noexcept

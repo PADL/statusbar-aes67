@@ -358,11 +358,18 @@ auto Sender::send_gathered(rtp::RtpHeader const& header) noexcept -> bool
         return false;
     }
     bool headers_before = false;
-    size_t const n = gatherer_(next_index_, format_.frames_per_packet, pieces_, headers_before);
-    // Its frames were all there: nothing lost, nothing copied.
-    bool const sent = n != 0 && port_->send_gathered_at(header, std::span{pieces_}.first(n), tick_ns_, headers_before);
+    auto const pieces = std::span{pieces_}.first(
+        std::min(gatherer_(next_index_, format_.frames_per_packet, pieces_, headers_before), pieces_.size()));
+    // Its frames were all there, the packet's worth of them: nothing lost, nothing copied.
+    bool const sent = whole(pieces) && port_->send_gathered_at(header, pieces, tick_ns_, headers_before);
     gathered_ += sent ? 1 : 0;
     return sent;
+}
+
+auto Sender::whole(std::span<std::span<uint8_t const> const> const pieces) const noexcept -> bool
+{
+    auto const length = std::ranges::fold_left(pieces, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
+    return !pieces.empty() && length == payload_.size();
 }
 
 auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool

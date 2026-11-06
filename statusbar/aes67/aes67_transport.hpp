@@ -118,15 +118,13 @@ class ReceivePort
     /// The draining thread; it clears when the transport takes the group again.
     [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
     /// Keep the frame a datagram receive() gave lies in past the next receive() and begin_tick(): its payload
-    /// stays valid until release(datagram.frame). False when it cannot (no frame, or the transport keeps as
-    /// many as it can; the default): copy the payload within the tick instead. The draining thread.
+    /// stays valid until Transport::release_frame(datagram.frame). False when it cannot (no frame, or the
+    /// transport keeps as many as it can; the default): copy the payload within the tick instead. The draining thread.
     [[nodiscard]] virtual auto hold(Datagram const& datagram) noexcept -> bool
     {
         (void)datagram;
         return false;
     }
-    /// Give back a frame hold() kept, on any port of its transport. The draining thread.
-    virtual void release(uint64_t const frame) noexcept { (void)frame; }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX
@@ -260,6 +258,8 @@ class Transport
     virtual void reset_counters() noexcept {}
     /// Whether its receive ports keep frames past their tick (ReceivePort::hold()). Default: false.
     [[nodiscard]] virtual auto holds_frames() const noexcept -> bool { return false; }
+    /// Give back a frame a receive port's hold() kept, the port gone or not. The draining thread.
+    virtual void release_frame(uint64_t const frame) noexcept { (void)frame; }
     /// Whether the frames its receive ports hold lie where another transport sharing them can send them from
     /// (a UMEM shared across sockets). Default: false.
     [[nodiscard]] virtual auto frames_shared() const noexcept -> bool { return false; }
