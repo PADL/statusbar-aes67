@@ -15,6 +15,7 @@
 #include <cstring>
 #include <format>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -225,6 +226,19 @@ class UdpRtcpPort final : public RtcpPort
     return multicast ? success() : net::set_priority(fd, 0);
 }
 
+/// Join `group` on `interface` (for `source` alone when given, RFC 4607 Section 4.1); nothing for a unicast address.
+[[nodiscard]] auto join_receive_group(
+    int const fd,
+    InterfaceInfo const& interface,
+    ip::IPv4Address const& group,
+    std::optional<ip::IPv4Address> const& source) noexcept -> Status
+{
+    if (!group.is_multicast()) {
+        return success();
+    }
+    return source ? net::join_source_group(fd, group, *source, interface.index) : net::join_group(fd, group, interface.index);
+}
+
 }  // namespace
 
 auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options) -> StatusValue<net::FileDescriptor>
@@ -290,7 +304,8 @@ auto destined_for(msghdr& header, ip::IPv4Address const& address, unsigned int c
     return false;
 }
 
-auto open_receive_socket(InterfaceInfo const& interface, Endpoint const& local, bool const shared)
+auto open_receive_socket(
+    InterfaceInfo const& interface, Endpoint const& local, bool const shared, std::optional<ip::IPv4Address> const& source)
     -> StatusValue<net::FileDescriptor>
 {
     auto fd = net::make_udp_socket();
@@ -303,10 +318,8 @@ auto open_receive_socket(InterfaceInfo const& interface, Endpoint const& local, 
     if (auto bound = bind_to(fd->get(), local); !bound) {
         return failure(bound.error());
     }
-    if (local.address.is_multicast()) {
-        if (auto joined = net::join_group(fd->get(), local.address, interface.index); !joined) {
-            return failure(joined.error());
-        }
+    if (auto joined = join_receive_group(fd->get(), interface, local.address, source); !joined) {
+        return failure(joined.error());
     }
     return std::move(*fd);
 }
@@ -317,7 +330,7 @@ auto open_rtcp_socket(InterfaceInfo const& interface, RtcpOptions const& options
     Endpoint const local = rtcp_local_endpoint(interface, options);
     // Groups share their port (another RTCP session, an RTP receiver of another stream); a unicast
     // address and port is this port's alone, so a second bind fails with address_in_use.
-    auto fd = open_receive_socket(interface, local, multicast);
+    auto fd = open_receive_socket(interface, local, multicast, multicast ? options.source : std::nullopt);
     if (!fd) {
         return failure(fd.error());
     }

@@ -240,6 +240,13 @@ class LoopTransport final : public Transport
     [[nodiscard]] auto local_address() const noexcept -> IPv4Address override { return source.address; }
     auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override
     {
+        joined_source.reset();
+        return std::make_unique<Rx>(*this, destination);
+    }
+    auto open_receive_from(Endpoint const& destination, IPv4Address const& from)
+        -> StatusValue<std::unique_ptr<ReceivePort>> override
+    {
+        joined_source = from;
         return std::make_unique<Rx>(*this, destination);
     }
     auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override
@@ -267,7 +274,8 @@ class LoopTransport final : public Transport
     uint64_t next_frame{0};                        ///< the next datagram's frame
     std::vector<uint64_t> kept;                    ///< frames held, in order
     void release_frame(uint64_t const frame) noexcept override { released.push_back(frame); }
-    std::vector<uint64_t> released;  ///< frames released, in order
+    std::vector<uint64_t> released;            ///< frames released, in order
+    std::optional<IPv4Address> joined_source;  ///< the last port's source-specific join, if it was one
 };
 
 auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
@@ -2210,6 +2218,132 @@ TEST(aes67_udp, a_unicast_send_socket_is_pinned_to_its_interface_at_priority_zer
     socklen_t index_length = sizeof(index);
     EXPECT_EQ(::getsockopt((*rtcp)->fd(), IPPROTO_IP, IP_UNICAST_IF, &index, &index_length), 0);
     EXPECT_EQ(ntohl(index), info->index);
+}
+
+//
+// ST 2110-30 and ST 2110-10, RFC 4607
+//
+
+// ST 2110-10's SDP and ST 2110-30 Section 6.2: ts-refclk with its domain and mediaclk:direct=0 at media level, the
+// rtpmap, ptime and maxptime, and the channel order.
+TEST(aes67_sender, an_st2110_sender_writes_the_attributes_st2110_asks_for)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_st2110(true);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 97}));
+    sender.set_grandmaster(Grandmaster{.identity = GRANDMASTER.identity, .domain = 127});
+    std::string const text = sdp::to_string(*sender.session());
+    auto const media = text.substr(text.find("m=audio"));
+    for (auto const* const line :
+         {"m=audio 5004 RTP/AVP 97\r\n",
+          "a=rtpmap:97 L24/48000/2\r\n",
+          "a=fmtp:97 channel-order=SMPTE2110.(U02)\r\n",
+          "a=ptime:1\r\n",
+          "a=maxptime:1\r\n",
+          "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:127\r\n",
+          "a=mediaclk:direct=0\r\n",
+          "a=source-filter: incl IN IP4 239.69.1.2 192.168.1.10\r\n"}) {
+        EXPECT_TRUE(media.find(line) != std::string::npos);
+    }
+    auto const parsed = sdp::parse(text);
+    EXPECT_EQ(parsed->media.at(0).channel_order, std::string{"SMPTE2110.(U02)"});
+}
+
+TEST(aes67_sender, a_named_channel_order_is_announced_one_session_version_on)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_st2110(true);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    auto const before = sender.session()->session_version;
+    sender.set_channel_order("SMPTE2110.(ST)");
+    EXPECT_EQ(sender.session()->session_version, before + 1);
+    EXPECT_EQ(sender.session()->media.at(0).channel_order, std::string{"SMPTE2110.(ST)"});
+    sender.set_channel_order("SMPTE2110.(51)");  // six channels of two: not described
+    EXPECT_TRUE(sender.session()->media.at(0).channel_order.empty());
+}
+
+TEST(aes67_sender, an_aes67_sender_writes_neither_channel_order_nor_maxptime)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    std::string const text = sdp::to_string(*sender.session());
+    EXPECT_TRUE(text.find("a=fmtp:") == std::string::npos);
+    EXPECT_TRUE(text.find("a=maxptime:") == std::string::npos);
+}
+
+// At 48 kHz the RTP timestamp wraps every 2^32 samples (89,478.485 s); 2^32 mod 48 is 16, so one packet spans it.
+TEST(aes67_sender, a_sender_crosses_the_rtp_timestamp_wrap_without_a_gap)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    constexpr uint64_t WRAP = uint64_t{1} << 32U;
+    constexpr uint64_t BASE = WRAP - 16 - (10 * FPP);  // on the grid, ten packets before the one spanning the wrap
+    constexpr size_t PACKETS = 20;
+    for (size_t i = 0; i < PACKETS; ++i) {
+        sender.tick(BASE + (FPP - 1) + (i * FPP), 0);
+    }
+    EXPECT_EQ(transport.queue.size(), PACKETS);
+    for (size_t i = 0; i < transport.queue.size(); ++i) {
+        auto const packet = rtp::parse_rtp(transport.queue[i].bytes);
+        uint64_t const first = BASE + (i * FPP);
+        EXPECT_EQ(packet->header.timestamp.get(), static_cast<uint32_t>(first));
+        EXPECT_EQ(packet->payload[0], pattern(first, 0));
+        auto const previous = i == 0 ? packet : rtp::parse_rtp(transport.queue[i - 1].bytes);
+        EXPECT_EQ(
+            static_cast<uint16_t>(packet->header.sequence.get() - previous->header.sequence.get()),
+            static_cast<uint16_t>(i == 0 ? 0 : 1));
+    }
+    EXPECT_EQ(sender.counters().packets, uint64_t{PACKETS});
+}
+
+TEST(aes67_receiver, a_source_specific_group_is_joined_for_its_source)
+{
+    LoopTransport transport;
+    IPv4Address const sender{10, 0, 0, 5};
+    auto session = stream_session({.address = IPv4Address{232, 10, 1, 1}, .port = 5004});
+    session.source_filter = sdp::SourceFilter{.destination = IPv4Address{232, 10, 1, 1}, .source = sender};
+    Receiver receiver{STEREO_L24, {}, transport};
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_EQ(transport.joined_source, std::optional{sender});
+    auto const rtcp = receiver.rtcp_options(46);  // its RTCP joins for the same source: the report stays INCLUDE
+    EXPECT_TRUE(rtcp && rtcp->source == std::optional{sender});
+}
+
+TEST(aes67_receiver, an_any_source_group_or_an_unfiltered_one_is_joined_for_any_source)
+{
+    LoopTransport transport;
+    IPv4Address const sender{10, 0, 0, 5};
+    auto session = stream_session({.address = IPv4Address{239, 10, 1, 1}, .port = 5004});
+    session.source_filter = sdp::SourceFilter{.destination = std::nullopt, .source = sender};
+    Receiver receiver{STEREO_L24, {}, transport};
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_FALSE(transport.joined_source.has_value());
+    auto unfiltered = stream_session({.address = IPv4Address{232, 10, 1, 1}, .port = 5004});
+    EXPECT_TRUE(receiver.configure(unfiltered).has_value());
+    EXPECT_FALSE(transport.joined_source.has_value());
+}
+
+TEST(aes67_udp, a_source_specific_group_is_joined_on_loopback)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    auto const own = own_group();
+    Endpoint const group{.address = IPv4Address{232, own.octet(1), own.octet(2), own.octet(3)}, .port = 45232};
+    auto port = (*transport)->open_receive_from(group, IPv4Address{127, 0, 0, 1});
+    if (!port) {
+        std::println("  skipped: cannot join a group on lo");
+        return;
+    }
+    EXPECT_FALSE((*transport)->open_receive_from(group, IPv4Address{239, 1, 1, 1}).has_value());
 }
 
 TEST_MAIN(statusbar_aes67, aes67_test)

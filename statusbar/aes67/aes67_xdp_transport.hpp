@@ -469,6 +469,10 @@ class XdpTransport final : public Transport
     /// resource_unavailable_try_again past MAX_PORTS ports or when the queue to
     /// the real-time thread is full.
     [[nodiscard]] auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override;
+    /// open_receive() with the kernel's membership joined for `source` alone (net::open_source_group_membership()),
+    /// so an IGMPv3 snooping switch forwards a source-specific group; the receiver filters by source itself.
+    [[nodiscard]] auto open_receive_from(Endpoint const& destination, ip::IPv4Address const& source)
+        -> StatusValue<std::unique_ptr<ReceivePort>> override;
     [[nodiscard]] auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override;
     /// A kernel socket as UdpTransport's for sending and for a group the program passes, and an
     /// RtcpPipe for when it redirects the group; fd() is -1. Groups only (unsupported_destination);
@@ -557,6 +561,9 @@ class XdpTransport final : public Transport
     void delete_port_states() noexcept;
     /// Control thread: why a receive port for `destination` cannot open, if it cannot.
     [[nodiscard]] auto check_receive(Endpoint const& destination) const noexcept -> Status;
+    /// A receive port for group `destination`, its kernel membership joined for `source` alone when given.
+    [[nodiscard]] auto open_port(Endpoint const& destination, std::optional<ip::IPv4Address> const& source)
+        -> StatusValue<std::unique_ptr<ReceivePort>>;
     /// Control thread: counts one more port on `group`.
     void retain_group(ip::IPv4Address const& group);
     /// Control thread: a new port's state, handed to the real-time thread.

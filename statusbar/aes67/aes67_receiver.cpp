@@ -5,6 +5,7 @@
 
 #include "statusbar/aes67/aes67_error.hpp"
 #include "statusbar/mediaclock/mediaclock_ptp_clock.hpp"
+#include "statusbar/net/net_socket.hpp"
 
 #include <algorithm>
 #include <array>
@@ -88,7 +89,10 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
 auto Receiver::open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection) -> Status
 {
     auto const endpoint = receive_endpoint(session, media, connection, transport_);
-    if (auto const opened = endpoint ? reopen(*endpoint) : refused(endpoint.error()); !opened) {
+    if (auto const opened = endpoint
+            ? reopen(*endpoint, matching_source(session.effective_source_filter(media), connection.address))
+            : refused(endpoint.error());
+        !opened) {
         return opened;
     }
     apply_media(session, media, connection, *endpoint);
@@ -109,11 +113,16 @@ void Receiver::apply_media(
     set_rtcp(session, media, connection, endpoint);
 }
 
-auto Receiver::reopen(Endpoint const& destination) -> Status
+auto Receiver::reopen(Endpoint const& destination, std::optional<ip::IPv4Address> const& source) -> Status
 {
     clear();
     receive_state_.store({});  // not drained while cleared, so drain() is not storing too
-    auto port = transport_.open_receive(destination);
+    bool const specific = source && net::is_source_specific_group(destination.address);
+    return adopt(specific ? transport_.open_receive_from(destination, *source) : transport_.open_receive(destination));
+}
+
+auto Receiver::adopt(StatusValue<std::unique_ptr<ReceivePort>> port) -> Status
+{
     if (!port) {
         return refused(port.error());
     }
@@ -173,6 +182,7 @@ auto Receiver::rtcp_options_for(
         options.local = endpoint;
         options.destination = {.address = *peer, .port = endpoint.port};
     }
+    options.source = net::is_source_specific_group(options.destination.address) ? source_filter_ : std::nullopt;
     return options;
 }
 
