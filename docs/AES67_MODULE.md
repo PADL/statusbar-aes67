@@ -29,6 +29,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 
 - `StreamFormat` — encoding, channels, rate and frames per packet (the ptime).
 - `FrameHandler` / `FrameProvider` — the real-time callbacks, `sg14::inplace_function`s with 64 bytes of capture; `Supply` is what a provider gave.
+- `receive_endpoint()` — where a stream described by an SDP arrives here: its group, this host's address, or, for an offer whose `c=` is its origin, this host's address.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
 - `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, send offset, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
@@ -77,7 +78,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `statusbar/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
 - `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
-- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_rtcp_socket()`.
+- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
 - `statusbar/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`, `SenderReportTime`, `sender_clock_offset()`.
 - `statusbar/aes67/aes67_error.hpp` — `Aes67Error`.
 
@@ -219,6 +220,16 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   each packet's frames counted from its payload (AES67-2023 Clause 7.2.0), up to the
   transport's largest datagram (1500 octets). A stream without a direct media clock is
   refused (`not_ptp_locked`): its timestamps are not PTP time.
+- Where it receives (`receive_endpoint()`, AES67-2023 Clauses 6.1.1 and 8.5.2, RFC 8866
+  Clause 5.7): a group's `c=` is joined; a unicast `c=` that is this host's address (a
+  transport file, as NMOS IS-05 writes) is bound; a unicast `c=` equal to the origin's
+  address that is not this host's is an offer from that sender, received at this host's
+  address with the sender as the source filter unless `a=source-filter` names another. Any
+  other unicast `c=`, 0.0.0.0 among them, fails `foreign_destination`: which addresses are
+  this host's the transport decides from the interface's address list
+  (`Transport::is_local_address()`, `is_local()`: any 127/8 address on a loopback interface),
+  not from a bind the kernel may allow (`ip_nonlocal_bind`). RTCP for a unicast stream
+  arrives at the bound address at port + 1 and goes to the sender.
 - `set_sender_clock(true)` before `configure()` takes only `mediaclk:sender` streams (any
   other fails `not_sender_clocked`, `direct` included, as a direct stream would drift in a
   foreign domain). Such a stream has no offset until `set_offset()`: `drain()` learns its
@@ -325,6 +336,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### UdpTransport
 
+- The one transport that carries unicast (AES67-2023 Clause 6.1.1), both ways: every
+  stream has its own socket, a group's joined and a unicast address's bound, so groups and
+  unicast addresses never share one. `XdpTransport` refuses unicast.
 - A receiver's socket is bound to its destination address itself, so a group's socket
   sees only that group and a unicast receiver's specific bind wins its address:port over
   the group sockets sharing the port; `IP_PKTINFO` checks each datagram's destination as
@@ -344,15 +358,20 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `malformed`; one `IP_PKTINFO` puts on another address or interface (another group's on a
   shared port) is skipped uncounted, and the receiver judges the rest (`Counters::drops`).
 - A sender's socket is unconnected and every message names the destination, so a unicast
-  receiver's ICMP port-unreachable never fails a send. Multicast goes out of the
-  interface with the configured TTL and the sender's DSCP (`SendOptions::dscp`, from
+  receiver's ICMP port-unreachable never fails a send (`open_send_socket()`). Multicast goes
+  out of the interface with the configured TTL; unicast is bound to the interface's address
+  and leaves by it (`net::set_unicast_send()`: `IP_UNICAST_IF`, unprivileged, unlike
+  `SO_BINDTODEVICE`), whatever the routing table prefers, with `SendOptions::ttl` and socket
+  priority 0, so the DSCP's priority (Linux's `rt_tos2priority()`: AF41 is 2) never puts it
+  in an SR class's queue (AES67-2023 Annex C.1.2). Both carry the sender's DSCP (`SendOptions::dscp`, from
   `Sender::set_dscp()`, by default `rtp::FrameAddressing::DSCP_MEDIA`, 34). A tick's packets are written straight
   into the `SEND_BATCH` slots of the sender's `sendmmsg()` batch.
 - An RTCP port is one socket for both directions. For a group it is bound to the group at
   the RTCP port, joined, and sends there with loopback on, so a session hears its own
   reports and must skip its own SSRC; for a unicast peer it is bound to `RtcpOptions::local`
-  (by default this address at the destination port), without `SO_REUSEADDR`, and sends to
-  the peer: a second port on the same unicast address and port is refused
+  (by default this address at the destination port), without `SO_REUSEADDR`, leaves as its
+  stream's socket does (by the interface, with `RtcpOptions::ttl`, at socket priority 0),
+  and sends to the peer: a second port on the same unicast address and port is refused
   (`address_in_use`) rather than splitting the reports between the two.
 
 ### XdpTransport
@@ -409,7 +428,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   ignored uncounted, by the transport and by the receiver alike. Relaxed atomics, written by
   `begin_tick()`, read from any thread. `dispatch_frame()` is that per-frame step.
 - Limits: multicast destinations only, both ways (a unicast receiver would need a rule
-  stealing the host's UDP, a unicast sender ARP); at most `MAX_GROUPS` distinct groups;
+  stealing the host's UDP, a unicast sender ARP): unicast is `UdpTransport`'s alone, and
+  nothing on the AF_XDP path tests for it; at most `MAX_GROUPS` distinct groups;
   `MAX_RULES` rules, the groups' and the tagged one, as far as core's TCAM
   (`net::tcam_default_capacity`) holds them: the tagged rule keeps its slot, and a group
   past the room left is dropped and reported by `rules_status()`; a joined group's frames to ports no

@@ -29,6 +29,7 @@ enum class Aes67Error
     not_configured,           ///< the receiver or sender has no stream
     not_sender_clocked,       ///< no `mediaclk:sender`: a receiver set to take the sender's clock refuses it
     rss_not_steered,          ///< a NIC with RSS whose buckets could not all be steered to the AF_XDP queue
+    foreign_destination,      ///< a unicast stream whose SDP sends it to another host (RFC 8866 Clause 5.7)
 };
 
 class Aes67ErrorCategory : public std::error_category

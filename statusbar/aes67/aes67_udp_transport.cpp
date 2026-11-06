@@ -243,17 +243,9 @@ auto UdpTransport::open_send(SendOptions const& options) -> StatusValue<std::uni
     if (options.vlan) {
         return failure(std::errc::operation_not_supported);  // a socket cannot write the tag
     }
-    auto fd = net::make_udp_socket();
+    auto fd = open_send_socket(interface_, options);
     if (!fd) {
         return failure(fd.error());
-    }
-    if (options.destination.address.is_multicast()) {
-        if (auto set = net::set_multicast_send(fd->get(), interface_.index, options.ttl, true); !set) {
-            return failure(set.error());
-        }
-    }
-    if (auto set = net::set_dscp(fd->get(), AF_INET, options.dscp); !set) {
-        return failure(set.error());
     }
     // Not connected: a connected UDP socket reports a unicast destination's
     // ICMP port-unreachable as ECONNREFUSED on the next send.
