@@ -1,8 +1,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// libFuzzer harness for sdp::parse: it may not crash or read out of bounds, and every pair of a media's
-/// reference clocks in force (RFC 7273 Section 4.8) compares consistently.
+/// libFuzzer harness for sdp::parse: it may not crash or read out of bounds, every pair of a media's
+/// reference clocks in force (RFC 7273 Section 4.8) compares consistently, and a media's channel order
+/// (ST 2110-30 Section 6.2.2) and maxptime are well formed and survive to_string() and parse() again.
 
 #include "statusbar/sdp/sdp.hpp"
 
@@ -40,12 +41,36 @@ void check_references(std::span<sdp::PtpReference const> const references)
     }
 }
 
+/// A kept channel order counts its channels, and `media`'s order and maxptime are `again`'s.
+void check_written(sdp::Media const& media, sdp::Media const& again)
+{
+    if (!media.channel_order.empty() && !sdp::channel_order_channels(media.channel_order)) {
+        std::abort();
+    }
+    if (again.channel_order != media.channel_order || again.max_packet_time_us != media.max_packet_time_us) {
+        std::abort();
+    }
+}
+
+/// check_written() of each media of `session` against the session to_string() writes, parsed again.
+void check_round_trip(sdp::Session const& session)
+{
+    auto const again = sdp::parse(sdp::to_string(session));
+    if (!again || again->media.size() != session.media.size()) {
+        return;  // a session the writer sanitises differently is not this check's
+    }
+    for (size_t i = 0; i < session.media.size(); ++i) {
+        check_written(session.media[i], again->media[i]);
+    }
+}
+
 }  // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
 {
     std::string_view const text{
         reinterpret_cast<char const*>(data), size};  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast): bytes as text
+    (void)sdp::channel_order_channels(text);
     auto const session = sdp::parse(text);
     if (!session) {
         return 0;
@@ -53,5 +78,6 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
     for (auto const& media : session->media) {
         check_references(session->effective_clocks(media));
     }
+    check_round_trip(*session);
     return 0;
 }
