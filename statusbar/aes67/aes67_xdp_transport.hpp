@@ -110,7 +110,7 @@ class XdpTransport final : public Transport
         }
         /// The time for a frame departing at @p departure_ns (0, or no lead in force: untimed, at
         /// @p now_ns, the launch clock as the caller read it): departure plus lead, never before the
-        /// last time given.
+        /// last time given. @p now_ns 0 (no reading): a timed frame held at the last time, an untimed one 0.
         [[nodiscard]] auto next(uint64_t const departure_ns, uint64_t const now_ns) noexcept -> uint64_t
         {
             int64_t const lead = lead_ns_.load(std::memory_order_relaxed);
@@ -543,6 +543,7 @@ class XdpTransport final : public Transport
     RefusalCounter refusals_;  ///< real-time -> any
     LaunchClock launch_clock_;
     net::ClockFn phc_clock_{};
+    uint64_t tick_phc_ns_{0};                      ///< real-time: the launch clock as start_cycle() read it, told to each commit()
     std::atomic<bool> reset_socket_stats_{false};  ///< any -> real-time: reset_counters() asked
     std::atomic<int32_t> receive_vid_{-1};         ///< control -> real-time: set_receive_vid(), -1 for none
     std::optional<uint16_t> installed_vid_;        ///< real-time: the VID rules_ were compiled for

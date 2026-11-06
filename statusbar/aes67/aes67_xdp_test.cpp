@@ -113,11 +113,15 @@ TEST(aes67_xdp, launch_times_are_now_until_the_lead_is_in_force_then_departure_p
     EXPECT_EQ(clock.next(T + 1'000'000, now), T + 1'000'000);  // a lead of 0 is past: late, sent at once
     EXPECT_EQ(clock.order().launched_late(), uint64_t{1});
     EXPECT_EQ(clock.order().max_late_ns(), uint64_t{100'000});
-    clock.clear_lead();  // the clock no longer agrees: now again
+    clock.set_lead_ns(125'000);
+    EXPECT_EQ(clock.next(T + 2'000'000, now), T + 2'125'000);
+    EXPECT_EQ(clock.next(T + 1'700'000, 0), T + 2'125'000);  // no PHC reading: held at the last time, in order
+    EXPECT_EQ(clock.order().steps(), uint64_t{1});           // and no clock step
+    clock.clear_lead();                                      // the clock no longer agrees: now again
     EXPECT_FALSE(clock.lead_ns().has_value());
-    now = T + 1'500'000;
-    EXPECT_EQ(clock.next(T + 2'000'000, now), T + 1'500'000);
-    EXPECT_EQ(clock.next(0, 0), uint64_t{0});  // no PHC reading: untimed, and no clock step
+    now = T + 2'500'000;
+    EXPECT_EQ(clock.next(T + 3'000'000, now), T + 2'500'000);
+    EXPECT_EQ(clock.next(0, 0), uint64_t{0});  // no PHC reading, no lead: untimed, and no clock step
     EXPECT_EQ(clock.order().steps(), uint64_t{1});
 }
 
