@@ -673,16 +673,17 @@ auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, 
     // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
     // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
-        uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (now reads 0)
-        uint64_t const now_ns = net::phc_now_ns(phc_clock_);
-        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, now_ns)));
+        uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (the tick's reading is 0)
+        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, tick_phc_ns_)));
     }
     return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
 }
 
 void XdpTransport::start_cycle() noexcept
 {
-    // Reap TX completions, hold back the senders' frames, then offer the kernel the rest.
+    // Reap TX completions, hold back the senders' frames, then offer the kernel the rest. The launch
+    // clock is read once here for the tick's commits.
+    tick_phc_ns_ = context_.tx_launch_time() ? net::phc_now_ns(phc_clock_) : 0;
     (void)context_.tx_complete();
     refill_tx_pool();
     (void)context_.fill_replenish();
