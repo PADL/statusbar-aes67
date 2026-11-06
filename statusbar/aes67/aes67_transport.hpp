@@ -159,6 +159,20 @@ class SendPort
         (void)departure_ns;
         return send_rendered(header, payload_length, render);
     }
+    /// Queue a packet whose payload is `payload`'s buffers one after another, sent where they lie, not copied
+    /// (a transport whose transmit shares its receive frames: XdpTransport on a shared UMEM); `departure_ns` as
+    /// send_rendered_at(). With `headers_before` the bytes before the first buffer are the caller's to overwrite
+    /// (a held frame's own headers), so the headers may go there. False, nothing queued, when it cannot (the
+    /// default): the caller sends otherwise.
+    [[nodiscard]] virtual auto send_gathered_at(
+        rtp::RtpHeader const& header,
+        std::span<std::span<uint8_t const> const> const payload,
+        uint64_t const departure_ns,
+        bool const headers_before) noexcept -> bool
+    {
+        (void)header, (void)payload, (void)departure_ns, (void)headers_before;
+        return false;
+    }
     /// Send what send() and send_rendered() queued. Returns the number of packets the network
     /// refused (0 on success).
     virtual auto flush() noexcept -> size_t = 0;
@@ -246,6 +260,12 @@ class Transport
     /// Start the transport's counters afresh: receive_refusals() now, a socket's own at its next
     /// tick; what it refuses meanwhile may go uncounted. Any thread. Default: nothing counted.
     virtual void reset_counters() noexcept {}
+    /// Whether the frames its receive ports hold lie where another transport sharing them can send them from
+    /// (a UMEM shared across sockets). Default: false.
+    [[nodiscard]] virtual auto frames_shared() const noexcept -> bool { return false; }
+    /// The buffers one packet's payload may be sent from (SendPort::send_gathered_at()), its headers written
+    /// before the first; 0: none (the default).
+    [[nodiscard]] virtual auto gather_buffers() const noexcept -> size_t { return 0; }
 };
 
 }  // namespace statusbar::aes67

@@ -174,6 +174,14 @@ enum class Supply : uint8_t
 /// format) from sample index `first_index`.
 using FrameProvider = sg14::inplace_function<Supply(uint64_t first_index, uint32_t frames, std::span<uint8_t> out), 64>;
 
+/// Where a sender's frames lie when every one lies whole in a buffer it may send from where it is (a receiver's
+/// held frames): the buffers holding frames [first_index, first_index + frames), in order, into `out`; how many,
+/// or 0 when they do not (the sender pulls them through its FrameProvider). `headers_before` is set when the bytes
+/// before the first buffer are the sender's to overwrite (SendPort::send_gathered_at()).
+using FrameGatherer = sg14::inplace_function<
+    size_t(uint64_t first_index, uint32_t frames, std::span<std::span<uint8_t const>> out, bool& headers_before),
+    64>;
+
 /// Where a sender sends.
 struct Destination
 {
