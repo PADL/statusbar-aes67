@@ -9,6 +9,7 @@
 #include <charconv>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -380,6 +381,35 @@ enum class RtpmapResult
     return parse_offered_rtpmap(*payload_type, rest, format);
 }
 
+/// One ST 2110-30 Section 6.2.2 group symbol's channels: a named group's, or Unn's nn (01-64); nullopt for another.
+[[nodiscard]] auto group_channels(std::string_view const symbol) noexcept -> std::optional<uint32_t>
+{
+    static constexpr std::array<std::pair<std::string_view, uint32_t>, 8> GROUPS{
+        {{"M", 1}, {"DM", 2}, {"ST", 2}, {"LtRt", 2}, {"51", 6}, {"71", 8}, {"222", 24}, {"SGRP", 4}}};
+    auto const* const it = std::ranges::find(GROUPS, symbol, &std::pair<std::string_view, uint32_t>::first);
+    if (it != GROUPS.end()) {
+        return it->second;
+    }
+    auto const undefined = symbol.size() == 3 && symbol[0] == 'U' ? parse_number<uint32_t>(symbol.substr(1)) : std::nullopt;
+    return undefined && *undefined >= 1 && *undefined <= 64 ? undefined : std::nullopt;
+}
+
+/// The `channel-order=` value among an fmtp's `;`-separated parameters (RFC 4855), its name in any case; empty if none.
+[[nodiscard]] auto channel_order_parameter(std::string_view parameters) noexcept -> std::string_view
+{
+    while (!parameters.empty()) {
+        auto parameter = take(parameters, ';');
+        while (parameter.starts_with(' ')) {
+            parameter.remove_prefix(1);
+        }
+        auto const name = take(parameter, '=');
+        if (equal_ignoring_case(name, "channel-order")) {
+            return parameter;
+        }
+    }
+    return {};
+}
+
 auto parse_direction(std::string_view const name) noexcept -> std::optional<Direction>
 {
     if (name == "sendrecv") {
@@ -498,6 +528,7 @@ class Parser
         media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = offered_.front()});
         rtpmap_ = RtpmapResult::other_payload_type;
         formats_.clear();
+        channel_orders_.clear();
         return success();
     }
 
@@ -534,6 +565,7 @@ class Parser
             for (auto const& f : std::span{formats_}.subspan(1)) {
                 (void)closing->add_alternative(f);  // beyond the capacity, ignored
             }
+            closing->channel_order = primary_channel_order(closing->payload_type);
             return success();
         }
         bool const all_static = std::ranges::all_of(offered_, [](uint8_t const pt) { return pt < 96; });
@@ -545,6 +577,13 @@ class Parser
         return failure(SdpError::missing_field);
     }
 
+    /// The channel order fmtp gave `payload_type`, or empty.
+    [[nodiscard]] auto primary_channel_order(uint8_t const payload_type) const -> std::string
+    {
+        auto const it = std::ranges::find(channel_orders_, payload_type, &ChannelOrder::payload_type);
+        return it != channel_orders_.end() ? it->order : std::string{};
+    }
+
     /// An `a=` line's handler, and whether it applies only within a media section.
     struct AttributeHandler
     {
@@ -552,7 +591,7 @@ class Parser
         bool media_only;
         auto (Parser::*parse)(std::string_view) -> Status;
     };
-    static std::array<AttributeHandler, 8> const ATTRIBUTES;
+    static std::array<AttributeHandler, 10> const ATTRIBUTES;
 
     /// An `a=` line: a direction, or one of ATTRIBUTES; any other is ignored.
     auto attribute(std::string_view rest) -> Status
@@ -670,6 +709,21 @@ class Parser
         return success();
     }
 
+    /// `a=fmtp:<pt> <parameters>`: an offered payload type's well-formed channel order (channel_order_channels()),
+    /// the first for each; another parameter, or a malformed order or line, is ignored.
+    auto fmtp_attribute(std::string_view rest) -> Status
+    {
+        auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
+        auto const order = channel_order_parameter(rest);
+        if (!payload_type || !channel_order_channels(order) || !std::ranges::contains(offered_, *payload_type)) {
+            return success();
+        }
+        if (!std::ranges::contains(channel_orders_, *payload_type, &ChannelOrder::payload_type)) {
+            channel_orders_.push_back({.payload_type = *payload_type, .order = std::string{order}});
+        }
+        return success();
+    }
+
     /// `a=ptime:` in milliseconds; 0 is refused.
     auto ptime_attribute(std::string_view const rest) -> Status
     {
@@ -681,8 +735,26 @@ class Parser
         return success();
     }
 
+    /// `a=maxptime:` in milliseconds (RFC 8866 Section 6.5); informative, so a malformed one or 0 is ignored.
+    auto maxptime_attribute(std::string_view const rest) -> Status
+    {
+        auto const ptime = parse_ptime_us(rest);
+        if (ptime && *ptime != 0) {
+            media_->max_packet_time_us = ptime;
+        }
+        return success();
+    }
+
+    /// One payload type's channel order, as its fmtp gives it.
+    struct ChannelOrder
+    {
+        uint8_t payload_type;
+        std::string order;
+    };
+
     Session session_;
     Media* media_{nullptr};
+    std::vector<ChannelOrder> channel_orders_;               ///< the current media's, by payload type
     std::vector<uint8_t> offered_;                           ///< the current media's payload types, from its m= line
     RtpmapResult rtpmap_{RtpmapResult::other_payload_type};  ///< unsupported once an offered map is unusable
     std::vector<PayloadFormat> formats_;                     ///< the current media's usable maps
@@ -694,7 +766,7 @@ class Parser
     bool unsupported_media_{false};
 };
 
-std::array<Parser::AttributeHandler, 8> const Parser::ATTRIBUTES{{
+std::array<Parser::AttributeHandler, 10> const Parser::ATTRIBUTES{{
     {.name = "ts-refclk", .media_only = false, .parse = &Parser::ts_refclk_attribute},
     {.name = "mediaclk", .media_only = false, .parse = &Parser::mediaclk_attribute},
     {.name = "clock-domain", .media_only = false, .parse = &Parser::clock_domain_attribute},
@@ -703,6 +775,8 @@ std::array<Parser::AttributeHandler, 8> const Parser::ATTRIBUTES{{
     {.name = "rtcp", .media_only = true, .parse = &Parser::rtcp_attribute},
     {.name = "rtcp-mux", .media_only = true, .parse = &Parser::rtcp_mux_attribute},
     {.name = "ptime", .media_only = true, .parse = &Parser::ptime_attribute},
+    {.name = "maxptime", .media_only = true, .parse = &Parser::maxptime_attribute},
+    {.name = "fmtp", .media_only = true, .parse = &Parser::fmtp_attribute},
 }};
 
 }  // namespace
@@ -711,6 +785,24 @@ auto PtpReference::same_clock(PtpReference const& other) const noexcept -> bool
 {
     return grandmaster && other.grandmaster && *grandmaster == *other.grandmaster && domain == other.domain &&
         same_protocol(version, other.version);
+}
+
+auto channel_order_channels(std::string_view order) noexcept -> std::optional<uint32_t>
+{
+    constexpr std::string_view PREFIX = "SMPTE2110.(";
+    if (!order.starts_with(PREFIX) || !order.ends_with(')') || order.ends_with(",)")) {
+        return std::nullopt;
+    }
+    auto groups = order.substr(PREFIX.size(), order.size() - PREFIX.size() - 1);
+    uint32_t channels = 0;
+    do {
+        auto const count = group_channels(take(groups, ','));
+        if (!count) {
+            return std::nullopt;
+        }
+        channels += *count;
+    } while (!groups.empty());
+    return channels;
 }
 
 auto parse(std::string_view text) -> StatusValue<Session>

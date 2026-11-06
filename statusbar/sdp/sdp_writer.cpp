@@ -101,10 +101,10 @@ void write_media_clock(Out out, MediaClock const& clock)
     std::format_to(out, "a=mediaclk:{}\r\n", media_clock_value(clock));
 }
 
-/// A packet time in milliseconds, with no trailing zeros: 1000 -> "1", 125 -> "0.125".
-void write_ptime(Out out, uint32_t const micros)
+/// `a=<attribute>:` and a packet time in milliseconds, with no trailing zeros: 1000 -> "1", 125 -> "0.125".
+void write_ptime(Out out, uint32_t const micros, std::string_view const attribute = "ptime")
 {
-    out = std::format_to(out, "a=ptime:{}", micros / 1000);
+    out = std::format_to(out, "a={}:{}", attribute, micros / 1000);
     if (uint32_t fraction = micros % 1000; fraction != 0) {
         int digits = 3;
         while (fraction % 10 == 0) {
@@ -168,14 +168,20 @@ void write_media_line(Out out, Media const& media)
     std::format_to(out, "\r\n");
 }
 
-/// An rtpmap for each payload type, in order of preference, then the ptime.
+/// An rtpmap for each payload type, in order of preference, the primary's channel order, then ptime and maxptime.
 void write_formats(Out out, Media const& media)
 {
     write_rtpmap(out, media.format());
     for (auto const& alternative : media.other_formats()) {
         write_rtpmap(out, alternative);
     }
+    if (channel_order_channels(media.channel_order)) {
+        out = std::format_to(out, "a=fmtp:{} channel-order={}\r\n", media.payload_type, media.channel_order);
+    }
     write_ptime(out, media.packet_time_us);
+    if (media.max_packet_time_us && *media.max_packet_time_us != 0) {
+        write_ptime(out, *media.max_packet_time_us, "maxptime");
+    }
 }
 
 /// `a=rtcp:<port>[ IN IP4 <address>]` (RFC 3605).

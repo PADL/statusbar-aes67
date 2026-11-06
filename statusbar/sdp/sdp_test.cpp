@@ -5,6 +5,7 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -731,6 +732,138 @@ TEST(sdp_ts_refclk, a_session_without_a_reference_names_no_clock)
     EXPECT_TRUE(session.has_value() && session->effective_clocks(session->media.at(0)).empty());
     EXPECT_FALSE(session->names_clock(
         session->media.at(0), PtpReference{.grandmaster = ieee::eui64_from_string("00-1D-C1-FF-FE-0E-10-C4")}));
+}
+
+//
+// ST 2110-30 Section 6.2.2 channel order, RFC 8866 Section 6.5 maxptime
+//
+
+namespace {
+
+// Shaped like an ST 2110-30 sender's: level C, 125 us, the 2059-2 default domain, channel order and maxptime.
+constexpr std::string_view ST2110 = "v=0\r\n"
+                                    "o=- 1443716955 1443716955 IN IP4 192.168.1.30\r\n"
+                                    "s=2110 sender\r\n"
+                                    "t=0 0\r\n"
+                                    "m=audio 5004 RTP/AVP 97 98\r\n"
+                                    "c=IN IP4 232.10.1.1/64\r\n"
+                                    "a=source-filter: incl IN IP4 232.10.1.1 192.168.1.30\r\n"
+                                    "a=rtpmap:97 L24/48000/8\r\n"
+                                    "a=rtpmap:98 L16/48000/8\r\n"
+                                    "a=fmtp:98 channel-order=SMPTE2110.(ST,ST,ST,ST)\r\n"
+                                    "a=fmtp:97 channel-order=SMPTE2110.(51,ST)\r\n"
+                                    "a=ptime:0.125\r\n"
+                                    "a=maxptime:0.125\r\n"
+                                    "a=ts-refclk:ptp=IEEE1588-2008:08-00-11-FF-FE-21-E1-B0:127\r\n"
+                                    "a=mediaclk:direct=0\r\n";
+
+/// ST2110 with its primary fmtp line replaced by `fmtp` (empty: removed).
+auto with_fmtp(std::string_view const fmtp) -> std::string
+{
+    std::string text{ST2110};
+    std::string const line = "a=fmtp:97 channel-order=SMPTE2110.(51,ST)\r\n";
+    text.replace(text.find(line), line.size(), fmtp);
+    return text;
+}
+
+}  // namespace
+
+TEST(sdp_channel_order, the_primary_formats_order_is_read)
+{
+    auto const session = parse(ST2110);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_EQ(session->media.at(0).channel_order, std::string{"SMPTE2110.(51,ST)"});
+    EXPECT_EQ(session->media.at(0).max_packet_time_us, std::optional<uint32_t>{125});
+}
+
+TEST(sdp_channel_order, a_preferred_alternative_does_not_take_the_primarys_order)
+{
+    auto const session = parse(ST2110);
+    EXPECT_EQ(session->media.at(0).other_formats().size(), size_t{1});
+    EXPECT_EQ(session->media.at(0).other_formats().front().payload_type, uint8_t{98});
+}
+
+TEST(sdp_channel_order, an_order_is_written_and_read_back)
+{
+    auto session = parse(ST2110);
+    auto const text = to_string(*session);
+    EXPECT_TRUE(text.find("a=fmtp:97 channel-order=SMPTE2110.(51,ST)\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=ptime:0.125\r\na=maxptime:0.125\r\n") != std::string::npos);
+    auto const again = parse(text);
+    EXPECT_TRUE(again.has_value());
+    EXPECT_EQ(again->media.at(0).channel_order, session->media.at(0).channel_order);
+    EXPECT_EQ(again->media.at(0).max_packet_time_us, session->media.at(0).max_packet_time_us);
+}
+
+TEST(sdp_channel_order, a_malformed_order_is_neither_kept_nor_written)
+{
+    for (auto const* const fmtp :
+         {"a=fmtp:97 channel-order=SMPTE2110.(XY)\r\n",
+          "a=fmtp:97 channel-order=SMPTE2110.(ST,)\r\n",
+          "a=fmtp:97 channel-order=SMPTE2110.()\r\n",
+          "a=fmtp:97 channel-order=OTHER.(ST)\r\n",
+          "a=fmtp:x channel-order=SMPTE2110.(ST)\r\n",
+          "a=fmtp:99 channel-order=SMPTE2110.(ST)\r\n"}) {
+        auto const session = parse(with_fmtp(fmtp));
+        EXPECT_TRUE(session.has_value());
+        EXPECT_TRUE(session->media.at(0).channel_order.empty());
+    }
+    Session session = *parse(ST2110);
+    session.media.at(0).channel_order = "SMPTE2110.(ST);x=1";
+    EXPECT_TRUE(to_string(session).find("a=fmtp:") == std::string::npos);
+}
+
+TEST(sdp_channel_order, other_parameters_beside_it_are_passed_over)
+{
+    auto const session = parse(with_fmtp("a=fmtp:97 foo=1; Channel-Order=SMPTE2110.(M,U03)\r\n"));
+    EXPECT_EQ(session->media.at(0).channel_order, std::string{"SMPTE2110.(M,U03)"});
+}
+
+TEST(sdp_channel_order, an_absent_order_and_maxptime_are_not_written)
+{
+    auto session = parse(with_fmtp(""));
+    EXPECT_TRUE(session->media.at(0).channel_order.empty());
+    session->media.at(0).max_packet_time_us.reset();
+    auto const text = to_string(*session);
+    EXPECT_TRUE(text.find("a=fmtp:") == std::string::npos);
+    EXPECT_TRUE(text.find("a=maxptime:") == std::string::npos);
+}
+
+TEST(sdp_channel_order, a_malformed_maxptime_is_ignored)
+{
+    std::string text{ST2110};
+    text.replace(text.find("a=maxptime:0.125"), 16, "a=maxptime:x");
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    EXPECT_FALSE(session->media.at(0).max_packet_time_us.has_value());
+}
+
+TEST(sdp_channel_order, each_group_counts_its_channels)
+{
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(M)"), std::optional<uint32_t>{1});
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(DM,ST,LtRt)"), std::optional<uint32_t>{6});
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(51,71,222,SGRP)"), std::optional<uint32_t>{42});
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(U64,U64,U08)"), std::optional<uint32_t>{136});
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(U00)"), std::nullopt);
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(U65)"), std::nullopt);
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(U1)"), std::nullopt);
+    EXPECT_EQ(channel_order_channels("SMPTE2110.(st)"), std::nullopt);
+    EXPECT_EQ(channel_order_channels("SMPTE2110.ST"), std::nullopt);
+    EXPECT_EQ(channel_order_channels(""), std::nullopt);
+}
+
+// RFC 7273 Section 4.8: a reference with no domain is domain 0's, so it never names a domain-127 grandmaster (ST 2110-10
+// senders write the domain)
+TEST(sdp_ts_refclk, a_reference_without_a_domain_names_domain_zero_alone)
+{
+    std::string text{ST2110};
+    text.erase(text.find(":127\r\n"), 4);
+    auto const session = parse(text);
+    EXPECT_TRUE(session.has_value());
+    auto const& media = session->media.at(0);
+    auto const grandmaster = *ieee::eui64_from_string("08-00-11-FF-FE-21-E1-B0");
+    EXPECT_FALSE(session->names_clock(media, PtpReference::naming(grandmaster, 127)));
+    EXPECT_TRUE(session->names_clock(media, PtpReference::naming(grandmaster, 0)));
 }
 
 TEST_MAIN(statusbar_sdp, sdp_test)
