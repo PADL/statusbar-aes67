@@ -315,6 +315,10 @@ class XdpTransport final : public Transport
     auto operator=(XdpTransport&&) -> XdpTransport& = delete;
 
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
+    [[nodiscard]] auto is_local_address(ip::IPv4Address const& address) const noexcept -> bool override
+    {
+        return is_local(interface_, address);
+    }
     /// The interface the socket is bound on.
     [[nodiscard]] auto interface_name() const noexcept -> std::string_view { return interface_.name; }
     /// True when the socket runs zero-copy: the program is native and the
@@ -430,7 +434,7 @@ class XdpTransport final : public Transport
     /// The refusals, refused kicks and pool misses now; the socket's counters at the next end_tick(). Any thread.
     void reset_counters() noexcept override;
     /// A port's datagrams last only the tick they arrived in.
-    [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return true; }
+    [[nodiscard]] auto drain_every_tick(Endpoint const& /*destination*/) const noexcept -> bool override { return true; }
     /// Fails with too_many_filter_rules past MAX_GROUPS groups, and with
     /// resource_unavailable_try_again past MAX_PORTS ports or when the queue to
     /// the real-time thread is full.

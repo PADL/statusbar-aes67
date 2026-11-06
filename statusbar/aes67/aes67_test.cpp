@@ -224,7 +224,7 @@ class LoopTransport final : public Transport
     }
 
     [[nodiscard]] auto send_error() const noexcept -> std::error_code override { return failing; }
-    [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return every_tick; }
+    [[nodiscard]] auto drain_every_tick(Endpoint const& /*destination*/) const noexcept -> bool override { return every_tick; }
 
     std::deque<Packet> queue;
     std::vector<uint64_t> departures;  ///< each packet's departure as the sender gave it
@@ -2003,6 +2003,133 @@ TEST(aes67_udp, sender_renders_each_payload_once_straight_into_the_batch)
             EXPECT_TRUE(got[i] == expected);
         }
     }
+}
+
+// The c= rule: a group and this host's address are received where they name; an offer (c= the origin, AES67-2023
+// Clause 8.5.2) here, from that sender alone, its reports going back to it.
+TEST(aes67_receiver, an_offer_is_received_here_from_its_sender_alone)
+{
+    LoopTransport transport;
+    IPv4Address const sender{10, 0, 0, 5};
+    auto session = stream_session({.address = sender, .port = 5010});
+    session.origin_address = "10.0.0.5";
+    EXPECT_TRUE(
+        receive_endpoint(session, session.media[0], *session.connection, transport) ==
+        (Endpoint{.address = transport.local_address(), .port = 5010}));
+    Receiver receiver{STEREO_L24, {}, transport};
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    Endpoint const here{.address = transport.local_address(), .port = 5010};
+    transport.queue.push_back({here, rtp_packet(1, 952)});
+    receiver.drain(952);
+    EXPECT_EQ(receiver.counters().drops.source, uint64_t{1});  // from 192.168.1.10, not the sender
+    transport.source.address = sender;                         // the datagrams' source from here
+    transport.queue.push_back({here, rtp_packet(2, 952 + FPP)});
+    receiver.drain(952 + FPP);
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
+    auto const rtcp = receiver.rtcp_options();
+    EXPECT_TRUE(rtcp.has_value());
+    EXPECT_TRUE(rtcp->local == (Endpoint{.address = here.address, .port = 5011}));
+    EXPECT_TRUE(rtcp->destination == (Endpoint{.address = sender, .port = 5011}));
+}
+
+TEST(aes67_receiver, a_transport_file_and_a_group_are_received_at_their_c_address)
+{
+    LoopTransport const transport;  // local 192.168.1.10
+    IPv4Address const local{192, 168, 1, 10};
+    auto own = stream_session({.address = local, .port = 5012});
+    own.origin_address = "10.0.0.5";
+    EXPECT_TRUE(receive_endpoint(own, own.media[0], *own.connection, transport) == (Endpoint{.address = local, .port = 5012}));
+    auto group = stream_session({.address = IPv4Address{239, 69, 1, 9}, .port = 5014});
+    group.origin_address = "239.69.1.9";  // never an offer
+    EXPECT_TRUE(
+        receive_endpoint(group, group.media[0], *group.connection, transport) ==
+        (Endpoint{.address = IPv4Address{239, 69, 1, 9}, .port = 5014}));
+    auto looped = stream_session({.address = local, .port = 5016});
+    looped.origin_address = "192.168.1.10";  // our own stream, c= and o= ours
+    EXPECT_TRUE(
+        receive_endpoint(looped, looped.media[0], *looped.connection, transport) == (Endpoint{.address = local, .port = 5016}));
+    // another host's, or no host at all: refused by the host's addresses, not by a bind the kernel may allow
+    auto foreign = stream_session({.address = IPv4Address{10, 0, 0, 9}, .port = 5018});
+    foreign.origin_address = "10.0.0.5";
+    EXPECT_TRUE(
+        receive_endpoint(foreign, foreign.media[0], *foreign.connection, transport).error() == Aes67Error::foreign_destination);
+    auto none = stream_session({.address = IPv4Address{}, .port = 5020});
+    none.origin_address = "0.0.0.0";
+    EXPECT_TRUE(receive_endpoint(none, none.media[0], *none.connection, transport).error() == Aes67Error::foreign_destination);
+}
+
+// A tag set on an output is dropped when it is pointed at a unicast destination, and not taken there.
+TEST(aes67_sender, a_unicast_destination_is_untagged_whatever_tag_was_set)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    auto const tag = ieee::make_vlan_tag(2, false, 3);
+    EXPECT_TRUE(sender.set_vlan(tag).has_value());
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{10, 0, 0, 9}, .port = 5004}).has_value());
+    EXPECT_FALSE(sender.vlan().has_value());
+    EXPECT_FALSE(transport.vlan.has_value());
+    EXPECT_TRUE(sender.set_vlan(tag).has_value());
+    EXPECT_FALSE(sender.vlan().has_value());
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 1}, .port = 5004}).has_value());
+    EXPECT_TRUE(sender.set_vlan(tag).has_value());
+    EXPECT_TRUE(sender.vlan() == std::optional{tag});
+}
+
+// A unicast c= that is neither ours nor the origin names another host: the kernel will not bind it.
+TEST(aes67_udp, a_unicast_stream_to_another_host_is_refused)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    Receiver receiver{STEREO_L24, {}, **transport};
+    auto const refused = receiver.configure(stream_session({.address = IPv4Address{192, 0, 2, 77}, .port = 45020}));
+    EXPECT_TRUE(!refused && refused.error() == Aes67Error::foreign_destination);
+    EXPECT_TRUE(receiver.state() == State::error && receiver.error() == Aes67Error::foreign_destination);
+}
+
+// A unicast sender's socket leaves by its interface from its address, with the TTL asked and priority 0, so its
+// DSCP never maps it to an SR class's queue.
+TEST(aes67_udp, a_unicast_send_socket_is_pinned_to_its_interface_at_priority_zero)
+{
+    auto info = find_interface("lo");
+    EXPECT_TRUE(info.has_value());
+    if (!info) {
+        return;
+    }
+    EXPECT_TRUE(info->loopback && is_local(*info, own_loopback()) && !is_local(*info, IPv4Address{10, 0, 0, 9}));
+    auto fd = open_send_socket(*info, {.destination = {.address = own_loopback(), .port = 45022}, .ttl = 7});
+    EXPECT_TRUE(fd.has_value());
+    if (!fd) {
+        return;
+    }
+    int value = -1;
+    socklen_t length = sizeof(value);
+    EXPECT_EQ(::getsockopt(fd->get(), SOL_SOCKET, SO_PRIORITY, &value, &length), 0);
+    EXPECT_EQ(value, 0);
+    EXPECT_EQ(::getsockopt(fd->get(), IPPROTO_IP, IP_TTL, &value, &length), 0);
+    EXPECT_EQ(value, 7);
+    sockaddr_in bound{};
+    socklen_t bound_length = sizeof(bound);
+    EXPECT_EQ(::getsockname(fd->get(), reinterpret_cast<sockaddr*>(&bound), &bound_length), 0);
+    EXPECT_TRUE(from_sockaddr(bound).address == info->address);
+    auto group = open_send_socket(*info, {.destination = {.address = own_group(), .port = 45022}});
+    EXPECT_TRUE(group.has_value());
+    EXPECT_EQ(::getsockopt(group->get(), SOL_SOCKET, SO_PRIORITY, &value, &length), 0);
+    EXPECT_EQ(value, 2);  // a group's keeps the one AF41 maps to (TC_PRIO_BULK, rt_tos2priority())
+    // a unicast stream's RTCP socket leaves as its stream's: by the interface, with its TTL, at priority 0
+    auto rtcp = open_rtcp_socket(*info, {.destination = {.address = own_loopback(), .port = 45023}, .ttl = 9});
+    EXPECT_TRUE(rtcp.has_value());
+    if (!rtcp) {
+        return;
+    }
+    EXPECT_EQ(::getsockopt((*rtcp)->fd(), SOL_SOCKET, SO_PRIORITY, &value, &length), 0);
+    EXPECT_EQ(value, 0);
+    EXPECT_EQ(::getsockopt((*rtcp)->fd(), IPPROTO_IP, IP_TTL, &value, &length), 0);
+    EXPECT_EQ(value, 9);
+    uint32_t index = 0;
+    socklen_t index_length = sizeof(index);
+    EXPECT_EQ(::getsockopt((*rtcp)->fd(), IPPROTO_IP, IP_UNICAST_IF, &index, &index_length), 0);
+    EXPECT_EQ(ntohl(index), info->index);
 }
 
 TEST_MAIN(statusbar_aes67, aes67_test)

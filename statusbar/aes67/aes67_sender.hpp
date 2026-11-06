@@ -158,6 +158,7 @@ class Sender
     /// Tag the stream's packets with `vlan` (PCP and VID), or none (nullopt): from the next packet when
     /// configured, the run, its sequence and timestamps going on; kept for the next configure(). Off the
     /// real-time thread. Fails, keeping the tag before, when the transport cannot tag (SendPort::set_vlan()).
+    /// To a unicast destination the stream is untagged whatever is asked, and vlan() says none.
     [[nodiscard]] auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status;
     [[nodiscard]] auto vlan() const noexcept -> std::optional<ieee::VlanTag> const& { return vlan_; }
 
@@ -211,6 +212,8 @@ class Sender
     /// A random SSRC, neither 0 nor the current one.
     [[nodiscard]] auto fresh_ssrc() noexcept -> uint32_t;
 
+    /// Before open_port(): clear(), and no tag for a unicast destination.
+    void prepare(Destination const& destination) noexcept;
     /// clear(), then open the transport to `destination`; on failure State::error and error().
     [[nodiscard]] auto open_port(Destination const& destination) -> Status;
     /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.

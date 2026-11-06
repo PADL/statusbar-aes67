@@ -436,6 +436,29 @@ TEST(aes67_xdp, joined_groups_are_redirected_untagged_and_every_group_tagged_wit
     EXPECT_FALSE(redirected(past_ipv4_range));
 }
 
+// A unicast stream to this host matches no rule, untagged or on the SR VID: the program passes it to the kernel
+// (XDP_PASS), whose socket receives it, while the group beside it is still redirected.
+TEST(aes67_xdp, a_unicast_stream_is_passed_to_the_kernel_beside_the_groups)
+{
+    IPv4Address const group{239, 69, 1, 2};
+    std::array const rules{XdpTransport::group_rule(group), XdpTransport::tagged_groups_rule(2)};
+    net::TcamClassifier<32> classifier;
+    classifier.set_rules(rules);
+    auto const redirected = [&classifier](std::vector<uint8_t> const& frame) {
+        return (classifier.classify_first(frame) & net::flag::process) != 0;
+    };
+    Endpoint const here{.address = IPv4Address{10, 0, 0, 1}, .port = 5004};
+    auto const to_host = [&here](std::optional<ieee::VlanTag> const vlan) {
+        auto frame = rtp_frame_to(here, vlan);
+        std::array<uint8_t, 6> const mac{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};  // the interface's own
+        std::ranges::copy(mac, frame.begin());
+        return frame;
+    };
+    EXPECT_TRUE(redirected(rtp_frame_to({.address = group, .port = 5004})));
+    EXPECT_FALSE(redirected(to_host(std::nullopt)));
+    EXPECT_FALSE(redirected(to_host(ieee::make_vlan_tag(2, false, 3))));
+}
+
 TEST(aes67_xdp, the_tagged_rule_goes_last_so_a_vid_change_leaves_the_group_slots_alone)
 {
     auto const same = [](net::CompiledRule<32> const& a, net::CompiledRule<32> const& b) {
@@ -699,7 +722,7 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     }
     EXPECT_FALSE((*transport)->zero_copy());  // copy was forced (and lo has no zero-copy)
     EXPECT_TRUE((*transport)->bind_mode() == net::XdpBindMode::copy);
-    EXPECT_TRUE((*transport)->drain_every_tick());
+    EXPECT_TRUE((*transport)->drain_every_tick({.address = IPv4Address{239, 69, 0, 1}, .port = 5004}));
     auto const rss = (*transport)->rss_status();
     EXPECT_TRUE(!rss && rss.error() == std::errc::operation_not_supported);  // lo has no RSS
     Endpoint const unicast{.address = IPv4Address{127, 0, 0, 1}, .port = 5004};

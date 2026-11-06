@@ -139,7 +139,7 @@ class FakeTransport final : public Transport
         opened.push_back(options);
         return std::make_unique<Rtcp>(*this);
     }
-    [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return true; }
+    [[nodiscard]] auto drain_every_tick(Endpoint const& /*destination*/) const noexcept -> bool override { return true; }
 
     std::deque<std::vector<uint8_t>> rtp_in;
     std::deque<std::vector<uint8_t>> rtcp_in;

@@ -10,6 +10,7 @@ statusbar_add_module(
   aes67_rtcp.cpp
   aes67_sender.cpp
   aes67_socket.cpp
+  aes67_split_transport.cpp
   aes67_udp_transport.cpp
   aes67_xdp_transport.cpp
   DEPS
@@ -23,6 +24,7 @@ statusbar_add_module(
   statusbar::status
   TESTS
   aes67_rtcp_test.cpp
+  aes67_split_transport_test.cpp
   aes67_test.cpp
   aes67_veth_test.cpp
   aes67_xdp_test.cpp)

@@ -40,6 +40,10 @@ class UdpTransport final : public Transport
     auto operator=(UdpTransport&&) -> UdpTransport& = delete;
 
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
+    [[nodiscard]] auto is_local_address(ip::IPv4Address const& address) const noexcept -> bool override
+    {
+        return is_local(interface_, address);
+    }
     [[nodiscard]] auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> override;
     /// Fails operation_not_supported for a SendOptions::vlan: a socket cannot tag.
     [[nodiscard]] auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override;
