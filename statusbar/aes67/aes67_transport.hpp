@@ -41,12 +41,16 @@ struct Endpoint
     return {.address = media.address, .port = static_cast<uint16_t>(media.port + 1)};
 }
 
+/// Datagram::frame of a datagram whose payload no frame of the transport's holds.
+inline constexpr uint64_t NO_FRAME = ~uint64_t{0};
+
 /// A received UDP payload. `payload` is valid until the next receive() on the
-/// same port or the next begin_tick(), whichever is first.
+/// same port or the next begin_tick(), whichever is first, unless ReceivePort::hold() keeps it.
 struct Datagram
 {
     std::span<uint8_t const> payload;
     Endpoint source;
+    uint64_t frame{NO_FRAME};  ///< the transport's frame `payload` lies in (ReceivePort::hold()), or NO_FRAME
 };
 
 /// True when `datagram` is RTCP, as on a port carrying RTP and RTCP alike: version 2 and a packet type
@@ -113,6 +117,16 @@ class ReceivePort
     /// Why the stream cannot arrive now (the transport's filter does not take its group), or none (the default).
     /// The draining thread; it clears when the transport takes the group again.
     [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
+    /// Keep the frame a datagram receive() gave lies in past the next receive() and begin_tick(): its payload
+    /// stays valid until release(datagram.frame). False when it cannot (no frame, or the transport keeps as
+    /// many as it can; the default): copy the payload within the tick instead. The draining thread.
+    [[nodiscard]] virtual auto hold(Datagram const& datagram) noexcept -> bool
+    {
+        (void)datagram;
+        return false;
+    }
+    /// Give back a frame hold() kept, on any port of its transport. The draining thread.
+    virtual void release(uint64_t const frame) noexcept { (void)frame; }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX
