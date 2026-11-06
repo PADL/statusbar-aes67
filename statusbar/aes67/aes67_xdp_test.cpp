@@ -377,16 +377,16 @@ TEST(aes67_xdp, the_rtcp_pipe_copies_datagrams_and_drops_past_its_depth)
 
     std::array<Datagram, 4> out{};
     std::array<XdpTransport::RtcpPipe::Frame, 4> storage{};
-    size_t taken = 0;
+    size_t consumed = 0;
     for (size_t n = pipe.take(out, storage); n > 0; n = pipe.take(out, storage)) {
         for (size_t i = 0; i < n; ++i) {
             EXPECT_EQ(out[i].payload.size(), size_t{8});
-            EXPECT_EQ(out[i].payload[7], static_cast<uint8_t>(taken + i));
+            EXPECT_EQ(out[i].payload[7], static_cast<uint8_t>(consumed + i));
             EXPECT_TRUE(out[i].source == source);
         }
-        taken += n;
+        consumed += n;
     }
-    EXPECT_EQ(taken, XdpTransport::RtcpPipe::DEPTH);
+    EXPECT_EQ(consumed, XdpTransport::RtcpPipe::DEPTH);
 }
 
 TEST(aes67_xdp, the_rtcp_pipe_drops_datagrams_longer_than_it_keeps)

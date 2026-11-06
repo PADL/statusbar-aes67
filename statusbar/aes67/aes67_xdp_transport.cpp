@@ -57,7 +57,6 @@ class XdpTransport::Port final : public ReceivePort
     [[nodiscard]] auto error() const noexcept -> std::error_code override { return state_->rule_error; }
 
     [[nodiscard]] auto hold(Datagram const& datagram) noexcept -> bool override { return transport_.keep(datagram.frame); }
-    void release(uint64_t const frame) noexcept override { transport_.unkeep(frame); }
 
   private:
     XdpTransport& transport_;
@@ -223,9 +222,10 @@ XdpTransport::XdpTransport(InterfaceInfo interface) noexcept
 {}
 
 XdpTransport::~XdpTransport()
-{
+{  // NOLINT(statusbar-block-statements): the teardown, in the order it must happen
     assert(live_ports_ == 0 && "every receive port must be destroyed before its transport");
     assert(live_rtcp_ == 0 && "every RTCP port must be destroyed before its transport");
+    assert(keeper_.kept() == 0 && "every kept frame must be released before its transport");
     release_held();
     delete_port_states();
     collect_retired();
@@ -378,8 +378,8 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    if (auto const taken = transport->take_options(options); !taken) {
-        return forward_failure(taken);
+    if (auto const applied = transport->apply_options(options); !applied) {
+        return forward_failure(applied);
     }
     if (auto opened = transport->open_steered(options); !opened) {
         return forward_failure(opened);
@@ -387,7 +387,7 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
     return transport;
 }
 
-auto XdpTransport::take_options(Options const& options) noexcept -> Status
+auto XdpTransport::apply_options(Options const& options) noexcept -> Status
 {
     if (options.shared_umem != nullptr && options.shared_umem->ledger().frames_per_share() != UMEM_FRAMES) {
         return failure(std::errc::invalid_argument);  // the keeper indexes a share of UMEM_FRAMES
@@ -779,15 +779,16 @@ auto XdpTransport::send_gathered(
     bool const headers_before) noexcept -> bool
 {
     size_t const segments = context_.tx_segments();
-    if (shared_ == nullptr || payload.empty() || payload.size() > segments) {
+    if (shared_ == nullptr || payload.empty() || payload.size() > segments || payload.size() > MAX_GATHER_BUFFERS) {
         return false;
     }
     size_t const length =
         std::ranges::fold_left(payload, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
-    if (payload.size() < segments) {
-        return gather_after_headers(addressing, header, payload, length, departure_ns);
+    // In place first where the headers may go before the payload: one buffer fewer, no frame of the pool's.
+    if (headers_before && writes_headers_before() && gather_in_place(addressing, header, payload, length, departure_ns)) {
+        return true;
     }
-    return headers_before && gather_in_place(addressing, header, payload, length, departure_ns);
+    return payload.size() < segments && gather_after_headers(addressing, header, payload, length, departure_ns);
 }
 
 auto XdpTransport::gather_after_headers(
@@ -822,7 +823,7 @@ auto XdpTransport::gather_in_place(
     if (!first) {
         return false;
     }
-    std::array<std::span<uint8_t const>, MAX_GATHER> pieces{};
+    std::array<std::span<uint8_t const>, MAX_GATHER_BUFFERS> pieces{};
     pieces[0] = *first;
     std::ranges::copy(payload.subspan(1), pieces.begin() + 1);
     return context_.tx_commit_gather(std::nullopt, 0, std::span{pieces}.first(payload.size()), launch_for(departure_ns))
@@ -838,12 +839,19 @@ auto XdpTransport::headers_before(
     std::array<uint8_t, MAX_HEADERS> headers{};
     auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, length, headers);
     auto const at = shared_->address_of(first.data(), first.size());
-    // The headers, and the launch time's metadata below them, stay within the first buffer's frame.
-    if (!offset || !at || *at % shared_->ledger().frame_size() < *offset + context_.tx_metadata_len()) {
+    if (!offset || !at || !headers_fit_before(*at, *offset)) {
         return std::nullopt;
     }
     std::copy_n(headers.data(), *offset, shared_->area() + *at - *offset);
     return std::span<uint8_t const>{shared_->area() + *at - *offset, *offset + first.size()};
+}
+
+auto XdpTransport::headers_fit_before(uint64_t const at, size_t const offset) const noexcept -> bool
+{
+    // The headers stay within the first buffer's frame, above the metadata the kernel reads below a descriptor;
+    // and a transmit still pointing into the frame (the last packet's, split across two) must not see them change.
+    bool const room = at % shared_->ledger().frame_size() >= offset + context_.tx_metadata_len();
+    return room && !shared_->ledger().lent(at);
 }
 
 void XdpTransport::start_cycle() noexcept

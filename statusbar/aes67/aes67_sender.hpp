@@ -76,9 +76,6 @@ class Sender
     void set_gatherer(FrameGatherer gatherer) noexcept { gatherer_ = std::move(gatherer); }
     /// Packets sent where their frames lay. The sending thread.
     [[nodiscard]] auto gathered() const noexcept -> uint64_t { return gathered_; }
-    /// Buffers one packet is gathered from at most.
-    static constexpr size_t MAX_GATHER = 16;
-
     /// Where the packet grid starts, in frames (taken modulo frames_per_packet):
     /// packets carry [k * fpp + phase, (k + 1) * fpp + phase). Call before
     /// configure(), off the real-time thread.
@@ -204,7 +201,7 @@ class Sender
     FrameProvider provider_;
     FrameGatherer gatherer_;
     uint64_t gathered_{0};
-    std::array<std::span<uint8_t const>, MAX_GATHER> pieces_{};  ///< the gatherer's, each packet
+    std::array<std::span<uint8_t const>, MAX_GATHER_BUFFERS> pieces_{};  ///< the gatherer's, each packet
     Transport& transport_;
     std::string name_;
     /// One version on (the first: the wall clock's seconds, one on).
@@ -240,6 +237,8 @@ class Sender
     [[nodiscard]] auto send_packet(rtp::RtpHeader const& header) noexcept -> bool;
     /// The packet sent where its frames lie, if the gatherer finds them and the port takes them.
     [[nodiscard]] auto send_gathered(rtp::RtpHeader const& header) noexcept -> bool;
+    /// Whether `pieces` are one packet's payload exactly: some, and payload_.size() bytes between them.
+    [[nodiscard]] auto whole(std::span<std::span<uint8_t const> const> pieces) const noexcept -> bool;
     /// Flushes the `queued` packets and counts what went out.
     void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
     /// Adds `packets` sent to the SR's counts and publishes them.

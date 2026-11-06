@@ -60,7 +60,7 @@ class Receiver
     /// From a FrameHandler: keep the frame the frames being handled lie in (ReceivePort::hold()), their bytes
     /// valid until release_frame() of the frame returned; nullopt when the port cannot keep it.
     [[nodiscard]] auto hold_frame() noexcept -> std::optional<uint64_t>;
-    /// Give back a frame hold_frame() kept (ReceivePort::release()). The draining thread.
+    /// Give back a frame hold_frame() kept (Transport::release_frame()), after clear() too. The draining thread.
     void release_frame(uint64_t frame) noexcept;
 
     /// Take what has arrived and hand it on, with indices about `now_index`

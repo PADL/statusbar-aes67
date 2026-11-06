@@ -165,7 +165,6 @@ class LoopTransport final : public Transport
             transport.kept.push_back(datagram.frame);
             return true;
         }
-        void release(uint64_t const frame) noexcept override { transport.released.push_back(frame); }
         LoopTransport& transport;
         Endpoint destination;
         std::deque<std::vector<uint8_t>> held;
@@ -267,7 +266,8 @@ class LoopTransport final : public Transport
     std::vector<std::pair<size_t, bool>> gathers;  ///< each gathered send's buffers and headers_before
     uint64_t next_frame{0};                        ///< the next datagram's frame
     std::vector<uint64_t> kept;                    ///< frames held, in order
-    std::vector<uint64_t> released;                ///< frames released, in order
+    void release_frame(uint64_t const frame) noexcept override { released.push_back(frame); }
+    std::vector<uint64_t> released;  ///< frames released, in order
 };
 
 auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
