@@ -94,6 +94,15 @@ class XdpTransport::Sender final : public SendPort
         return frame && transport_.commit(frame->first, frame->second, departure_ns);
     }
 
+    auto send_gathered_at(
+        rtp::RtpHeader const& header,
+        std::span<std::span<uint8_t const> const> const payload,
+        uint64_t const departure_ns,
+        bool const headers_before) noexcept -> bool override
+    {
+        return transport_.send_gathered(addressing_.current(), header, payload, departure_ns, headers_before);
+    }
+
     /// The transport flushes every sender's frames in end_tick().
     auto flush() noexcept -> size_t override { return 0; }
 
@@ -255,6 +264,9 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .bind_mode = options.bind_mode,
         .attach_mode = options.attach_mode,
         .pin_path = options.pin_path,
+        .shared_umem = options.shared_umem,
+        .umem_share = options.umem_share,
+        .tx_scatter_gather = options.scatter_gather,
     };
 }
 
@@ -366,11 +378,24 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    transport->queue_ = options.queue;
+    if (auto const taken = transport->take_options(options); !taken) {
+        return forward_failure(taken);
+    }
     if (auto opened = transport->open_steered(options); !opened) {
         return forward_failure(opened);
     }
     return transport;
+}
+
+auto XdpTransport::take_options(Options const& options) noexcept -> Status
+{
+    if (options.shared_umem != nullptr && options.shared_umem->ledger().frames_per_share() != UMEM_FRAMES) {
+        return failure(std::errc::invalid_argument);  // the keeper indexes a share of UMEM_FRAMES
+    }
+    queue_ = options.queue;
+    shared_ = options.shared_umem;
+    first_frame_ = options.shared_umem != nullptr ? options.umem_share * UMEM_FRAMES : 0;
+    return success();
 }
 
 auto XdpTransport::open_steered(Options const& options) -> Status
@@ -630,10 +655,10 @@ void XdpTransport::release_held() noexcept
 auto XdpTransport::frame_index(uint64_t const frame) const noexcept -> std::optional<size_t>
 {
     size_t const size = context_.umem_frame_size();
-    if (size == 0 || frame == NO_FRAME || frame / size >= UMEM_FRAMES) {
+    if (size == 0 || frame == NO_FRAME || frame / size < first_frame_ || frame / size - first_frame_ >= UMEM_FRAMES) {
         return std::nullopt;
     }
-    return static_cast<size_t>(frame / size);
+    return static_cast<size_t>((frame / size) - first_frame_);
 }
 
 auto XdpTransport::keep(uint64_t const frame) noexcept -> bool
@@ -732,10 +757,90 @@ auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, 
     // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
     // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
-        uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (the tick's reading is 0)
-        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, tick_phc_ns_)));
+        (void)context_.tx_set_launch_time(slot.handle, launch_for(departure_ns));
     }
     return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
+}
+
+auto XdpTransport::launch_for(uint64_t const departure_ns) noexcept -> int64_t
+{
+    if (!context_.tx_launch_time()) {
+        return 0;
+    }
+    uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (the tick's reading is 0)
+    return static_cast<int64_t>(launch_clock_.next(departure, tick_phc_ns_));
+}
+
+auto XdpTransport::send_gathered(
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    std::span<std::span<uint8_t const> const> const payload,
+    uint64_t const departure_ns,
+    bool const headers_before) noexcept -> bool
+{
+    size_t const segments = context_.tx_segments();
+    if (shared_ == nullptr || payload.empty() || payload.size() > segments) {
+        return false;
+    }
+    size_t const length =
+        std::ranges::fold_left(payload, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
+    if (payload.size() < segments) {
+        return gather_after_headers(addressing, header, payload, length, launch_for(departure_ns));
+    }
+    return headers_before && gather_in_place(addressing, header, payload, length, launch_for(departure_ns));
+}
+
+auto XdpTransport::gather_after_headers(
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    std::span<std::span<uint8_t const> const> const payload,
+    size_t const length,
+    int64_t const launch) noexcept -> bool
+{
+    auto slot = tx_pool_.take();
+    if (!slot) {
+        return false;
+    }
+    auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, length, slot->buffer);
+    if (!offset) {
+        (void)tx_pool_.put(*slot);
+        return false;
+    }
+    return context_.tx_commit_gather(slot->handle, *offset, payload, launch).has_value();  // a refusal frees the slot
+}
+
+auto XdpTransport::gather_in_place(
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    std::span<std::span<uint8_t const> const> const payload,
+    size_t const length,
+    int64_t const launch) noexcept -> bool
+{
+    auto const first = headers_before(addressing, header, length, payload[0]);
+    if (!first) {
+        return false;
+    }
+    std::array<std::span<uint8_t const>, MAX_GATHER> pieces{};
+    pieces[0] = *first;
+    std::ranges::copy(payload.subspan(1), pieces.begin() + 1);
+    return context_.tx_commit_gather(std::nullopt, 0, std::span{pieces}.first(payload.size()), launch).has_value();
+}
+
+auto XdpTransport::headers_before(
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    size_t const length,
+    std::span<uint8_t const> const first) noexcept -> std::optional<std::span<uint8_t const>>
+{
+    std::array<uint8_t, MAX_HEADERS> headers{};
+    auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, length, headers);
+    auto const at = shared_->address_of(first.data(), first.size());
+    // The headers, and the launch time's metadata below them, stay within the first buffer's frame.
+    if (!offset || !at || *at % shared_->ledger().frame_size() < *offset + context_.tx_metadata_len()) {
+        return std::nullopt;
+    }
+    std::copy_n(headers.data(), *offset, shared_->area() + *at - *offset);
+    return std::span<uint8_t const>{shared_->area() + *at - *offset, *offset + first.size()};
 }
 
 void XdpTransport::start_cycle() noexcept
