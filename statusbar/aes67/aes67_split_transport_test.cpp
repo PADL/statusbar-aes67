@@ -86,6 +86,11 @@ class RecordingTransport final : public Transport
     [[nodiscard]] auto send_error() const noexcept -> std::error_code override { return failing; }
     [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override { return refusals; }
     void reset_counters() noexcept override { refusals = {}; }
+    [[nodiscard]] auto holds_frames() const noexcept -> bool override { return keeps; }
+    void release_frame(uint64_t const frame) noexcept override { released.push_back(frame); }
+    [[nodiscard]] auto frames_shared() const noexcept -> bool override { return keeps; }
+    [[nodiscard]] auto gather_buffers() const noexcept -> size_t override { return keeps ? 15 : 0; }
+    [[nodiscard]] auto writes_headers_before() const noexcept -> bool override { return keeps; }
 
     std::vector<IPv4Address> opened;
     bool tagged{false};  ///< the last open_send() asked for a tag
@@ -93,6 +98,8 @@ class RecordingTransport final : public Transport
     int ended{0};
     std::error_code failing;
     ReceiveRefusals refusals;
+    bool keeps{false};  ///< keeps, shares and gathers frames, as AF_XDP on a shared UMEM
+    std::vector<uint64_t> released;
 
   private:
     bool every_tick_;
@@ -172,6 +179,18 @@ TEST(aes67_split_transport, a_send_error_is_the_multicast_transport_s_before_the
 }
 
 // A tagged output moved to a unicast destination (its tag carried over) opens untagged: a reservation is to a group.
+TEST(aes67_split_transport, frames_are_kept_shared_gathered_and_released_by_the_multicast_transport)
+{
+    auto const [multicast, unicast, split] = make_pair();
+    EXPECT_FALSE(split->holds_frames());
+    multicast->keeps = true;
+    EXPECT_TRUE(split->holds_frames() && split->frames_shared() && split->writes_headers_before());
+    EXPECT_EQ(split->gather_buffers(), size_t{15});
+    split->release_frame(42);
+    EXPECT_TRUE(multicast->released == (std::vector<uint64_t>{42}));
+    EXPECT_TRUE(unicast->released.empty());
+}
+
 TEST(aes67_split_transport, a_unicast_send_port_is_opened_untagged)
 {
     auto const [multicast, unicast, split] = make_pair();

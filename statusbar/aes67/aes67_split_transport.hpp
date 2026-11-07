@@ -63,6 +63,13 @@ class SplitTransport final : public Transport
     /// Both transports' refusals, summed.
     [[nodiscard]] auto receive_refusals() const noexcept -> ReceiveRefusals override;
     void reset_counters() noexcept override;
+    /// The multicast transport's: its ports alone keep and gather frames; a unicast port refuses both and copies.
+    [[nodiscard]] auto holds_frames() const noexcept -> bool override { return multicast_->holds_frames(); }
+    /// Given back to the multicast transport, whose ports alone hold.
+    void release_frame(uint64_t const frame) noexcept override { multicast_->release_frame(frame); }
+    [[nodiscard]] auto frames_shared() const noexcept -> bool override { return multicast_->frames_shared(); }
+    [[nodiscard]] auto gather_buffers() const noexcept -> size_t override { return multicast_->gather_buffers(); }
+    [[nodiscard]] auto writes_headers_before() const noexcept -> bool override { return multicast_->writes_headers_before(); }
 
   private:
     [[nodiscard]] auto for_address(ip::IPv4Address const& address) const noexcept -> Transport&
