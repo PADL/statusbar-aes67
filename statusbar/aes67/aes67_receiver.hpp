@@ -111,8 +111,9 @@ class Receiver
     /// The stream's payload type, offset, source filter and RTCP endpoints, from the SDP, received at `endpoint`.
     void apply_media(
         sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
-    /// clear(), then open the transport for `destination`; on failure State::error and error().
-    [[nodiscard]] auto reopen(Endpoint const& destination) -> Status;
+    /// clear(), then open the transport for `destination`, joined for `source` alone when it is a source-specific
+    /// group (RFC 4607) and a source is given; on failure State::error and error().
+    [[nodiscard]] auto reopen(Endpoint const& destination, std::optional<ip::IPv4Address> const& source) -> Status;
     /// State::error with `error`, returned.
     [[nodiscard]] auto refused(std::error_code error) noexcept -> Status;
     /// The port reopen() opened for `destination` taken on, or why it did not open as State::error and error().

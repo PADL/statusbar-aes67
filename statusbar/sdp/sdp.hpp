@@ -5,7 +5,8 @@
 
 /// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection,
 /// L16/L24/L32/AM824 audio media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source
-/// filters and the RFC 3605 RTCP port. Session- or media-level values resolve through the effective_*() accessors.
+/// filters, the RFC 3605 RTCP port, maxptime and ST 2110-30's channel-order. Session- or media-level values resolve
+/// through the effective_*() accessors.
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -239,8 +240,9 @@ struct Media
     uint16_t channels{1};
     std::array<PayloadFormat, MAX_ALTERNATIVES> alternatives{};  ///< further offered formats, in m= line order
     uint8_t alternative_count{0};
-    uint32_t packet_time_us{1000};  ///< a=ptime; AES67's default is 1 ms
-    std::string information;        ///< i=
+    uint32_t packet_time_us{1000};               ///< a=ptime; AES67's default is 1 ms
+    std::optional<uint32_t> max_packet_time_us;  ///< a=maxptime (RFC 8866 Section 6.5), when given
+    std::string information;                     ///< i=
     std::optional<Direction> direction;
     std::optional<Connection> connection;
     ReferenceClocks clocks;  ///< a=ts-refclk
@@ -249,6 +251,9 @@ struct Media
     std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see ClockDomain below)
     std::optional<RtcpAttribute> rtcp;    ///< a=rtcp
     bool rtcp_mux{false};                 ///< a=rtcp-mux (RFC 5761) was given; read, never written
+    /// The primary format's `a=fmtp:<pt> channel-order=` (ST 2110-30 Section 6.2.2), e.g. "SMPTE2110.(ST)": read and
+    /// written only in the form channel_order_channels() counts; empty when absent.
+    std::string channel_order;
 
     /// The primary format.
     [[nodiscard]] constexpr auto format() const noexcept -> PayloadFormat
@@ -379,6 +384,10 @@ struct Session
 
     auto operator==(Session const&) const -> bool = default;
 };
+
+/// The channels an ST 2110-30 Section 6.2.2 channel order names ("SMPTE2110.(51,ST)" is 8): the sum of its groups,
+/// M 1, DM, ST and LtRt 2, 51 6, 71 8, 222 24, SGRP 4, Unn nn (01-64); nullopt for any other form.
+[[nodiscard]] auto channel_order_channels(std::string_view order) noexcept -> std::optional<uint32_t>;
 
 /// Parse a session description (CRLF or LF). Fails without v=0, an IN IP4 origin, s=, t= and a
 /// connection for every audio media kept; unsupported_encoding when none is kept, missing_field for

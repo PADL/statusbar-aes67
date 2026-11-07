@@ -48,9 +48,10 @@ inline constexpr size_t PKTINFO_SPACE = CMSG_SPACE(sizeof(in_pktinfo));
 /// `interface_index` is 0, `interface_index` as the interface it arrived on; false without one.
 [[nodiscard]] auto destined_for(msghdr& header, ip::IPv4Address const& address, unsigned int interface_index = 0) noexcept -> bool;
 
-/// A UDP socket bound to `local` with IP_PKTINFO on (SO_REUSEADDR when `shared`). A group is joined
-/// on `interface` with IP_MULTICAST_ALL off, so only this socket's joins, on their interfaces, reach it.
-[[nodiscard]] auto open_receive_socket(InterfaceInfo const& interface, Endpoint const& local, bool shared)
+/// A UDP socket bound to `local` with IP_PKTINFO on (SO_REUSEADDR when `shared`). A group is joined on `interface`,
+/// for `source` alone when given (RFC 4607), with IP_MULTICAST_ALL off, so only this socket's joins reach it.
+[[nodiscard]] auto open_receive_socket(
+    InterfaceInfo const& interface, Endpoint const& local, bool shared, std::optional<ip::IPv4Address> const& source = std::nullopt)
     -> StatusValue<net::FileDescriptor>;
 
 /// A sender's unconnected UDP socket, marked with `options.dscp`: to a group out of `interface` with `options.ttl`
@@ -58,8 +59,8 @@ inline constexpr size_t PKTINFO_SPACE = CMSG_SPACE(sizeof(in_pktinfo));
 /// at socket priority 0, so the DSCP never maps it to an SR class's queue (AES67-2023 Annex C.1.2).
 [[nodiscard]] auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options) -> StatusValue<net::FileDescriptor>;
 
-/// An RTCP port on a kernel UDP socket: bound to the group (joined, sent to with `options.ttl` and
-/// loopback) or to RtcpOptions::local (by default `interface`'s address; out of `interface` with
+/// An RTCP port on a kernel UDP socket: bound to the group (joined, for RtcpOptions::source alone when given; sent to
+/// with `options.ttl` and loopback) or to RtcpOptions::local (by default `interface`'s address; out of `interface` with
 /// RtcpOptions::ttl at socket priority 0, as a unicast stream's), marked with RtcpOptions::dscp.
 [[nodiscard]] auto open_rtcp_socket(InterfaceInfo const& interface, RtcpOptions const& options)
     -> StatusValue<std::unique_ptr<RtcpPort>>;

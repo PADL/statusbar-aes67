@@ -198,6 +198,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `continue_from()` carries the id and version (and the send offset, grandmaster, media
   clock and name) to a replacement sender, so its next `configure()` announces the same
   session one version on.
+- `set_st2110(true)` gives `session()` ST 2110-30's form (Section 6.2): the channel order as an fmtp
+  (`a=fmtp:<pt> channel-order=`, `channel_order()`: the one set, or undefined groups) and `a=maxptime`, the packet
+  time. Off by default, so an AES67 receiver sees AES67's attributes alone. A change, and a channel order changed
+  while it is on, bumps the session version.
 - A clock domain other than PTP: the caller ticks the sender with the domain's index
   (`PtpMediaClock::index_at(timebase.to_domain(ptp_now))`, `mediaclock::Timebase`), which
   advances 5 to 7 frames a tick at 48 kHz for a domain within 100s of ppm; `tick()` needs no
@@ -225,7 +229,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   Clause 5.7): a group's `c=` is joined; a unicast `c=` that is this host's address (a
   transport file, as NMOS IS-05 writes) is bound; a unicast `c=` equal to the origin's
   address that is not this host's is an offer from that sender, received at this host's
-  address with the sender as the source filter unless `a=source-filter` names another. Any
+  address with the sender as the source filter unless `a=source-filter` names another. A group in 232/8 with a
+  source filter that applies to it is joined for that source alone (`Transport::open_receive_from()`, RFC 4607
+  Section 4.1): a switch running SSM forwards nothing to an any-source join there. `UdpTransport` joins the socket so,
+  `XdpTransport` its kernel membership; another transport opens it any-source and the receiver filters. Any
   other unicast `c=`, 0.0.0.0 among them, fails `foreign_destination`: which addresses are
   this host's the transport decides from the interface's address list
   (`Transport::is_local_address()`, `is_local()`: any 127/8 address on a loopback interface),
