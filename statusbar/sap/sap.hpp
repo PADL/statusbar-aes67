@@ -64,7 +64,7 @@ class SapAnnouncer final : public net::Pollable
 
     /// Announce `session` under `key` (a slot id, say), replacing what was
     /// announced under it; the next tick sends it. A changed session gets a new
-    /// message id hash, so listeners take it as new.
+    /// message id hash, so listeners read it as new.
     void announce(std::string const& key, sdp::Session const& session);
     /// Stop announcing `key`, sending its deletion now, not at the next tick (a caller shutting
     /// down may close straight after): the send's error, or success (also for a key not announced).

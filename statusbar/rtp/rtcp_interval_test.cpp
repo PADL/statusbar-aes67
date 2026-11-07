@@ -53,7 +53,7 @@ TEST(rtcp_interval, steady_intervals_span_half_to_one_and_a_half_times_the_minim
 TEST(rtcp_interval, the_minimum_binds_while_the_bandwidth_share_is_smaller)
 {
     // One sender of a 2.6 Mbit/s stream among 9 members, 180-octet reports: 5 % is 16250 octets/s,
-    // the sender's quarter share 4062.5, so its own 180 octets take 44 ms, under the 1 s minimum.
+    // the sender's quarter share 4062.5, so its own 180 octets need 44 ms, under the 1 s minimum.
     RtcpIntervalParams p{
         .minimum_ns = SECOND,
         .members = 9,

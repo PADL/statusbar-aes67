@@ -121,7 +121,7 @@ auto received(Port& port) -> size_t
     return total;
 }
 
-/// One packet sent by `sender` on `sending` and the datagrams `receiving`'s `port` takes within 50 ticks of 1 ms.
+/// One packet sent by `sender` on `sending` and the datagrams `receiving`'s `port` receives within 50 ticks of 1 ms.
 auto sent_and_received(XdpTransport& sending, SendPort& sender, XdpTransport& receiving, ReceivePort& port) -> size_t
 {
     receiving.begin_tick();  // installs the rules
@@ -193,7 +193,7 @@ TEST(aes67_veth, a_tagged_stream_is_received_through_the_tagged_group_rule)
 }
 
 // The group joined on the receiving end's VLAN link too, up (as an SRP listener reports it): the socket
-// still takes the tagged stream, the XDP program redirecting it before the VLAN link sees it
+// still receives the tagged stream, the XDP program redirecting it before the VLAN link sees it
 TEST(aes67_veth, a_group_joined_on_an_up_vlan_link_leaves_the_tagged_stream_to_the_socket)
 {
     if (::geteuid() != 0) {
@@ -302,7 +302,7 @@ TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arri
     EXPECT_EQ((*first_rtcp)->dropped() + (*second_rtcp)->dropped(), uint64_t{0});
 }
 
-// Over UdpTransport the kernel takes a priority-tagged frame (VID 0) as untagged (IEEE 802.1Q) and the group's
+// Over UdpTransport the kernel reads a priority-tagged frame (VID 0) as untagged (IEEE 802.1Q) and the group's
 // socket receives it; another VID's never reaches it.
 TEST(aes67_veth, a_priority_tagged_datagram_reaches_the_group_socket)
 {

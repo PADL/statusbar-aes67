@@ -137,7 +137,7 @@ class TimebaseEstimator
     /// [1, MAX_STEP_PAIRS], lock_pairs to [2, window_pairs].
     explicit TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept;
 
-    /// Take one pair: a new epoch or rate resets the window; once a fit spans lock_pairs / 8 (at
+    /// Record one pair: a new epoch or rate resets the window; once a fit spans lock_pairs / 8 (at
     /// least 3), a residual over the step threshold is held and step_pairs in a row restart the
     /// window from them (a step, if the fit spanned lock_pairs).
     auto feed(ClockSample const& sample) noexcept -> void;

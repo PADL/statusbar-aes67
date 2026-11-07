@@ -42,7 +42,7 @@ namespace statusbar::aes67 {
 
 class XdpRtcpPort;
 
-/// What XdpTransport::open() takes past the interface (outside the class so it
+/// What XdpTransport::open() accepts past the interface (outside the class so it
 /// can be a defaulted argument there).
 struct XdpTransportOptions
 {
@@ -72,7 +72,7 @@ class XdpTransport final : public Transport
   public:
     /// The NIC queue the socket binds unless Options::queue says another.
     static constexpr uint32_t QUEUE = 0;
-    /// Frames begin_tick() takes from the RX ring at most (XdpConfig::rx_drain_max).
+    /// Frames begin_tick() reads from the RX ring at most (XdpConfig::rx_drain_max).
     static constexpr size_t RECEIVE_BATCH = 64;
     /// Frames one port may hold for receive() between ticks.
     static constexpr size_t PORT_BATCH = 32;
@@ -100,7 +100,7 @@ class XdpTransport final : public Transport
     /// The handle major of the mqprio root launch_time_queue() lays.
     static constexpr uint16_t LAUNCH_TIME_QDISC_MAJOR = 0x9100;
     /// PTP event traffic's own TX queue (net::tc::PTP_PRIORITY), with 4 TX queues or more: queue 1 stays
-    /// idle, as an SR class B queue would be, and the rest takes the queues past it.
+    /// idle, as an SR class B queue would be, and the rest uses the queues past it.
     static constexpr uint16_t PTP_QUEUE = 2;
 
     /// The launch time each frame on a socket with launch time carries (internal; public for tests):
@@ -189,13 +189,13 @@ class XdpTransport final : public Transport
             : destination_{destination}
         {}
 
-        /// The RTCP endpoint (group and port) whose datagrams this pipe takes.
+        /// The RTCP endpoint (group and port) whose datagrams this pipe receives.
         [[nodiscard]] auto destination() const noexcept -> Endpoint const& { return destination_; }
         /// Real-time thread: copy `datagram` in; false, and counted, when too long or full.
         auto offer(Datagram const& datagram) noexcept -> bool;
         /// Reactor: move up to `storage.size()` datagrams into `storage` and view them in `out`
         /// (as long as `storage`); returns how many.
-        auto take(std::span<Datagram> out, std::span<Frame> storage) noexcept -> size_t;
+        auto read(std::span<Datagram> out, std::span<Frame> storage) noexcept -> size_t;
         /// Datagrams offer() refused. Any thread.
         [[nodiscard]] auto dropped() const noexcept -> uint64_t { return dropped_.load(std::memory_order_relaxed); }
 
@@ -235,7 +235,7 @@ class XdpTransport final : public Transport
     {
       public:
         /// Counts a miss (empty_count()) when empty.
-        [[nodiscard]] auto take() noexcept -> std::optional<net::EthernetTxSlot>
+        [[nodiscard]] auto claim() noexcept -> std::optional<net::EthernetTxSlot>
         {
             if (count_ == 0) {
                 empty_.store(empty_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
@@ -253,7 +253,7 @@ class XdpTransport final : public Transport
             return true;
         }
         [[nodiscard]] auto size() const noexcept -> size_t { return count_; }
-        /// take() calls that found the pool empty. Any thread.
+        /// claim() calls that found the pool empty. Any thread.
         [[nodiscard]] auto empty_count() const noexcept -> uint64_t { return empty_.load(std::memory_order_relaxed); }
         /// The count to zero. Any thread; a miss meanwhile may go uncounted.
         void reset_empty_count() noexcept { empty_.store(0, std::memory_order_relaxed); }
@@ -293,7 +293,7 @@ class XdpTransport final : public Transport
     /// The rule redirecting `group`'s untagged frames to the socket.
     [[nodiscard]] static auto group_rule(ip::IPv4Address const& group) noexcept -> net::CompiledRule<32>;
     /// The rule redirecting every IPv4 group's UDP frames tagged with `vid`, any PCP (MAC 01:00:5e
-    /// and bit 24 clear, RFC 1112 Section 6.4); the ports take their own groups' and count the rest unmatched.
+    /// and bit 24 clear, RFC 1112 Section 6.4); the ports accept their own groups' and count the rest unmatched.
     [[nodiscard]] static auto tagged_groups_rule(uint16_t vid) noexcept -> net::CompiledRule<32>;
 
     /// The TX queues of an interface of `tx_queues` (net::tc::settle_launch_time_queue): QUEUE kept for the
@@ -549,7 +549,7 @@ class XdpTransport final : public Transport
     void collect_retired() noexcept;
     /// Control thread: an RTCP port's handle is gone.
     void rtcp_closed(RtcpPipe* pipe) noexcept;
-    /// Real-time thread: take new RTCP pipes, retire closed ones.
+    /// Real-time thread: adopt new RTCP pipes, retire closed ones.
     void update_rtcp_pipes() noexcept;
     /// Real-time thread: install a rule per distinct group of ports_, then the tagged rule with a receive
     /// VID, without allocating.
@@ -557,7 +557,7 @@ class XdpTransport final : public Transport
 
     void release_held() noexcept;
     void refill_tx_pool() noexcept;
-    /// Destructor: frees every port state and RTCP pipe, live or not yet taken.
+    /// Destructor: frees every port state and RTCP pipe, live or not yet adopted.
     void delete_port_states() noexcept;
     /// Control thread: why a receive port for `destination` cannot open, if it cannot.
     [[nodiscard]] auto check_receive(Endpoint const& destination) const noexcept -> Status;
@@ -570,11 +570,11 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto publish_port(Endpoint const& destination, net::FileDescriptor membership) -> PortState*;
     /// Control thread: a new RTCP pipe, handed to the real-time thread.
     [[nodiscard]] auto publish_rtcp_pipe(Endpoint const& destination) -> RtcpPipe*;
-    /// Real-time thread: take new ports, retire closed ones; true when the set changed.
+    /// Real-time thread: adopt new ports, retire closed ones; true when the set changed.
     [[nodiscard]] auto update_ports() noexcept -> bool;
     /// Real-time thread: reap TX completions, refill the TX pool and the fill ring, begin the cycle.
     void start_cycle() noexcept;
-    /// Real-time thread: take the received frames, holding those a receive port kept.
+    /// Real-time thread: read the received frames, holding those a receive port kept.
     void receive_frames() noexcept;
     /// Real-time thread: put a written frame on the TX ring, timed for @p departure_ns (0: untimed)
     /// when the socket carries launch times; false when the ring is full (the frame is freed).
@@ -655,7 +655,7 @@ class XdpTransport final : public Transport
 };
 
 /// A receive port's state: made on the control thread, used on the real-time thread from the
-/// tick that takes it until the tick that retires it, freed on the control thread.
+/// tick that adopts it until the tick that retires it, freed on the control thread.
 struct XdpTransport::PortState
 {
     PortState(Endpoint const& d, net::FileDescriptor m) noexcept
@@ -667,7 +667,7 @@ struct XdpTransport::PortState
     net::FileDescriptor membership;  ///< keeps the kernel (and the NIC filter) joined; control thread only
     std::array<Datagram, PORT_BATCH> pending{};
     size_t pending_count{0};
-    std::error_code rule_error;       ///< real-time: why no installed rule takes its group, or none
+    std::error_code rule_error;       ///< real-time: why no installed rule accepts its group, or none
     std::atomic<bool> closed{false};  ///< set by the handle's destructor
 
     /// From begin_tick(): false when full.

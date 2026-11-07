@@ -19,8 +19,8 @@ namespace statusbar::sdp {
 
 namespace {
 
-/// Take the text up to the next `separator` (or all of it) from `rest`.
-auto take(std::string_view& rest, char const separator) noexcept -> std::string_view
+/// Reads the text up to the next `separator` (or all of it) from `rest`.
+auto next_field(std::string_view& rest, char const separator) noexcept -> std::string_view
 {
     auto const end = rest.find(separator);
     auto const token = rest.substr(0, end);
@@ -42,7 +42,7 @@ auto parse_number(std::string_view const text) noexcept -> std::optional<T>
 /// A ptime in milliseconds ("1", "0.125", "0.12") as whole microseconds.
 auto parse_ptime_us(std::string_view text) noexcept -> std::optional<uint32_t>
 {
-    auto const whole = parse_number<uint32_t>(take(text, '.'));
+    auto const whole = parse_number<uint32_t>(next_field(text, '.'));
     if (!whole || *whole > 1000) {
         return std::nullopt;
     }
@@ -67,7 +67,7 @@ auto parse_ptime_us(std::string_view text) noexcept -> std::optional<uint32_t>
 /// `IN IP4 <address>` with the address left in `rest`.
 auto parse_network(std::string_view& rest) noexcept -> Status
 {
-    if (take(rest, ' ') != "IN" || take(rest, ' ') != "IP4") {
+    if (next_field(rest, ' ') != "IN" || next_field(rest, ' ') != "IP4") {
         return failure(SdpError::unsupported_network);
     }
     return success();
@@ -76,8 +76,8 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 /// `<sess-id> <sess-version>` into `session`; false when either is not a number.
 [[nodiscard]] auto parse_session_id_and_version(std::string_view& rest, Session& session) noexcept -> bool
 {
-    auto const id = parse_number<uint64_t>(take(rest, ' '));
-    auto const version = parse_number<uint64_t>(take(rest, ' '));
+    auto const id = parse_number<uint64_t>(next_field(rest, ' '));
+    auto const version = parse_number<uint64_t>(next_field(rest, ' '));
     if (!id || !version) {
         return false;
     }
@@ -92,7 +92,7 @@ auto parse_network(std::string_view& rest) noexcept -> Status
     if (auto const network = parse_network(rest); !network) {
         return network;
     }
-    auto const address = take(rest, ' ');
+    auto const address = next_field(rest, ' ');
     if (address.empty()) {
         return failure(SdpError::malformed_line);
     }
@@ -103,7 +103,7 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 /// The `o=` line into `session` (RFC 8866 Section 5.2); `session` may be partly written on failure.
 [[nodiscard]] auto parse_origin(std::string_view rest, Session& session) -> Status
 {
-    session.username = take(rest, ' ');
+    session.username = next_field(rest, ' ');
     if (!parse_session_id_and_version(rest, session)) {
         return failure(SdpError::malformed_line);
     }
@@ -116,8 +116,8 @@ auto parse_network(std::string_view& rest) noexcept -> Status
     if (auto const network = parse_network(rest); !network) {
         return std::unexpected(network.error());
     }
-    auto const address = ip::parse_ipv4(take(rest, '/'));
-    auto const ttl = rest.empty() ? std::optional<uint8_t>{0} : parse_number<uint8_t>(take(rest, '/'));
+    auto const address = ip::parse_ipv4(next_field(rest, '/'));
+    auto const ttl = rest.empty() ? std::optional<uint8_t>{0} : parse_number<uint8_t>(next_field(rest, '/'));
     if (!address || !ttl) {
         return failure(SdpError::malformed_line);
     }
@@ -145,7 +145,7 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 /// The `<gmid>|traceable[:<domain>]` after a PTP reference's version into `clock`.
 [[nodiscard]] auto parse_ptp_grandmaster(std::string_view rest, PtpReference clock) -> StatusValue<PtpReference>
 {
-    auto const grandmaster = take(rest, ':');
+    auto const grandmaster = next_field(rest, ':');
     if (grandmaster == "traceable") {
         clock.traceable = true;
         return clock;
@@ -176,7 +176,7 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 [[nodiscard]] auto parse_ptp_reference(std::string_view const value) -> StatusValue<PtpReference>
 {
     auto rest = value.substr(4);
-    PtpReference clock{.version = parse_ptp_version(take(rest, ':'))};
+    PtpReference clock{.version = parse_ptp_version(next_field(rest, ':'))};
     if (clock.version == PtpVersion::other || rest.empty()) {
         clock.text = value;
         return clock;
@@ -233,8 +233,8 @@ void keep_reference(ReferenceClocks& clocks, PtpReference clock)
 /// absent); `sender`; any other kind is a media clock that is neither.
 [[nodiscard]] auto parse_media_clock(std::string_view rest) noexcept -> StatusValue<MediaClock>
 {
-    auto clock = take(rest, ' ');
-    auto const kind = take(clock, '=');
+    auto clock = next_field(rest, ' ');
+    auto const kind = next_field(clock, '=');
     if (kind == "sender") {
         return MediaClock::sender();
     }
@@ -244,17 +244,17 @@ void keep_reference(ReferenceClocks& clocks, PtpReference clock)
     return parse_direct_offset(clock);
 }
 
-/// Takes ` incl IN IP4|*` from `rest`; false for exclusions and for another network or address type
+/// Parses ` incl IN IP4|*` from `rest`; false for exclusions and for another network or address type
 /// (RFC 4570 allows `*` for the address type).
-[[nodiscard]] auto take_ipv4_inclusion(std::string_view& rest) noexcept -> bool
+[[nodiscard]] auto parse_ipv4_inclusion(std::string_view& rest) noexcept -> bool
 {
     while (rest.starts_with(' ')) {
         rest.remove_prefix(1);
     }
-    if (take(rest, ' ') != "incl" || take(rest, ' ') != "IN") {
+    if (next_field(rest, ' ') != "incl" || next_field(rest, ' ') != "IN") {
         return false;
     }
-    auto const address_type = take(rest, ' ');
+    auto const address_type = next_field(rest, ' ');
     return address_type == "IP4" || address_type == "*";
 }
 
@@ -275,11 +275,11 @@ void keep_reference(ReferenceClocks& clocks, PtpReference clock)
 /// filters on another network or address type (RFC 4570 allows `*` for both).
 [[nodiscard]] auto parse_source_filter(std::string_view rest) noexcept -> StatusValue<std::optional<SourceFilter>>
 {
-    if (!take_ipv4_inclusion(rest)) {
+    if (!parse_ipv4_inclusion(rest)) {
         return std::optional<SourceFilter>{};
     }
-    auto const destination = parse_filter_destination(take(rest, ' '));
-    auto const source = ip::parse_ipv4(take(rest, ' '));
+    auto const destination = parse_filter_destination(next_field(rest, ' '));
+    auto const source = ip::parse_ipv4(next_field(rest, ' '));
     if (!destination || !source) {
         return failure(SdpError::malformed_line);
     }
@@ -289,7 +289,7 @@ void keep_reference(ReferenceClocks& clocks, PtpReference clock)
 /// `<port>[ IN IP4 <address>]` (RFC 3605 Section 2.1).
 auto parse_rtcp(std::string_view rest) noexcept -> StatusValue<RtcpAttribute>
 {
-    auto const port = parse_number<uint16_t>(take(rest, ' '));
+    auto const port = parse_number<uint16_t>(next_field(rest, ' '));
     if (!port || *port == 0) {
         return failure(SdpError::malformed_line);
     }
@@ -298,7 +298,7 @@ auto parse_rtcp(std::string_view rest) noexcept -> StatusValue<RtcpAttribute>
         if (auto network = parse_network(rest); !network) {
             return std::unexpected(network.error());
         }
-        rtcp.address = ip::parse_ipv4(take(rest, ' '));
+        rtcp.address = ip::parse_ipv4(next_field(rest, ' '));
         if (!rtcp.address) {
             return failure(SdpError::malformed_line);
         }
@@ -341,7 +341,7 @@ enum class RtpmapResult
 [[nodiscard]] auto parse_rate_and_channels(std::string_view rest, uint8_t const payload_type, Encoding const encoding) noexcept
     -> std::optional<PayloadFormat>
 {
-    auto const rate = parse_number<uint32_t>(take(rest, '/'));
+    auto const rate = parse_number<uint32_t>(next_field(rest, '/'));
     auto const channels = rest.empty() ? std::optional<uint16_t>{1} : parse_number<uint16_t>(rest);
     if (!rate || !channels || *rate == 0 || *channels == 0) {
         return std::nullopt;
@@ -353,7 +353,7 @@ enum class RtpmapResult
 [[nodiscard]] auto parse_offered_rtpmap(uint8_t const payload_type, std::string_view rest, PayloadFormat& format) noexcept
     -> StatusValue<RtpmapResult>
 {
-    auto const encoding = parse_encoding(take(rest, '/'));
+    auto const encoding = parse_encoding(next_field(rest, '/'));
     if (!encoding) {
         return RtpmapResult::unsupported;
     }
@@ -371,7 +371,7 @@ enum class RtpmapResult
 [[nodiscard]] auto parse_rtpmap(std::string_view rest, std::span<uint8_t const> const offered, PayloadFormat& format) noexcept
     -> StatusValue<RtpmapResult>
 {
-    auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
+    auto const payload_type = parse_number<uint8_t>(next_field(rest, ' '));
     if (!payload_type) {
         return failure(SdpError::malformed_line);
     }
@@ -399,11 +399,11 @@ enum class RtpmapResult
 [[nodiscard]] auto channel_order_parameter(std::string_view parameters) noexcept -> std::string_view
 {
     while (!parameters.empty()) {
-        auto parameter = take(parameters, ';');
+        auto parameter = next_field(parameters, ';');
         while (parameter.starts_with(' ')) {
             parameter.remove_prefix(1);
         }
-        auto const name = take(parameter, '=');
+        auto const name = next_field(parameter, '=');
         if (equal_ignoring_case(name, "channel-order")) {
             return parameter;
         }
@@ -506,18 +506,18 @@ class Parser
         if (auto const done = end_media(); !done) {
             return done;
         }
-        auto const kind = take(rest, ' ');
-        auto const port = parse_number<uint16_t>(take_port(rest));
-        auto const proto = take(rest, ' ');
+        auto const kind = next_field(rest, ' ');
+        auto const port = parse_number<uint16_t>(next_port(rest));
+        auto const proto = next_field(rest, ' ');
         skipping_ = kind != "audio" || proto != "RTP/AVP";
         return skipping_ ? success() : begin_audio_media(port, rest);
     }
 
-    /// The port of an `m=` line taken from `rest`; a "/<count>" of ports is ignored.
-    [[nodiscard]] static auto take_port(std::string_view& rest) noexcept -> std::string_view
+    /// The port of an `m=` line read from `rest`; a "/<count>" of ports is ignored.
+    [[nodiscard]] static auto next_port(std::string_view& rest) noexcept -> std::string_view
     {
-        auto port_field = take(rest, ' ');
-        return take(port_field, '/');
+        auto port_field = next_field(rest, ' ');
+        return next_field(port_field, '/');
     }
 
     /// Opens an audio media section offering the payload types listed in `rest`.
@@ -539,7 +539,7 @@ class Parser
     {
         offered_.clear();
         while (!rest.empty()) {
-            auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
+            auto const payload_type = parse_number<uint8_t>(next_field(rest, ' '));
             if (!payload_type || *payload_type > 127) {
                 return false;
             }
@@ -600,7 +600,7 @@ class Parser
         if (skipping_) {
             return success();
         }
-        auto const name = take(rest, ':');
+        auto const name = next_field(rest, ':');
         if (auto const direction = parse_direction(name)) {
             (media_ != nullptr ? media_->direction : session_.direction) = direction;
             return success();
@@ -714,7 +714,7 @@ class Parser
     /// the first for each; another parameter, or a malformed order or line, is ignored.
     auto fmtp_attribute(std::string_view rest) -> Status
     {
-        auto const payload_type = parse_number<uint8_t>(take(rest, ' '));
+        auto const payload_type = parse_number<uint8_t>(next_field(rest, ' '));
         auto const order = channel_order_parameter(rest);
         if (!payload_type || !channel_order_channels(order) || !std::ranges::contains(offered_, *payload_type)) {
             return success();
@@ -797,7 +797,7 @@ auto channel_order_channels(std::string_view order) noexcept -> std::optional<ui
     auto groups = order.substr(PREFIX.size(), order.size() - PREFIX.size() - 1);
     uint32_t channels = 0;
     do {
-        auto const count = group_channels(take(groups, ','));
+        auto const count = group_channels(next_field(groups, ','));
         if (!count) {
             return std::nullopt;
         }
@@ -810,7 +810,7 @@ auto parse(std::string_view text) -> StatusValue<Session>
 {
     Parser parser;
     while (!text.empty()) {
-        auto line = take(text, '\n');
+        auto line = next_field(text, '\n');
         if (line.ends_with('\r')) {
             line.remove_suffix(1);
         }

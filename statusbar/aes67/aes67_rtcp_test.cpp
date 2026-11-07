@@ -558,7 +558,7 @@ TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)
     int64_t const error = domain.to_domain(static_cast<int64_t>(*at)) - static_cast<int64_t>(clock.time_of(index));
     EXPECT_TRUE(error >= -1 && error <= 1);
     EXPECT_TRUE(*at <= T0 + (10 * MS));
-    // So a receiver in the domain takes offset 0 from it.
+    // So a receiver in the domain reads offset 0 from it.
     SenderReportTime const report{.rtp_timestamp = sr->info.rtp_timestamp.get(), .ptp_ns = *at};
     EXPECT_TRUE(sender_clock_offset(report, domain, 48000) == std::optional<uint32_t>{0});
 
@@ -656,9 +656,9 @@ TEST(aes67_rtcp, a_foreign_domain_input_waits_for_a_sender_report)
     EXPECT_TRUE(
         reports.at(0) == (SenderReportTime{.rtp_timestamp = sr_rtp, .ptp_ns = sr_ptp, .arrival_ns = T0 + (2 * MS) + 300'000}));
     EXPECT_TRUE(session->stats().remote_sr == reports.at(0));
-    auto const taken = sender_clock_offset(reports.at(0), domain, 48000);
-    EXPECT_TRUE(taken == std::optional<uint32_t>{offset});
-    receiver.set_offset(*taken);
+    auto const parsed = sender_clock_offset(reports.at(0), domain, 48000);
+    EXPECT_TRUE(parsed == std::optional<uint32_t>{offset});
+    receiver.set_offset(*parsed);
     EXPECT_TRUE(receiver.offset() == std::optional<uint32_t>{offset});
 
     // Then packets are placed at the domain's index.

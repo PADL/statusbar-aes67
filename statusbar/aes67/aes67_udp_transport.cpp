@@ -52,7 +52,7 @@ class UdpReceivePort final : public ReceivePort
         if (got <= 0) {
             return 0;
         }
-        return take(static_cast<size_t>(got), out);
+        return collect(static_cast<size_t>(got), out);
     }
 
   private:
@@ -68,7 +68,7 @@ class UdpReceivePort final : public ReceivePort
     }
 
     /// Hands the `got` datagrams read to `out`, skipping any truncated or for another address or interface.
-    [[nodiscard]] auto take(size_t const got, std::span<Datagram> const out) noexcept -> size_t
+    [[nodiscard]] auto collect(size_t const got, std::span<Datagram> const out) noexcept -> size_t
     {
         size_t written = 0;
         for (size_t i = 0; i < got; ++i) {

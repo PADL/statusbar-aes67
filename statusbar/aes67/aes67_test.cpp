@@ -318,7 +318,7 @@ void expect_pattern(Received const& block)
 
 }  // namespace
 
-TEST(aes67_sender, announces_l32_that_an_l32_receiver_takes)
+TEST(aes67_sender, announces_l32_that_an_l32_receiver_accepts)
 {
     LoopTransport transport;
     PatternSource source{8};
@@ -913,7 +913,7 @@ TEST(aes67_sender, resynchronises_after_a_large_backward_step)
     EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(back));
 }
 
-TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_take)
+TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_accept)
 {
     LoopTransport transport;
     PatternSource source{6};
@@ -924,7 +924,7 @@ TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_take)
     uint64_t const base = 4800 * 48;
     sender.tick(base - 1, 0);  // [base - 48, base), rendered in place
     EXPECT_EQ(source.pulls, size_t{1});
-    // No TX buffer: the frames are still taken (into the staging buffer), the
+    // No TX buffer: the frames are still pulled (into the staging buffer), the
     // missing packet still counted lost, and both packets counted dropped.
     transport.refuse = true;
     source.refuse_index = base + 48;
@@ -965,7 +965,7 @@ TEST(aes67_sender, a_packet_phase_moves_the_send_tick_not_the_timestamps)
         EXPECT_EQ(packet->payload[0], pattern(first, 0));
         EXPECT_EQ(packet->payload[(47 * 6) + 5], pattern(first + 47, 5));
     }
-    // The phase is taken modulo the packet.
+    // The phase is reduced modulo the packet.
     sender.set_packet_phase(48 + 6);
     EXPECT_EQ(sender.packet_phase(), uint32_t{6});
 }
@@ -1091,7 +1091,7 @@ TEST(aes67_sender, a_foreign_domain_output_announces_mediaclk_sender)
     sender.set_sender_clock(true);
     EXPECT_EQ(sender.session()->session_version, session.session_version);
 
-    // A direct receiver refuses it; one taking the sender's clock takes it and waits for an offset.
+    // A direct receiver refuses it; one following the sender's clock accepts it and waits for an offset.
     auto const parsed = sdp::parse(text);
     EXPECT_TRUE(parsed.has_value());
     EXPECT_TRUE(parsed->effective_media_clock(parsed->media[0])->kind() == sdp::MediaClockKind::sender);
@@ -1184,7 +1184,7 @@ TEST(aes67_stream, srp_tspecs_count_ip_udp_rtp_the_payload_and_a_spare_octet)
     EXPECT_TRUE(srp_tspec(format(l24, 64, 48000, 6)) == (SrpTSpec{1193, 1}));
     EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 12), SrClass::b) == (SrpTSpec{329, 1}));
     EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 6), SrClass::b) == (SrpTSpec{185, 2}));
-    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48)) == (SrpTSpec{1193, 1}));  // 1 ms: taken as it is
+    EXPECT_TRUE(srp_tspec(format(l24, 8, 48000, 48)) == (SrpTSpec{1193, 1}));  // 1 ms: used as it is
     EXPECT_TRUE(srp_tspec(format(l24, 8, 96000, 24), SrClass::b) == (SrpTSpec{617, 1}));
     EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 6)) == (SrpTSpec{77, 1}));  // 136 us
     EXPECT_TRUE(srp_tspec(format(l24, 2, 44100, 12), SrClass::b) == (SrpTSpec{113, 1}));
@@ -1202,7 +1202,7 @@ TEST(aes67_stream, groups_alias_when_their_low_23_bits_agree)
     EXPECT_FALSE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{10, 69, 1, 2}));
 }
 
-TEST(aes67_receiver, a_receiver_taking_the_senders_clock_refuses_a_direct_stream)
+TEST(aes67_receiver, a_receiver_following_the_senders_clock_refuses_a_direct_stream)
 {
     LoopTransport transport;
     Receiver receiver{STEREO_L24, {}, transport};
@@ -1245,7 +1245,7 @@ TEST(aes67_receiver, a_port_error_holds_the_receiver_in_error_until_it_clears)
     EXPECT_TRUE(receiver.state() == State::running);
 }
 
-TEST(aes67_receiver, refuses_streams_it_cannot_take)
+TEST(aes67_receiver, refuses_streams_it_cannot_accept)
 {
     LoopTransport transport;
     RecordingSink sink;
@@ -1269,7 +1269,7 @@ TEST(aes67_receiver, refuses_streams_it_cannot_take)
     EXPECT_TRUE(receiver.state() == State::ready);
 }
 
-TEST(aes67_receiver, takes_the_offered_format_in_its_own_encoding)
+TEST(aes67_receiver, accepts_the_offered_format_in_its_own_encoding)
 {
     LoopTransport transport;
     RecordingSink sink;
@@ -1283,7 +1283,7 @@ TEST(aes67_receiver, takes_the_offered_format_in_its_own_encoding)
     Receiver l24{STEREO_L24, sink.handler(), transport};
     EXPECT_TRUE(l24.configure(session).error() == Aes67Error::encoding_mismatch);
 
-    // L24 first, L32 as payload type 96: the L32 receiver takes 96, not 97
+    // L24 first, L32 as payload type 96: the L32 receiver accepts 96, not 97
     session = stream_session(group);
     EXPECT_TRUE(session.media[0].add_alternative(
         {.payload_type = 96, .encoding = sdp::Encoding::l32, .sample_rate = 48000, .channels = 2}));
@@ -1463,7 +1463,7 @@ TEST(aes67_receiver, a_sender_clocked_stream_counts_packets_before_its_offset_as
     EXPECT_EQ(receiver.counters().dropped, uint64_t{2});
 }
 
-TEST(aes67_receiver, takes_an_eight_channel_stream_in_packets_of_any_whole_frame_count)
+TEST(aes67_receiver, accepts_an_eight_channel_stream_in_packets_of_any_whole_frame_count)
 {
     // One sender's announcement: source port = destination port, a large media clock offset.
     constexpr char const* SDP_TEXT =
@@ -1503,7 +1503,7 @@ TEST(aes67_receiver, takes_an_eight_channel_stream_in_packets_of_any_whole_frame
     }
 }
 
-TEST(aes67_receiver, takes_late_packets_as_far_back_as_rtp_sequence_does)
+TEST(aes67_receiver, accepts_late_packets_as_far_back_as_rtp_sequence_does)
 {
     LoopTransport transport;
     RecordingSink sink;
@@ -1521,13 +1521,13 @@ TEST(aes67_receiver, takes_late_packets_as_far_back_as_rtp_sequence_does)
         }
     }
     while (!transport.queue.empty()) {
-        receiver.drain(base + (201 * FPP));  // a drain takes at most MAX_BATCHES batches
+        receiver.drain(base + (201 * FPP));  // a drain reads at most MAX_BATCHES batches
     }
     auto const lost = receiver.counters().lost;
     EXPECT_EQ(lost, uint64_t{3 * FPP});
     send(136);                           // 64 behind
     send(101);                           // 99 behind: RtpSequence's last late packet
-    send(100);                           // 100 behind: RtpSequence takes it for a jump
+    send(100);                           // 100 behind: RtpSequence reads it as a jump
     receiver.drain(base + (202 * FPP));  // a packet time on: past the due-tick gate
     EXPECT_EQ(receiver.counters().late, uint64_t{2 * FPP});
     EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});
@@ -1923,7 +1923,7 @@ TEST(aes67_udp, a_unicast_rtcp_port_reaches_its_peer)
     EXPECT_TRUE(from_b == (Endpoint{.address = y, .port = port}));
 }
 
-TEST(aes67_udp, multicast_receive_sockets_take_only_their_own_joins)
+TEST(aes67_udp, multicast_receive_sockets_receive_only_their_own_joins)
 {
     auto const lo = find_interface("lo");
     EXPECT_TRUE(lo.has_value());
@@ -1999,7 +1999,7 @@ TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
             return true;
         }));
         EXPECT_EQ(rendered_length, payload.size());
-        // An abandoned render takes no batch slot and sends nothing.
+        // An abandoned render uses no batch slot and sends nothing.
         EXPECT_FALSE(port.send_rendered(header, payload.size(), [](std::span<uint8_t> const out) noexcept {
             std::ranges::fill(out, uint8_t{0xEE});
             return false;

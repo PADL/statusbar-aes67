@@ -54,7 +54,7 @@ struct Datagram
 };
 
 /// True when `datagram` is RTCP, as on a port carrying RTP and RTCP alike: version 2 and a packet type
-/// of 192 to 223, which RTP payload types never take there (RFC 5761 Section 4).
+/// of 192 to 223, which RTP payload types never use there (RFC 5761 Section 4).
 [[nodiscard]] constexpr auto is_multiplexed_rtcp(std::span<uint8_t const> const datagram) noexcept -> bool
 {
     return datagram.size() >= 2 && (datagram[0] >> 6U) == 2 && datagram[1] >= 192 && datagram[1] <= 223;
@@ -114,8 +114,8 @@ class ReceivePort
     /// Up to `out.size()` datagrams that arrived since the last call; returns
     /// how many were written. Never blocks.
     [[nodiscard]] virtual auto receive(std::span<Datagram> out) noexcept -> size_t = 0;
-    /// Why the stream cannot arrive now (the transport's filter does not take its group), or none (the default).
-    /// The draining thread; it clears when the transport takes the group again.
+    /// Why the stream cannot arrive now (the transport's filter does not accept its group), or none (the default).
+    /// The draining thread; it clears when the transport accepts the group again.
     [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
     /// Keep the frame a datagram receive() gave lies in past the next receive() and begin_tick(): its payload
     /// stays valid until Transport::release_frame(datagram.frame). False when it cannot (no frame, or the

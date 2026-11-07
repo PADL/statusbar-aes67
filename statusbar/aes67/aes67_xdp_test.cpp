@@ -64,7 +64,7 @@ TEST(aes67_xdp, holds_past_max_kept_frames_are_refused)
         EXPECT_TRUE(keeper.keep(i));
     }
     EXPECT_FALSE(keeper.keep(XdpTransport::MAX_KEPT));
-    EXPECT_TRUE(keeper.keep(0));  // a frame already kept takes another hold
+    EXPECT_TRUE(keeper.keep(0));  // a frame already kept accepts another hold
     EXPECT_FALSE(keeper.drop(0));
     EXPECT_TRUE(keeper.drop(1));
     EXPECT_TRUE(keeper.keep(XdpTransport::MAX_KEPT));
@@ -267,15 +267,15 @@ TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
     // The small frame is on top: it does not fit and goes back.
     EXPECT_FALSE(XdpTransport::write_frame(pool, addressing, header, payload).has_value());
     EXPECT_EQ(pool.size(), size_t{2});
-    // Take it out of the way, and the big one is written.
-    auto const spare = pool.take();
+    // Claim it out of the way, and the big one is written.
+    auto const spare = pool.claim();
     EXPECT_EQ(spare->handle, uint64_t{2});
     auto const written = XdpTransport::write_frame(pool, addressing, header, payload);
     EXPECT_TRUE(written.has_value());
     EXPECT_EQ(written->first.handle, uint64_t{1});
     EXPECT_EQ(written->second, rtp::rtp_frame_overhead(false) + rtp::RtpHeader::LENGTH + payload.size());
     EXPECT_EQ(pool.size(), size_t{0});
-    EXPECT_EQ(pool.empty_count(), uint64_t{1});  // only the take that found nothing counts
+    EXPECT_EQ(pool.empty_count(), uint64_t{1});  // only the claim that found nothing counts
     EXPECT_TRUE(rtp::parse_rtp_frame(std::span{big}.first(written->second)).has_value());
 }
 
@@ -349,7 +349,7 @@ TEST(aes67_xdp, an_abandoned_render_returns_the_frame_to_the_pool)
     EXPECT_FALSE(XdpTransport::render_frame(pool, addressing, header, 288, count).has_value());
     EXPECT_EQ(calls, size_t{0});
     EXPECT_EQ(pool.size(), size_t{1});
-    (void)pool.take();
+    (void)pool.claim();
     // The render gives up: the frame goes back to the pool, not to the ring.
     EXPECT_TRUE(pool.put({.handle = 2, .buffer = big}));
     EXPECT_FALSE(XdpTransport::render_frame(pool, addressing, header, 288, [&calls](std::span<uint8_t>) noexcept {
@@ -358,7 +358,7 @@ TEST(aes67_xdp, an_abandoned_render_returns_the_frame_to_the_pool)
                  }).has_value());
     EXPECT_EQ(calls, size_t{1});
     EXPECT_EQ(pool.size(), size_t{1});
-    auto const back = pool.take();
+    auto const back = pool.claim();
     EXPECT_EQ(back->handle, uint64_t{2});
 }
 
@@ -378,7 +378,7 @@ TEST(aes67_xdp, the_rtcp_pipe_copies_datagrams_and_drops_past_its_depth)
     std::array<Datagram, 4> out{};
     std::array<XdpTransport::RtcpPipe::Frame, 4> storage{};
     size_t consumed = 0;
-    for (size_t n = pipe.take(out, storage); n > 0; n = pipe.take(out, storage)) {
+    for (size_t n = pipe.read(out, storage); n > 0; n = pipe.read(out, storage)) {
         for (size_t i = 0; i < n; ++i) {
             EXPECT_EQ(out[i].payload.size(), size_t{8});
             EXPECT_EQ(out[i].payload[7], static_cast<uint8_t>(consumed + i));
@@ -397,7 +397,7 @@ TEST(aes67_xdp, the_rtcp_pipe_drops_datagrams_longer_than_it_keeps)
     EXPECT_EQ(pipe.dropped(), uint64_t{1});
     std::array<Datagram, 1> out{};
     std::array<XdpTransport::RtcpPipe::Frame, 1> storage{};
-    EXPECT_EQ(pipe.take(out, storage), size_t{0});
+    EXPECT_EQ(pipe.read(out, storage), size_t{0});
 }
 
 TEST(aes67_xdp, group_rules_pin_the_whole_address)
@@ -728,7 +728,7 @@ TEST(aes67_xdp, a_frame_two_ports_share_is_refused_once_and_only_when_none_keeps
     EXPECT_EQ(counted.unmatched + counted.malformed, uint64_t{0});
 }
 
-TEST(aes67_xdp, a_closed_port_takes_nothing_and_its_frames_are_unmatched)
+TEST(aes67_xdp, a_closed_port_receives_nothing_and_its_frames_are_unmatched)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
     XdpTransport::PortState port{stream, net::FileDescriptor{}};
@@ -770,7 +770,7 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     EXPECT_FALSE((*transport)->send_error());
     EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{1});  // published by end_tick()
     EXPECT_EQ((*transport)->tx_pool_empty_count(), uint64_t{0});
-    // A reset takes the socket's counters at the next end_tick(), on the ticking thread.
+    // A reset reads the socket's counters at the next end_tick(), on the ticking thread.
     (*transport)->reset_counters();
     EXPECT_EQ((*transport)->socket_stats().tx_count, uint64_t{1});
     (*transport)->begin_tick();
@@ -797,7 +797,7 @@ TEST(aes67_xdp, joins_and_ticks_when_privileged)
         return;
     }
     std::array<Datagram, 4> out{};
-    (*transport)->begin_tick();  // takes the port and installs its rule
+    (*transport)->begin_tick();  // adopts the port and installs its rule
     EXPECT_TRUE((*transport)->rules_status().has_value());
     EXPECT_EQ((*port)->receive(out), size_t{0});
     (*transport)->end_tick();

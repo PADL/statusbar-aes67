@@ -121,7 +121,7 @@ class RtcpSession
     static constexpr size_t MAX_PACKET = 1024;
     /// SRs whose send times are kept for the round trip.
     static constexpr size_t SR_HISTORY = 8;
-    /// Datagrams one poll takes at most.
+    /// Datagrams one poll reads at most.
     static constexpr size_t BATCH = 8;
 
     enum class Role : uint8_t
@@ -151,7 +151,7 @@ class RtcpSession
 
     /// The port's descriptor to poll, or -1: tick() then receives.
     [[nodiscard]] auto fd() const noexcept -> int;
-    /// Take and parse what has arrived; `now_ns` is the PTP time.
+    /// Read and parse what has arrived; `now_ns` is the PTP time.
     void on_ready(uint64_t now_ns) noexcept;
     /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1. A sender's SSRC
     /// last seen sending that is gone (stopped, or replaced by a new run's) gets its BYE now.
@@ -221,11 +221,11 @@ class RtcpSession
     /// The report block on the stream's source (RFC 3550 Section 6.4.1).
     [[nodiscard]] auto report_block(ReceiveState const& state, uint64_t now_ns) noexcept -> rtp::ReportBlock;
     /// The fraction lost since the last report, in 1/256ths (Appendix A.3); restarts on a new source.
-    [[nodiscard]] auto take_fraction_lost(ReceiveState const& state) noexcept -> uint8_t;
+    [[nodiscard]] auto fraction_lost(ReceiveState const& state) noexcept -> uint8_t;
     /// The round trip a report block echoing one of the SRs sent gives (RFC 3550 Section 6.4.1).
     [[nodiscard]] auto round_trip_ns(rtp::ReportBlock const& block, uint64_t now_ns) const noexcept -> std::optional<uint64_t>;
-    /// The stream's SR: remembered for the next report block, and its time pair taken.
-    void take_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
+    /// The stream's SR: remembered for the next report block, and its time pair recorded.
+    void note_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
     /// The remote's CNAME and BYE.
     void note_remote(rtp::RtcpCompound const& compound, uint32_t remote);
     void handle(std::span<uint8_t const> datagram, uint64_t now_ns) noexcept;
@@ -234,8 +234,8 @@ class RtcpSession
     void handle_as_sender(rtp::RtcpCompound const& compound, uint32_t reporter, uint64_t now_ns) noexcept;
     void handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t now_ns) noexcept;
     /// The pair from the stream's SR, when it is in the IPMX form.
-    void take_sender_report(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
-    void take_report_block(rtp::ReportBlock const& block, uint64_t now_ns) noexcept;
+    void note_sender_report(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
+    void note_report_block(rtp::ReportBlock const& block, uint64_t now_ns) noexcept;
 
     Role role_;
     Sender const* sender_;

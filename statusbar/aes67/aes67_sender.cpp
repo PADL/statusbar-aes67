@@ -435,7 +435,7 @@ void Sender::pause() noexcept
     if (!paused_) {
         paused_ = true;
         started_ = false;
-        send_state_.store({});  // the RTCP session takes an SSRC of 0 as not sending
+        send_state_.store({});  // the RTCP session reads an SSRC of 0 as not sending
     }
     if (auto const send_error = transport_.send_error()) {
         state_ = State::error;

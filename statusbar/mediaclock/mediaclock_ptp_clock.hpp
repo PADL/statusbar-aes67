@@ -55,7 +55,7 @@ class PtpMediaClock
         return (seconds * NS_PER_SECOND) + (((samples * NS_PER_SECOND) + fs_ - 1) / fs_);
     }
 
-    /// The full index of a 32-bit wire timestamp (RTP), taken as the nearest
+    /// The full index of a 32-bit wire timestamp (RTP), read as the nearest
     /// index to `reference` with those low 32 bits. Unambiguous within +/- 2^31
     /// samples of the reference (about 12 hours at 48 kHz).
     [[nodiscard]] static constexpr auto unwrap(std::uint32_t timestamp, std::uint64_t reference) noexcept -> std::uint64_t

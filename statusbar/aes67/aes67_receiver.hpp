@@ -37,14 +37,14 @@ namespace statusbar::aes67 {
 class Receiver
 {
   public:
-    /// Datagrams taken from the transport per receive() call.
+    /// Datagrams read from the transport per receive() call.
     static constexpr size_t BATCH = 32;
     /// receive() calls per drain() at most, so one tick's work is bounded.
     static constexpr size_t MAX_BATCHES = 4;
 
     Receiver(StreamFormat const& format, FrameHandler handler, Transport& transport) noexcept;
 
-    /// Take only `mediaclk:sender` streams (true; others fail not_sender_clocked) instead of only
+    /// Accept only `mediaclk:sender` streams (true; others fail not_sender_clocked) instead of only
     /// `direct` ones (false, the default; others fail not_ptp_locked). Call before configure().
     void set_sender_clock(bool const sender) noexcept { sender_clock_ = sender; }
     [[nodiscard]] auto sender_clock() const noexcept -> bool { return sender_clock_; }
@@ -71,7 +71,7 @@ class Receiver
     /// Give back a frame hold_frame() kept (Transport::release_frame()), after clear() too. The draining thread.
     void release_frame(uint64_t frame) noexcept;
 
-    /// Take what has arrived and hand it on, with indices about `now_index`
+    /// Read what has arrived and hand it on, with indices about `now_index`
     /// (the media clock's index at the current PTP time), behind the due-tick gate.
     void drain(uint64_t now_index) noexcept;
     /// Port receive() calls made and ticks skipped by the due-tick gate.
@@ -117,7 +117,7 @@ class Receiver
     [[nodiscard]] auto reopen(Endpoint const& destination, std::optional<ip::IPv4Address> const& source) -> Status;
     /// State::error with `error`, returned.
     [[nodiscard]] auto refused(std::error_code error) noexcept -> Status;
-    /// The port reopen() opened taken on, or why it did not open as State::error and error().
+    /// Adopts the port reopen() opened, or records why it did not open as State::error and error().
     [[nodiscard]] auto adopt(StatusValue<std::unique_ptr<ReceivePort>> port) -> Status;
     /// offset_'s value for a stream with `clock`: a direct clock's offset, flagged set; 0 when sender-clocked.
     [[nodiscard]] auto initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t;

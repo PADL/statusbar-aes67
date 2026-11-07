@@ -19,7 +19,7 @@ namespace {
 constexpr size_t WINDOW = rtp::RtpSequence::MAX_MISORDER + 1;
 static_assert(WINDOW <= 128);
 
-/// The media is one a receiver of `format` takes: a `sender` media clock when `sender_clock`, else
+/// The media is one a receiver of `format` accepts: a `sender` media clock when `sender_clock`, else
 /// `direct` (RFC 7273 Section 5), at a rate the media clock supports, in the format.
 [[nodiscard]] auto check_media(
     sdp::Session const& session, sdp::Media const& media, StreamFormat const& format, bool const sender_clock) -> Status

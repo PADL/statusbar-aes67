@@ -20,7 +20,7 @@ namespace {
 
 constexpr uint64_t NS_PER_MS = 1'000'000;
 
-/// RFC 3550 Section 6.2: RTCP takes 5 % of the session bandwidth, here the stream's on the wire.
+/// RFC 3550 Section 6.2: RTCP uses 5 % of the session bandwidth, here the stream's on the wire.
 auto rtcp_bandwidth(StreamFormat const& format) noexcept -> double
 {
     double const packets_per_second = static_cast<double>(format.sample_rate) / static_cast<double>(format.frames_per_packet);
@@ -44,7 +44,7 @@ auto default_cadence(StreamFormat const& format, uint64_t const minimum_ns, bool
     return std::make_unique<Rfc3550Interval>(params, random());
 }
 
-/// The options a session takes: a CNAME of at most 255 bytes (RFC 3550 Section 6.5) and, for a
+/// The options a session accepts: a CNAME of at most 255 bytes (RFC 3550 Section 6.5) and, for a
 /// sender, a report interval.
 [[nodiscard]] auto check_options(RtcpSessionOptions const& options, bool const sender) noexcept -> Status
 {
@@ -393,7 +393,7 @@ auto RtcpSession::report_block(ReceiveState const& state, uint64_t const now_ns)
         .lsr = {},
         .dlsr = {},
     };
-    block.set_loss(take_fraction_lost(state), static_cast<int32_t>(std::clamp<int64_t>(cumulative, -0x80'0000, 0x7F'FFFF)));
+    block.set_loss(fraction_lost(state), static_cast<int32_t>(std::clamp<int64_t>(cumulative, -0x80'0000, 0x7F'FFFF)));
     if (last_sr_ && last_sr_->ssrc == state.ssrc && now_ns >= last_sr_->arrival_ns) {
         block.lsr = last_sr_->lsr;
         block.dlsr = rtp::dlsr_from_ns(now_ns - last_sr_->arrival_ns);
@@ -401,7 +401,7 @@ auto RtcpSession::report_block(ReceiveState const& state, uint64_t const now_ns)
     return block;
 }
 
-auto RtcpSession::take_fraction_lost(ReceiveState const& state) noexcept -> uint8_t
+auto RtcpSession::fraction_lost(ReceiveState const& state) noexcept -> uint8_t
 {
     if (state.ssrc != reported_ssrc_ || state.expected < prior_.expected || state.received < prior_.received) {
         reported_ssrc_ = state.ssrc;  // a new source, or its sequence restarted
@@ -456,14 +456,14 @@ void RtcpSession::handle_as_sender(rtp::RtcpCompound const& compound, uint32_t c
     if (compound.sr) {
         ++stats_.sr_received;
         if (auto const block = compound.sr->blocks.find(own)) {
-            take_report_block(*block, now_ns);
+            note_report_block(*block, now_ns);
             stats_.remote_ssrc = reporter;
         }
     }
     if (compound.rr) {
         ++stats_.rr_received;
         if (auto const block = compound.rr->blocks.find(own)) {
-            take_report_block(*block, now_ns);
+            note_report_block(*block, now_ns);
             stats_.remote_ssrc = reporter;
         }
     }
@@ -476,7 +476,7 @@ void RtcpSession::handle_as_sender(rtp::RtcpCompound const& compound, uint32_t c
     }
 }
 
-void RtcpSession::take_report_block(rtp::ReportBlock const& block, uint64_t const now_ns) noexcept
+void RtcpSession::note_report_block(rtp::ReportBlock const& block, uint64_t const now_ns) noexcept
 {
     stats_.remote_fraction_lost = block.fraction_lost();
     stats_.remote_cumulative_lost = block.cumulative_lost();
@@ -507,7 +507,7 @@ void RtcpSession::handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t
     ReceiveState const state = receiver_->receive_state();
     // Before the stream's first packet any SR on its RTCP endpoint is the sender's.
     if (compound.sr && (!state.valid || compound.sr->ssrc == state.ssrc)) {
-        take_stream_sr(*compound.sr, now_ns);
+        note_stream_sr(*compound.sr, now_ns);
     }
     if (compound.rr) {
         ++stats_.rr_received;
@@ -518,14 +518,14 @@ void RtcpSession::handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t
     }
 }
 
-void RtcpSession::take_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
+void RtcpSession::note_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
 {
     ++stats_.sr_received;
     last_sr_ =
         LastSenderReport{.lsr = rtp::lsr_of(sr.info.ntp_msw.get(), sr.info.ntp_lsw.get()), .ssrc = sr.ssrc, .arrival_ns = now_ns};
     stats_.remote_ssrc = sr.ssrc;
     stats_.remote_bye = false;
-    take_sender_report(sr, now_ns);
+    note_sender_report(sr, now_ns);
 }
 
 void RtcpSession::note_remote(rtp::RtcpCompound const& compound, uint32_t const remote)
@@ -539,7 +539,7 @@ void RtcpSession::note_remote(rtp::RtcpCompound const& compound, uint32_t const 
     }
 }
 
-void RtcpSession::take_sender_report(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
+void RtcpSession::note_sender_report(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
 {
     // Only the IPMX Info Block says the time field is PTP time (TR-10-1 Section 8.7).
     if (!rtp::parse_ipmx_info_block(sr.extension)) {

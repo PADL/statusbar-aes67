@@ -121,7 +121,7 @@ class XdpTransport::Sender final : public SendPort
 class XdpRtcpPort final : public RtcpPort
 {
   public:
-    /// Datagrams one receive() takes from the pipe at most.
+    /// Datagrams one receive() reads from the pipe at most.
     static constexpr size_t BATCH = 8;
 
     XdpRtcpPort(XdpTransport& transport, XdpTransport::RtcpPipe* pipe, std::unique_ptr<RtcpPort> socket) noexcept
@@ -141,7 +141,7 @@ class XdpRtcpPort final : public RtcpPort
 
     auto receive(std::span<Datagram> const out) noexcept -> size_t override
     {
-        size_t const n = pipe_->take(out.first(std::min(out.size(), BATCH)), frames_);
+        size_t const n = pipe_->read(out.first(std::min(out.size(), BATCH)), frames_);
         return n + socket_->receive(out.subspan(n));
     }
 
@@ -170,7 +170,7 @@ auto XdpTransport::RtcpPipe::offer(Datagram const& datagram) noexcept -> bool
     return true;
 }
 
-auto XdpTransport::RtcpPipe::take(std::span<Datagram> const out, std::span<Frame> const storage) noexcept -> size_t
+auto XdpTransport::RtcpPipe::read(std::span<Datagram> const out, std::span<Frame> const storage) noexcept -> size_t
 {
     size_t const want = std::min(out.size(), storage.size());
     size_t n = 0;
@@ -205,7 +205,7 @@ auto XdpTransport::render_frame(
     size_t const payload_length,
     PayloadRenderer const& render) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>
 {
-    auto slot = pool.take();
+    auto slot = pool.claim();
     if (!slot) {
         return std::nullopt;
     }
@@ -229,7 +229,7 @@ XdpTransport::~XdpTransport()
     release_held();
     delete_port_states();
     collect_retired();
-    while (auto slot = tx_pool_.take()) {
+    while (auto slot = tx_pool_.claim()) {
         (void)context_.tx_cancel(slot->handle);
     }
 }
@@ -766,7 +766,7 @@ auto XdpTransport::update_ports() noexcept -> bool
 
 auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, uint64_t const departure_ns) noexcept -> bool
 {
-    // A pooled frame was taken untimed (tx_start): on a socket with launch time every frame gets its
+    // A pooled frame was claimed untimed (tx_start): on a socket with launch time every frame gets its
     // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
     // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
@@ -811,7 +811,7 @@ auto XdpTransport::gather_after_headers(
     size_t const length,
     uint64_t const departure_ns) noexcept -> bool
 {
-    auto slot = tx_pool_.take();
+    auto slot = tx_pool_.claim();
     if (!slot) {
         return false;
     }
@@ -820,7 +820,7 @@ auto XdpTransport::gather_after_headers(
         (void)tx_pool_.put(*slot);
         return false;
     }
-    // Timed only now, so a packet that goes otherwise reads the PHC, and takes a place in the order, once.
+    // Timed only now, so a packet that goes otherwise reads the PHC, and claims a place in the order, once.
     return context_.tx_commit_gather(slot->handle, *offset, payload, launch_for(departure_ns))
         .has_value();  // a refusal frees the slot
 }

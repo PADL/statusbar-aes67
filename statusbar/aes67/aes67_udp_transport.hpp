@@ -20,7 +20,7 @@ namespace statusbar::aes67 {
 class UdpTransport final : public Transport
 {
   public:
-    /// Datagrams one receive() takes at most.
+    /// Datagrams one receive() reads at most.
     static constexpr size_t RECEIVE_BATCH = 32;
     /// Packets one sender may queue before flush().
     static constexpr size_t SEND_BATCH = 16;

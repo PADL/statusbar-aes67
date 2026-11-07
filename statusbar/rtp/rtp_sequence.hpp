@@ -92,7 +92,7 @@ class RtpSequence
     /// The figures for the interval since the previous call (or since validation).
     constexpr auto report() noexcept -> LossReport
     {
-        auto const interval = take_interval();
+        auto const interval = next_interval();
         auto const lost_interval = static_cast<int64_t>(interval.expected) - static_cast<int64_t>(interval.received);
         uint8_t const fraction =
             (interval.expected == 0 || lost_interval <= 0) ? 0 : static_cast<uint8_t>((lost_interval << 8) / interval.expected);
@@ -111,7 +111,7 @@ class RtpSequence
     };
 
     /// The counts since the previous call, and starts the next interval (RFC 3550 Appendix A.3).
-    [[nodiscard]] constexpr auto take_interval() noexcept -> Counts
+    [[nodiscard]] constexpr auto next_interval() noexcept -> Counts
     {
         Counts const now{.expected = expected(), .received = received_};
         Counts const interval{.expected = now.expected - prior_.expected, .received = now.received - prior_.received};

@@ -59,7 +59,7 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 
 ## Notes & caveats
 
-- A changed session gets a new message id hash, so listeners take it as new; a hash is
+- A changed session gets a new message id hash, so listeners read it as new; a hash is
   never 0, which RFC 2974 reserves for "no hash".
 - `withdraw()` sends the deletion at once, not at the next tick, so a caller shutting
   down may withdraw and close straight away. A deletion carries only the o= line.

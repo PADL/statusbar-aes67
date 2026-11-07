@@ -21,8 +21,8 @@ constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
 /// Copies of one announcement closer together than this are one announcement.
 constexpr int64_t DUPLICATE_NS = 1'000'000'000;
 
-/// Takes the next line from `text`, without its CR LF or LF.
-[[nodiscard]] auto take_line(std::string_view& text) noexcept -> std::string_view
+/// Reads the next line from `text`, without its CR LF or LF.
+[[nodiscard]] auto next_line(std::string_view& text) noexcept -> std::string_view
 {
     auto const end = text.find('\n');
     auto line = text.substr(0, end);
@@ -125,7 +125,7 @@ auto session_key(sdp::Session const& session) -> SessionKey
 auto origin_line_of(std::string_view sdp) -> std::optional<OriginLine>
 {
     while (!sdp.empty()) {
-        auto const line = take_line(sdp);
+        auto const line = next_line(sdp);
         if (!line.starts_with("o=")) {
             continue;
         }

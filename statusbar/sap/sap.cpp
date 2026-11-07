@@ -58,9 +58,9 @@ auto hash_of(std::string_view const sdp) noexcept -> uint16_t
         packet.size() >= 8 + (size_t{packet[1]} * 4);
 }
 
-/// Takes the optional payload type from `rest`: SDP text starts "v=0" (a deletion's may be only its "o="
+/// Parses the optional payload type from `rest`: SDP text starts "v=0" (a deletion's may be only its "o="
 /// line, or nothing), anything else is a NUL-terminated type. False when the NUL is missing.
-[[nodiscard]] auto take_payload_type(std::string_view& rest, std::string& payload_type) -> bool
+[[nodiscard]] auto parse_payload_type(std::string_view& rest, std::string& payload_type) -> bool
 {
     if (rest.empty() || rest.starts_with("v=") || rest.starts_with("o=")) {
         return true;
@@ -118,7 +118,7 @@ auto parse_sap_packet(std::span<uint8_t const> const packet) -> std::optional<Sa
         .origin = ip::IPv4Address{packet[4], packet[5], packet[6], packet[7]},
     };
     std::string_view rest = as_string_view(packet.subspan(8 + (size_t{packet[1]} * 4)));
-    if (!take_payload_type(rest, message.payload_type)) {
+    if (!parse_payload_type(rest, message.payload_type)) {
         return std::nullopt;
     }
     message.sdp = rest;

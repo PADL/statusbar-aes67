@@ -249,7 +249,7 @@ auto TimebaseEstimator::publish_locked(std::int64_t const now_ns, bool const ref
 {
     bool const joined = state_ != State::locked;
     if (joined) {
-        // Join the new line to the one in use at now_ns (only the slope changes), or take the
+        // Join the new line to the one in use at now_ns (only the slope changes), or adopt the
         // source's own time when absolute.
         domain_constant_ns_ = params_.absolute ? 0 : published_.to_domain(now_ns) - fitted_source_ns(now_ns);
         ++published_.epoch;
