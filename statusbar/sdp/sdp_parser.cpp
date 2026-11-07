@@ -381,7 +381,8 @@ enum class RtpmapResult
     return parse_offered_rtpmap(*payload_type, rest, format);
 }
 
-/// One ST 2110-30 Section 6.2.2 group symbol's channels: a named group's, or Unn's nn (01-64); nullopt for another.
+/// One group symbol's channels (SMPTE ST 2110-30:2017 Section 6.2.2, Table 1): M mono, DM dual mono, ST stereo,
+/// LtRt matrix stereo, 51 5.1, 71 7.1, 222 22.2, SGRP an SDI audio group, Unn nn undefined (01-64); nullopt for another.
 [[nodiscard]] auto group_channels(std::string_view const symbol) noexcept -> std::optional<uint32_t>
 {
     static constexpr std::array<std::pair<std::string_view, uint32_t>, 8> GROUPS{
