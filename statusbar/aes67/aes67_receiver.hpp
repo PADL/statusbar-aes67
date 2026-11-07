@@ -162,7 +162,7 @@ class Receiver
     FrameHandler handler_;
     Transport& transport_;
     std::unique_ptr<ReceivePort> port_;
-    Endpoint destination_;  ///< where port_ receives
+    Endpoint destination_;               ///< where port_ receives
     Datagram const* handling_{nullptr};  ///< the datagram whose frames the handler is given (hold_frame())
 
     std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet
