@@ -164,7 +164,7 @@ class SendPort
 struct SendOptions
 {
     Endpoint destination;
-    uint8_t ttl{32};                                 ///< multicast TTL (unicast uses the host default)
+    uint8_t ttl{32};                                 ///< the IPv4 TTL, to a group or a unicast destination (0: default)
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};  ///< the IPv4 DSCP (Sender::set_dscp())
     std::optional<ieee::VlanTag> vlan;               ///< the 802.1Q tag (SendPort::set_vlan()); none: untagged
 };
@@ -206,6 +206,11 @@ class Transport
     virtual ~Transport() = default;
     /// The interface's IPv4 address: the origin of every sender's SDP.
     [[nodiscard]] virtual auto local_address() const noexcept -> ip::IPv4Address = 0;
+    /// Whether `address` is this host's on the interface, so a receive port can bind it; by default local_address().
+    [[nodiscard]] virtual auto is_local_address(ip::IPv4Address const& address) const noexcept -> bool
+    {
+        return address == local_address();
+    }
     /// Receive datagrams sent to `destination`, joining it if it is a group.
     [[nodiscard]] virtual auto open_receive(Endpoint const& destination) -> StatusValue<std::unique_ptr<ReceivePort>> = 0;
     /// Send to `options.destination`.
@@ -220,13 +225,23 @@ class Transport
     virtual void begin_tick() noexcept {}
     /// After the senders send, each tick.
     virtual void end_tick() noexcept {}
-    /// True when a port keeps datagrams only for the tick they arrived in
-    /// (XDP), so receivers must drain every tick; false when it queues (UDP).
-    [[nodiscard]] virtual auto drain_every_tick() const noexcept -> bool { return false; }
+    /// True when a receive port for `destination` keeps datagrams only for the tick they arrived in
+    /// (XDP), so its receiver must drain every tick; false when it queues (UDP).
+    [[nodiscard]] virtual auto drain_every_tick(Endpoint const& destination) const noexcept -> bool
+    {
+        (void)destination;
+        return false;
+    }
     /// Why the transport is not getting packets onto the wire (an AF_XDP
     /// kick the kernel keeps refusing), or none. Senders report it as their
     /// error. Real-time safe; any thread.
     [[nodiscard]] virtual auto send_error() const noexcept -> std::error_code { return {}; }
+    /// send_error() for the senders to `destination` alone; by default send_error(). Real-time safe; any thread.
+    [[nodiscard]] virtual auto send_error_for(Endpoint const& destination) const noexcept -> std::error_code
+    {
+        (void)destination;
+        return send_error();
+    }
     /// Received frames refused before any receiver saw them, by reason. Any thread.
     [[nodiscard]] virtual auto receive_refusals() const noexcept -> ReceiveRefusals { return {}; }
     /// Start the transport's counters afresh: receive_refusals() now, a socket's own at its next

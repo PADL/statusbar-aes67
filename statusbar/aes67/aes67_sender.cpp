@@ -119,9 +119,17 @@ auto Sender::configure(sdp::Session const& session) -> Status
     });
 }
 
-auto Sender::open_port(Destination const& destination) -> Status
+void Sender::prepare(Destination const& destination) noexcept
 {
     clear();
+    if (!destination.address.is_multicast()) {
+        vlan_.reset();  // a reservation is to a group (IEEE 802.1Q-2022 Clause 35.2.2.8.3): unicast goes untagged
+    }
+}
+
+auto Sender::open_port(Destination const& destination) -> Status
+{
+    prepare(destination);
     auto port = transport_.open_send({
         .destination = {.address = destination.address, .port = destination.port},
         .ttl = destination.ttl,
@@ -140,6 +148,9 @@ auto Sender::open_port(Destination const& destination) -> Status
 
 auto Sender::set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status
 {
+    if (port_ != nullptr && !destination_.address.is_multicast()) {
+        return success();  // untagged whatever is asked: vlan() stays none
+    }
     if (port_ != nullptr) {
         if (auto const set = port_->set_vlan(vlan); !set) {
             return set;
@@ -288,7 +299,7 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
         rtcp_counts_ = {};
     }
     // A transport that cannot get packets out puts the sender in error until it can.
-    if (auto const send_error = transport_.send_error()) {
+    if (auto const send_error = transport_.send_error_for({.address = destination_.address, .port = destination_.port})) {
         state_ = State::error;
         error_ = send_error;
     } else if (state_ == State::error) {
@@ -398,7 +409,7 @@ void Sender::pause() noexcept
         started_ = false;
         send_state_.store({});  // the RTCP session takes an SSRC of 0 as not sending
     }
-    if (auto const send_error = transport_.send_error()) {
+    if (auto const send_error = transport_.send_error_for({.address = destination_.address, .port = destination_.port})) {
         state_ = State::error;
         error_ = send_error;
     } else {

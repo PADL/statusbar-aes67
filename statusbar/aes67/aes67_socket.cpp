@@ -8,12 +8,15 @@
 
 #include <ifaddrs.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <format>
 #include <memory>
+#include <utility>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -119,33 +122,36 @@ class UdpRtcpPort final : public RtcpPort
     std::atomic<uint64_t> dropped_{0};
 };
 
-/// The first IPv4 address of the interface `name` in `list`.
-[[nodiscard]] auto find_ipv4(ifaddrs const* const list, std::string_view const name) noexcept -> std::optional<ip::IPv4Address>
+/// Every IPv4 address of the interface `name` in `list`, and whether it is a loopback interface.
+[[nodiscard]] auto find_ipv4(ifaddrs const* const list, std::string_view const name)
+    -> std::pair<std::vector<ip::IPv4Address>, bool>
 {
+    std::pair<std::vector<ip::IPv4Address>, bool> found{};
     for (ifaddrs const* entry = list; entry != nullptr; entry = entry->ifa_next) {
         if (entry->ifa_addr == nullptr || entry->ifa_addr->sa_family != AF_INET || name != entry->ifa_name) {
             continue;
         }
         sockaddr_in address{};
         std::memcpy(&address, entry->ifa_addr, sizeof(address));
-        return from_sockaddr(address).address;
+        found.first.push_back(from_sockaddr(address).address);
+        found.second = (entry->ifa_flags & IFF_LOOPBACK) != 0;
     }
-    return std::nullopt;
+    return found;
 }
 
-/// The interface's IPv4 address; fails interface_not_found when it has none.
-[[nodiscard]] auto interface_address(std::string_view const name) -> StatusValue<ip::IPv4Address>
+/// The interface's IPv4 addresses and loopback flag; fails interface_not_found when it has none.
+[[nodiscard]] auto interface_addresses(std::string_view const name) -> StatusValue<std::pair<std::vector<ip::IPv4Address>, bool>>
 {
     ifaddrs* list = nullptr;
     if (::getifaddrs(&list) != 0) {
         return failure(net::errno_code());
     }
-    auto const address = find_ipv4(list, name);
+    auto found = find_ipv4(list, name);
     ::freeifaddrs(list);
-    if (!address) {
+    if (found.first.empty()) {
         return failure(Aes67Error::interface_not_found);
     }
-    return *address;
+    return found;
 }
 
 /// The options a receive socket needs: shared when asked, IP_PKTINFO, and for a group only its own traffic.
@@ -190,19 +196,53 @@ class UdpRtcpPort final : public RtcpPort
     };
 }
 
-/// An RTCP port's sending options: for a group its interface and TTL, and the DSCP.
-[[nodiscard]] auto set_rtcp_send_options(int const fd, InterfaceInfo const& interface, RtcpOptions const& options) noexcept
-    -> Status
+/// A send socket's route and marking: a group out of `interface` with `ttl` and loopback, a unicast destination out
+/// of `interface` with `ttl` (IP_UNICAST_IF) and from its address when `bind_source`; then `dscp`, and to a unicast
+/// destination socket priority 0 after it, so the DSCP's priority never puts the socket in an SR class's queue
+/// (AES67-2023 Annex C.1.2).
+[[nodiscard]] auto prepare_send(
+    int const fd,
+    InterfaceInfo const& interface,
+    ip::IPv4Address const& destination,
+    uint8_t const ttl,
+    uint8_t const dscp,
+    bool const bind_source) noexcept -> Status
 {
-    if (options.destination.address.is_multicast()) {
-        if (auto set = net::set_multicast_send(fd, interface.index, options.ttl, true); !set) {
-            return failure(set.error());
+    bool const multicast = destination.is_multicast();
+    auto const routed = multicast ? net::set_multicast_send(fd, interface.index, ttl, true)
+                                  : net::set_unicast_send(fd, AF_INET, interface.index, ttl);
+    if (!routed) {
+        return routed;
+    }
+    if (!multicast && bind_source) {
+        if (auto bound = bind_to(fd, {.address = interface.address, .port = 0}); !bound) {
+            return bound;
         }
     }
-    return net::set_dscp(fd, AF_INET, options.dscp);
+    if (auto set = net::set_dscp(fd, AF_INET, dscp); !set) {
+        return set;
+    }
+    return multicast ? success() : net::set_priority(fd, 0);
 }
 
 }  // namespace
+
+auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options) -> StatusValue<net::FileDescriptor>
+{
+    auto fd = net::make_udp_socket();
+    if (!fd) {
+        return failure(fd.error());
+    }
+    if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, true); !set) {
+        return failure(set.error());
+    }
+    return std::move(*fd);
+}
+
+auto is_local(InterfaceInfo const& interface, ip::IPv4Address const& address) noexcept -> bool
+{
+    return std::ranges::contains(interface.addresses, address) || (interface.loopback && address.octet(0) == 127);
+}
 
 auto find_interface(std::string_view const name) -> StatusValue<InterfaceInfo>
 {
@@ -211,11 +251,16 @@ auto find_interface(std::string_view const name) -> StatusValue<InterfaceInfo>
     if (index == 0) {
         return failure(Aes67Error::interface_not_found);
     }
-    auto const address = interface_address(interface_name);
-    if (!address) {
-        return forward_failure(address);
+    auto addresses = interface_addresses(interface_name);
+    if (!addresses) {
+        return forward_failure(addresses);
     }
-    return InterfaceInfo{.name = std::move(interface_name), .index = index, .address = *address};
+    return InterfaceInfo{
+        .name = std::move(interface_name),
+        .index = index,
+        .address = addresses->first.front(),
+        .addresses = std::move(addresses->first),
+        .loopback = addresses->second};
 }
 
 auto to_sockaddr(Endpoint const& endpoint) noexcept -> sockaddr_in
@@ -276,7 +321,8 @@ auto open_rtcp_socket(InterfaceInfo const& interface, RtcpOptions const& options
     if (!fd) {
         return failure(fd.error());
     }
-    if (auto set = set_rtcp_send_options(fd->get(), interface, options); !set) {
+    // Out by the interface as its stream's socket (already bound to local), marked as it.
+    if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, false); !set) {
         return failure(set.error());
     }
     return std::make_unique<UdpRtcpPort>(

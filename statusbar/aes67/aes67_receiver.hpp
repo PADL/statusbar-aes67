@@ -26,6 +26,13 @@
 
 namespace statusbar::aes67 {
 
+/// Where a stream on `connection` arrives over `transport`: a group, or this host's address, as `c=` names it
+/// (RFC 8866 Clause 5.7); `transport.local_address()` when `c=` is the session's origin, the sender (AES67-2023
+/// Clause 8.5.2, an offer). Any other unicast `c=`, 0.0.0.0 among them, fails foreign_destination.
+[[nodiscard]] auto receive_endpoint(
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Transport const& transport)
+    -> StatusValue<Endpoint>;
+
 class Receiver
 {
   public:
@@ -91,20 +98,29 @@ class Receiver
     /// Account a validated packet's place in the sequence; false to drop it.
     auto place(uint16_t sequence, uint32_t frames) noexcept -> bool;
     void reset_stream() noexcept;
-    /// From configure(), the media validated: open the port and set the stream up from the SDP.
+    /// From configure(), the media validated: open the port where receive_endpoint() says and set the stream up from
+    /// the SDP; on failure State::error and error().
     [[nodiscard]] auto open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
         -> Status;
-    /// The stream's payload type, offset, source filter and RTCP endpoints, from the SDP.
-    void apply_media(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection);
+    /// The stream's payload type, offset, source filter and RTCP endpoints, from the SDP, received at `endpoint`.
+    void apply_media(
+        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
     /// clear(), then open the transport for `destination`; on failure State::error and error().
     [[nodiscard]] auto reopen(Endpoint const& destination) -> Status;
+    /// State::error with `error`, returned.
+    [[nodiscard]] auto refused(std::error_code error) noexcept -> Status;
+    /// The port reopen() opened for `destination` taken on, or why it did not open as State::error and error().
+    [[nodiscard]] auto adopt(StatusValue<std::unique_ptr<ReceivePort>> port, Endpoint const& destination) -> Status;
     /// offset_'s value for a stream with `clock`: a direct clock's offset, flagged set; 0 when sender-clocked.
     [[nodiscard]] auto initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t;
     /// From configure(): the RTCP endpoints, or why there are none.
-    void set_rtcp(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection);
-    /// The RTCP endpoints for the media (RFC 3605), without the DSCP; fails rtcp_multiplexed or no_rtcp_peer.
+    void set_rtcp(
+        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
+    /// The RTCP endpoints for the media received at `endpoint` (RFC 3605), without the DSCP; fails rtcp_multiplexed
+    /// or no_rtcp_peer.
     [[nodiscard]] auto rtcp_options_for(
-        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection) const -> StatusValue<RtcpOptions>;
+        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint) const
+        -> StatusValue<RtcpOptions>;
     /// State::error while the port reports one (ReceivePort::error()), ready again once it does not.
     void note_port_error() noexcept;
     /// Receives and accepts up to MAX_BATCHES batches; true when every batch came back full (more may wait).
@@ -138,6 +154,7 @@ class Receiver
     FrameHandler handler_;
     Transport& transport_;
     std::unique_ptr<ReceivePort> port_;
+    Endpoint destination_;  ///< where port_ receives
 
     uint8_t payload_type_{0};
     std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet

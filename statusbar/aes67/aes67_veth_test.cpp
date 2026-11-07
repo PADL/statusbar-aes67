@@ -4,10 +4,15 @@
 /// Two UdpTransports on two veth pairs receiving the same group: a datagram arriving on one
 /// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
 /// tagged stream is received through the tagged group rule, a membership on an up VLAN link
-/// beside; a priority-tagged one is not received. Needs root; skips without it.
+/// beside; a priority-tagged one is not received. A SplitTransport: a unicast datagram passes the XDP
+/// program to the kernel beside a redirected group. A UdpTransport: an offer is received from its
+/// sender alone. Needs root (or a user and network namespace, but for AF_XDP); skips without it.
 
+#include "statusbar/aes67/aes67_receiver.hpp"
+#include "statusbar/aes67/aes67_split_transport.hpp"
 #include "statusbar/aes67/aes67_udp_transport.hpp"
 #include "statusbar/aes67/aes67_xdp_transport.hpp"
+#include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/rtp/rtp_frame.hpp"
 #include "statusbar/test/test.hpp"
@@ -29,6 +34,7 @@
 #include <linux/if_packet.h>
 #include <net/ethernet.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 
 using namespace statusbar;
@@ -69,17 +75,19 @@ class VethPair
     bool ok_{false};
 };
 
-/// Send one UDP datagram to `group`:`port` from `source` as a raw frame on `interface`, tagged with `vlan` if given.
+/// Send one UDP datagram to `group`:`port` from `source` as a raw frame on `interface`, tagged with `vlan` if given;
+/// to `mac` if given, else the group's MAC.
 auto inject(
     std::string const& interface,
     IPv4Address const& source,
     IPv4Address const& group,
     uint16_t const port,
-    std::optional<ieee::VlanTag> const vlan = std::nullopt) -> bool
+    std::optional<ieee::VlanTag> const vlan = std::nullopt,
+    std::optional<ieee::Eui48> const mac = std::nullopt) -> bool
 {
     net::FileDescriptor const fd{::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP))};
     rtp::FrameAddressing const addressing{
-        .destination_mac = rtp::multicast_mac(group),
+        .destination_mac = mac.value_or(rtp::multicast_mac(group)),
         .source_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x02},
         .vlan = vlan,
         .source_address = source,
@@ -135,6 +143,46 @@ auto sent_and_received(XdpTransport& sending, SendPort& sender, XdpTransport& re
         receiving.end_tick();
     }
     return total;
+}
+
+/// An XdpTransport (generic, copy) and a UdpTransport on `interface` as one SplitTransport; nullptr without AF_XDP.
+auto open_split(std::string const& interface, XdpTransport*& xdp) -> std::unique_ptr<SplitTransport>
+{
+    XdpTransportOptions const options{.bind_mode = net::XdpBindMode::copy, .attach_mode = net::XdpAttachMode::generic};
+    auto multicast = XdpTransport::open(interface, options);
+    auto unicast = UdpTransport::open(interface);
+    if (!multicast || !unicast) {
+        return nullptr;
+    }
+    xdp = multicast->get();
+    return std::make_unique<SplitTransport>(std::move(*multicast), std::move(*unicast));
+}
+
+/// The datagrams each of `ports` takes within 50 ticks of 1 ms of `receiving`.
+auto received_each(Transport& receiving, std::array<ReceivePort*, 2> const& ports) -> std::array<size_t, 2>
+{
+    std::array<size_t, 2> totals{};
+    std::array<Datagram, 8> batch{};
+    for (int tick = 0; tick < 50; ++tick) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        receiving.begin_tick();
+        totals[0] += ports[0]->receive(batch);
+        totals[1] += ports[1]->receive(batch);
+        receiving.end_tick();
+    }
+    return totals;
+}
+
+/// `interface`'s MAC address (SIOCGIFHWADDR, which a network namespace answers and sysfs may not).
+auto mac_of(std::string const& interface) -> std::optional<ieee::Eui48>
+{
+    ifreq request{};
+    if (!net::ifreq_ioctl(interface, SIOCGIFHWADDR, request)) {
+        return std::nullopt;
+    }
+    ieee::Eui48 mac{};
+    std::ranges::copy(net::hwaddr_bytes(request), mac.value.begin());
+    return mac;
 }
 
 }  // namespace
@@ -312,6 +360,78 @@ TEST(aes67_veth, a_priority_tagged_datagram_reaches_the_group_socket)
     EXPECT_EQ(received(**port), size_t{1});
     EXPECT_TRUE(inject("a67wveth1", IPv4Address{10, 236, 0, 2}, rtp.address, rtp.port, ieee::make_vlan_tag(7, false, 5)));
     EXPECT_EQ(received(**port), size_t{0});
+}
+
+// AES67-2023 Clause 6.1.1 beside AF_XDP: arriving on the wire, the joined group is redirected to the socket and a
+// unicast datagram to the interface's own MAC and address is passed to the kernel (XDP_PASS), whose UDP socket on
+// the same interface receives it.
+TEST(aes67_veth, a_unicast_stream_reaches_the_kernel_socket_beside_an_xdp_group)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67uveth1", "a67uveth0", "10.237.0.2/24"};
+    XdpTransport* xdp = nullptr;
+    auto receiving = pair.ok() ? open_split("a67uveth1", xdp) : nullptr;
+    auto const mac = mac_of("a67uveth1");
+    if (!receiving || !mac) {
+        std::println("  skipped: no veth pair, or AF_XDP unavailable");
+        return;
+    }
+    Endpoint const group{.address = IPv4Address{239, 69, 237, 1}, .port = 45240};
+    Endpoint const unicast{.address = IPv4Address{10, 237, 0, 2}, .port = 45242};
+    auto group_port = receiving->open_receive(group);
+    auto unicast_port = receiving->open_receive(unicast);
+    EXPECT_TRUE(group_port && unicast_port);
+    if (!group_port || !unicast_port) {
+        return;
+    }
+    std::array<ReceivePort*, 2> const ports{group_port->get(), unicast_port->get()};
+    (void)received_each(*receiving, ports);  // installs the group's rule
+    IPv4Address const sender{10, 237, 0, 9};
+    EXPECT_TRUE(inject("a67uveth0", sender, group.address, group.port));
+    EXPECT_TRUE(inject("a67uveth0", sender, unicast.address, unicast.port, std::nullopt, mac));
+    auto const totals = received_each(*receiving, ports);
+    EXPECT_EQ(totals[0], size_t{1});  // the group, redirected to the socket
+    EXPECT_EQ(totals[1], size_t{1});  // the unicast datagram, passed to the kernel
+    EXPECT_EQ(xdp->socket_stats().rx_count, uint64_t{1});
+    EXPECT_EQ(xdp->receive_refusals().unmatched, uint64_t{0});
+    group_port->reset();
+    unicast_port->reset();
+}
+
+// An offer (AES67-2023 Clause 8.5.2) arriving on the wire at the interface's MAC and address reaches the receiver's
+// kernel socket, from its sender alone. Runs unprivileged in a user and network namespace too.
+TEST(aes67_veth, an_offer_is_received_at_the_interface_from_its_sender_alone)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67oveth1", "a67oveth0", "10.238.0.2/24"};
+    auto transport = pair.ok() ? UdpTransport::open("a67oveth1") : StatusValue<std::unique_ptr<UdpTransport>>{nullptr};
+    auto const mac = mac_of("a67oveth1");
+    if (!transport || !*transport || !mac) {
+        std::println("  skipped: cannot create a veth pair");
+        return;
+    }
+    IPv4Address const sender{10, 238, 0, 9};
+    sdp::Session offer{.origin_address = "10.238.0.9", .connection = sdp::Connection{.address = sender}};
+    offer.media.push_back(
+        {.port = 45250,
+         .payload_type = 97,
+         .encoding = sdp::Encoding::l24,
+         .channels = 2,
+         .media_clock = sdp::MediaClock::direct(0)});
+    Receiver receiver{{.encoding = sdp::Encoding::l24, .channels = 2}, {}, **transport};
+    EXPECT_TRUE(receiver.configure(offer).has_value());
+    EXPECT_TRUE(inject("a67oveth0", IPv4Address{10, 238, 0, 8}, IPv4Address{10, 238, 0, 2}, 45250, std::nullopt, mac));
+    EXPECT_TRUE(inject("a67oveth0", sender, IPv4Address{10, 238, 0, 2}, 45250, std::nullopt, mac));
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    receiver.drain(0);
+    EXPECT_EQ(receiver.counters().drops.source, uint64_t{1});
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
 }
 
 TEST_MAIN(statusbar_aes67, aes67_veth_test)
