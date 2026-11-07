@@ -56,8 +56,6 @@ class XdpTransport::Port final : public ReceivePort
 
     [[nodiscard]] auto error() const noexcept -> std::error_code override { return state_->rule_error; }
 
-    [[nodiscard]] auto hold(Datagram const& datagram) noexcept -> bool override { return transport_.keep(datagram.frame); }
-
   private:
     XdpTransport& transport_;
     PortState* state_;
@@ -91,15 +89,6 @@ class XdpTransport::Sender final : public SendPort
     {
         auto const frame = render_frame(transport_.tx_pool_, addressing_.current(), header, payload_length, render);
         return frame && transport_.commit(frame->first, frame->second, departure_ns);
-    }
-
-    auto send_gathered_at(
-        rtp::RtpHeader const& header,
-        std::span<std::span<uint8_t const> const> const payload,
-        uint64_t const departure_ns,
-        bool const headers_before) noexcept -> bool override
-    {
-        return transport_.send_gathered(addressing_.current(), header, payload, departure_ns, headers_before);
     }
 
     /// The transport flushes every sender's frames in end_tick().
@@ -222,10 +211,9 @@ XdpTransport::XdpTransport(InterfaceInfo interface) noexcept
 {}
 
 XdpTransport::~XdpTransport()
-{  // NOLINT(statusbar-block-statements): the teardown, in the order it must happen
+{
     assert(live_ports_ == 0 && "every receive port must be destroyed before its transport");
     assert(live_rtcp_ == 0 && "every RTCP port must be destroyed before its transport");
-    assert(keeper_.kept() == 0 && "every kept frame must be released before its transport");
     release_held();
     delete_port_states();
     collect_retired();
@@ -264,9 +252,6 @@ auto XdpTransport::config_for(std::string_view const interface, Options const& o
         .bind_mode = options.bind_mode,
         .attach_mode = options.attach_mode,
         .pin_path = options.pin_path,
-        .shared_umem = options.shared_umem,
-        .umem_share = options.umem_share,
-        .tx_scatter_gather = options.scatter_gather,
     };
 }
 
@@ -378,24 +363,11 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
         return failure(info.error());
     }
     std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
-    if (auto const applied = transport->apply_options(options); !applied) {
-        return forward_failure(applied);
-    }
+    transport->queue_ = options.queue;
     if (auto opened = transport->open_steered(options); !opened) {
         return forward_failure(opened);
     }
     return transport;
-}
-
-auto XdpTransport::apply_options(Options const& options) noexcept -> Status
-{
-    if (options.shared_umem != nullptr && options.shared_umem->ledger().frames_per_share() != UMEM_FRAMES) {
-        return failure(std::errc::invalid_argument);  // the keeper indexes a share of UMEM_FRAMES
-    }
-    queue_ = options.queue;
-    shared_ = options.shared_umem;
-    first_frame_ = options.shared_umem != nullptr ? options.umem_share * UMEM_FRAMES : 0;
-    return success();
 }
 
 auto XdpTransport::open_steered(Options const& options) -> Status
@@ -657,65 +629,9 @@ auto XdpTransport::compile_rules(
 void XdpTransport::release_held() noexcept
 {
     for (size_t i = 0; i < held_count_; ++i) {
-        auto const index = frame_index(held_[i]);
-        if (!index || keeper_.tick_ended(*index)) {
-            (void)context_.rx_release(held_[i]);
-        }
+        (void)context_.rx_release(held_[i]);
     }
     held_count_ = 0;
-}
-
-auto XdpTransport::frame_index(uint64_t const frame) const noexcept -> std::optional<size_t>
-{
-    size_t const size = context_.umem_frame_size();
-    if (size == 0 || frame == NO_FRAME || frame / size < first_frame_ || frame / size - first_frame_ >= UMEM_FRAMES) {
-        return std::nullopt;
-    }
-    return static_cast<size_t>((frame / size) - first_frame_);
-}
-
-auto XdpTransport::keep(uint64_t const frame) noexcept -> bool
-{
-    auto const index = frame_index(frame);
-    return index && keeper_.keep(*index);
-}
-
-void XdpTransport::unkeep(uint64_t const frame) noexcept
-{
-    if (auto const index = frame_index(frame); index && keeper_.drop(*index)) {
-        (void)context_.rx_release(frame);
-    }
-}
-
-auto XdpTransport::FrameKeeper::keep(size_t const index) noexcept -> bool
-{
-    if ((counts_[index] & HOLDS) == 0) {
-        if (kept_ == MAX_KEPT) {
-            return false;
-        }
-        ++kept_;
-    }
-    ++counts_[index];
-    return true;
-}
-
-auto XdpTransport::FrameKeeper::drop(size_t const index) noexcept -> bool
-{
-    if ((counts_[index] & HOLDS) == 0) {
-        return false;  // not kept: nothing to give back
-    }
-    --counts_[index];
-    if ((counts_[index] & HOLDS) != 0) {
-        return false;
-    }
-    --kept_;
-    return (counts_[index] & THIS_TICK) == 0;  // this tick's goes back at its end
-}
-
-auto XdpTransport::FrameKeeper::tick_ended(size_t const index) noexcept -> bool
-{
-    counts_[index] &= static_cast<uint16_t>(~THIS_TICK);
-    return (counts_[index] & HOLDS) == 0;
 }
 
 void XdpTransport::refill_tx_pool() noexcept
@@ -770,101 +686,10 @@ auto XdpTransport::commit(net::EthernetTxSlot const& slot, size_t const length, 
     // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
     // is open and carries TX metadata.
     if (context_.tx_launch_time()) {
-        (void)context_.tx_set_launch_time(slot.handle, launch_for(departure_ns));
+        uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (the tick's reading is 0)
+        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, tick_phc_ns_)));
     }
     return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
-}
-
-auto XdpTransport::launch_for(uint64_t const departure_ns) noexcept -> int64_t
-{
-    if (!context_.tx_launch_time()) {
-        return 0;
-    }
-    uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (the tick's reading is 0)
-    return static_cast<int64_t>(launch_clock_.next(departure, tick_phc_ns_));
-}
-
-auto XdpTransport::send_gathered(
-    rtp::FrameAddressing const& addressing,
-    rtp::RtpHeader const& header,
-    std::span<std::span<uint8_t const> const> const payload,
-    uint64_t const departure_ns,
-    bool const headers_before) noexcept -> bool
-{
-    size_t const segments = context_.tx_segments();
-    if (shared_ == nullptr || payload.empty() || payload.size() > segments || payload.size() > MAX_GATHER_BUFFERS) {
-        return false;
-    }
-    size_t const length =
-        std::ranges::fold_left(payload, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
-    // In place first where the headers may go before the payload: one buffer fewer, no frame of the pool's.
-    if (headers_before && writes_headers_before() && gather_in_place(addressing, header, payload, length, departure_ns)) {
-        return true;
-    }
-    return payload.size() < segments && gather_after_headers(addressing, header, payload, length, departure_ns);
-}
-
-auto XdpTransport::gather_after_headers(
-    rtp::FrameAddressing const& addressing,
-    rtp::RtpHeader const& header,
-    std::span<std::span<uint8_t const> const> const payload,
-    size_t const length,
-    uint64_t const departure_ns) noexcept -> bool
-{
-    auto slot = tx_pool_.claim();
-    if (!slot) {
-        return false;
-    }
-    auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, length, slot->buffer);
-    if (!offset) {
-        (void)tx_pool_.put(*slot);
-        return false;
-    }
-    // Timed only now, so a packet that goes otherwise reads the PHC, and claims a place in the order, once.
-    return context_.tx_commit_gather(slot->handle, *offset, payload, launch_for(departure_ns))
-        .has_value();  // a refusal frees the slot
-}
-
-auto XdpTransport::gather_in_place(
-    rtp::FrameAddressing const& addressing,
-    rtp::RtpHeader const& header,
-    std::span<std::span<uint8_t const> const> const payload,
-    size_t const length,
-    uint64_t const departure_ns) noexcept -> bool
-{
-    auto const first = headers_before(addressing, header, length, payload[0]);
-    if (!first) {
-        return false;
-    }
-    std::array<std::span<uint8_t const>, MAX_GATHER_BUFFERS> pieces{};
-    pieces[0] = *first;
-    std::ranges::copy(payload.subspan(1), pieces.begin() + 1);
-    return context_.tx_commit_gather(std::nullopt, 0, std::span{pieces}.first(payload.size()), launch_for(departure_ns))
-        .has_value();
-}
-
-auto XdpTransport::headers_before(
-    rtp::FrameAddressing const& addressing,
-    rtp::RtpHeader const& header,
-    size_t const length,
-    std::span<uint8_t const> const first) noexcept -> std::optional<std::span<uint8_t const>>
-{
-    std::array<uint8_t, MAX_HEADERS> headers{};
-    auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, length, headers);
-    auto const at = shared_->address_of(first.data(), first.size());
-    if (!offset || !at || !headers_fit_before(*at, *offset)) {
-        return std::nullopt;
-    }
-    std::copy_n(headers.data(), *offset, shared_->area() + *at - *offset);
-    return std::span<uint8_t const>{shared_->area() + *at - *offset, *offset + first.size()};
-}
-
-auto XdpTransport::headers_fit_before(uint64_t const at, size_t const offset) const noexcept -> bool
-{
-    // The headers stay within the first buffer's frame, above the metadata the kernel reads below a descriptor;
-    // and a transmit still pointing into the frame (the last packet's, split across two) must not see them change.
-    bool const room = at % shared_->ledger().frame_size() >= offset + context_.tx_metadata_len();
-    return room && !shared_->ledger().lent(at);
 }
 
 void XdpTransport::start_cycle() noexcept
@@ -889,11 +714,8 @@ void XdpTransport::receive_frames() noexcept
             break;
         }
         auto const& rx = **slot;
-        if (dispatch_frame(rx.buffer, ports, pipes, refusals_, rx.handle)) {
+        if (dispatch_frame(rx.buffer, ports, pipes, refusals_)) {
             held_[held_count_++] = rx.handle;
-            if (auto const index = frame_index(rx.handle)) {
-                keeper_.arrived(*index);
-            }
         } else {
             (void)context_.rx_release(rx.handle);
         }
@@ -958,13 +780,13 @@ auto offer_to_rtcp(
     return matched;
 }
 
-/// A frame's destination, and its datagram with its source, in UMEM frame `handle`.
-auto addressed(rtp::UdpFrame const& frame, uint64_t const handle) noexcept -> std::pair<Endpoint, Datagram>
+/// A frame's destination, and its datagram with its source.
+auto addressed(rtp::UdpFrame const& frame) noexcept -> std::pair<Endpoint, Datagram>
 {
     auto const& a = frame.addressing;
     return {
         Endpoint{.address = a.destination_address, .port = a.destination_port},
-        Datagram{.payload = frame.datagram, .source = {.address = a.source_address, .port = a.source_port}, .frame = handle},
+        Datagram{.payload = frame.datagram, .source = {.address = a.source_address, .port = a.source_port}},
     };
 }
 
@@ -974,15 +796,14 @@ auto XdpTransport::dispatch_frame(
     std::span<uint8_t const> const frame,
     std::span<PortState* const> const ports,
     std::span<RtcpPipe* const> const pipes,
-    RefusalCounter& refusals,
-    uint64_t const handle) noexcept -> bool
+    RefusalCounter& refusals) noexcept -> bool
 {
     auto const udp = rtp::parse_udp_frame(frame);
     if (!udp) {
         refusals.count(Refusal::malformed);
         return false;
     }
-    auto const [destination, datagram] = addressed(*udp, handle);
+    auto const [destination, datagram] = addressed(*udp);
     auto const offered = offer_to_ports(ports, destination, datagram, refusals);
     if (!offer_to_rtcp(pipes, destination, datagram) && offered == Offered::unmatched) {
         refusals.count(Refusal::unmatched);

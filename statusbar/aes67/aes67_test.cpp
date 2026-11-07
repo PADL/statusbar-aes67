@@ -152,19 +152,11 @@ class LoopTransport final : public Transport
                     continue;
                 }
                 held.push_back(std::move(packet.bytes));
-                out[n++] = {.payload = held.back(), .source = transport.source, .frame = transport.next_frame++};
+                out[n++] = {.payload = held.back(), .source = transport.source};
             }
             return n;
         }
         [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.port_error; }
-        [[nodiscard]] auto hold(Datagram const& datagram) noexcept -> bool override
-        {
-            if (!transport.holdable) {
-                return false;
-            }
-            transport.kept.push_back(datagram.frame);
-            return true;
-        }
         LoopTransport& transport;
         Endpoint destination;
         std::deque<std::vector<uint8_t>> held;
@@ -207,23 +199,6 @@ class LoopTransport final : public Transport
             transport.departures.push_back(departure_ns);
             return send_rendered(header, payload_length, render);
         }
-        auto send_gathered_at(
-            rtp::RtpHeader const& header,
-            std::span<std::span<uint8_t const> const> const payload,
-            uint64_t const departure_ns,
-            bool const headers_before) noexcept -> bool override
-        {
-            if (!transport.gatherable) {
-                return false;
-            }
-            std::vector<uint8_t> payload_bytes;
-            for (auto const piece : payload) {
-                payload_bytes.insert(payload_bytes.end(), piece.begin(), piece.end());
-            }
-            transport.gathers.push_back({payload.size(), headers_before});
-            transport.departures.push_back(departure_ns);
-            return send(header, payload_bytes);
-        }
         auto flush() noexcept -> size_t override { return 0; }
         auto set_vlan(std::optional<ieee::VlanTag> const& vlan) noexcept -> Status override
         {
@@ -261,20 +236,13 @@ class LoopTransport final : public Transport
     std::deque<Packet> queue;
     std::vector<uint64_t> departures;  ///< each packet's departure as the sender gave it
     Endpoint source{.address = IPv4Address{192, 168, 1, 10}, .port = 5004};
-    bool refuse{false};                            ///< every send_rendered() finds no TX buffer
-    std::error_code failing;                       ///< send_error()
-    std::error_code port_error;                    ///< every receive port's error()
-    bool every_tick{false};                        ///< drain_every_tick()
-    bool refuse_tag{false};                        ///< set_vlan() refuses a tag, as a socket does
-    std::optional<ieee::VlanTag> vlan;             ///< the open port's tag
-    size_t receives{0};                            ///< receive() calls
-    bool holdable{false};                          ///< receive ports keep frames (ReceivePort::hold())
-    bool gatherable{false};                        ///< send ports send gathered payloads (SendPort::send_gathered_at())
-    std::vector<std::pair<size_t, bool>> gathers;  ///< each gathered send's buffers and headers_before
-    uint64_t next_frame{0};                        ///< the next datagram's frame
-    std::vector<uint64_t> kept;                    ///< frames held, in order
-    void release_frame(uint64_t const frame) noexcept override { released.push_back(frame); }
-    std::vector<uint64_t> released;            ///< frames released, in order
+    bool refuse{false};                        ///< every send_rendered() finds no TX buffer
+    std::error_code failing;                   ///< send_error()
+    std::error_code port_error;                ///< every receive port's error()
+    bool every_tick{false};                    ///< drain_every_tick()
+    bool refuse_tag{false};                    ///< set_vlan() refuses a tag, as a socket does
+    std::optional<ieee::VlanTag> vlan;         ///< the open port's tag
+    size_t receives{0};                        ///< receive() calls
     std::optional<IPv4Address> joined_source;  ///< the last port's source-specific join, if it was one
 };
 
@@ -592,48 +560,6 @@ TEST(aes67_sender, sends_packets_on_the_grid_when_due)
     auto const next = rtp::parse_rtp(transport.queue.back().bytes);
     EXPECT_TRUE(next && next->header.ssrc.get() == ssrc && next->header.sequence.get() == expected_seq);
     EXPECT_TRUE(sender.state() == State::running);
-}
-
-// A sender whose gatherer finds a packet's frames where they lie sends them from there, buffer by buffer;
-// a packet it does not find, or a port that cannot send so, goes through the provider as before.
-TEST(aes67_sender, sends_a_packet_from_where_its_frames_lie_when_it_can)
-{
-    LoopTransport transport;
-    PatternSource source{6};
-    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
-    sender.set_send_offset(0);
-    std::vector<std::vector<uint8_t>> held;  // eight 6-frame packets' payloads, as AVTP frames hold them
-    uint64_t const base = 48'000ULL * 1'000'000;
-    sender.set_gatherer([&](uint64_t const first, uint32_t const frames, std::span<std::span<uint8_t const>> out, bool& before) {
-        if (first != base - 48) {
-            return size_t{0};
-        }
-        held.assign(frames / 6, std::vector<uint8_t>(36));
-        for (size_t k = 0; k < held.size(); ++k) {
-            (void)source.pull(first + (k * 6), 6, held[k]);
-            out[k] = held[k];
-        }
-        before = true;
-        return held.size();
-    });
-    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
-    sender.tick(base + 46, 0);  // [base - 48, base): refused by the port, then sent through the provider
-    EXPECT_EQ(sender.gathered(), uint64_t{0});
-    transport.gatherable = true;
-    transport.queue.clear();
-    sender.clear();
-    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
-    size_t const pulls = source.pulls;
-    sender.tick(base + 46, 0);  // gathered
-    sender.tick(base + 47, 0);  // not found: the provider
-    EXPECT_EQ(sender.gathered(), uint64_t{1});
-    EXPECT_TRUE(transport.gathers.size() == 1 && transport.gathers[0].first == 8 && transport.gathers[0].second);
-    EXPECT_EQ(transport.queue.size(), size_t{2});
-    EXPECT_EQ(source.pulls, pulls + 9);  // the gatherer's eight, and the provider's one for the second packet
-    std::vector<uint8_t> expect(48 * 6);
-    (void)source.pull(base - 48, 48, expect);
-    auto const packet = rtp::parse_rtp(transport.queue[0].bytes);
-    EXPECT_TRUE(packet && std::ranges::equal(packet->payload, expect));
 }
 
 TEST(aes67_sender, sends_silence_for_frames_not_held_and_skips_when_far_behind)
@@ -1373,30 +1299,6 @@ TEST(aes67_receiver, pushes_frames_by_index_and_counts_loss_reorder_and_strays)
     receiver.drain(later + FPP);
     EXPECT_EQ(receiver.ssrc(), std::optional<uint32_t>{0x5555});
     EXPECT_EQ(sink.blocks.back().first_index, later + FPP);
-}
-
-// A handler may keep the frame of the packet it is handed, through the receiver, and only then.
-TEST(aes67_receiver, a_handler_keeps_the_frame_of_the_packet_it_is_handed)
-{
-    LoopTransport transport;
-    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
-    std::vector<std::optional<uint64_t>> holds;
-    Receiver* self = nullptr;
-    Receiver receiver{
-        STEREO_L24, [&](uint64_t, uint32_t, std::span<uint8_t const>) { holds.push_back(self->hold_frame()); }, transport};
-    self = &receiver;
-    EXPECT_TRUE(receiver.configure(stream_session(group)));
-    EXPECT_FALSE(receiver.hold_frame().has_value());  // no packet being handled
-    transport.queue.push_back({group, rtp_packet(1, 1000, 0x1234, 97)});
-    receiver.drain(1048);
-    transport.holdable = true;
-    transport.queue.push_back({group, rtp_packet(2, 1048, 0x1234, 97)});
-    receiver.drain(1096);
-    EXPECT_EQ(holds.size(), size_t{2});
-    EXPECT_FALSE(holds[0].has_value());  // the port could not keep it
-    EXPECT_TRUE(holds[1].has_value() && *holds[1] == 1 && transport.kept == std::vector<uint64_t>{1});
-    receiver.release_frame(1);
-    EXPECT_TRUE(transport.released == std::vector<uint64_t>{1});
 }
 
 TEST(aes67_receiver, each_refused_packet_is_counted_under_its_reason)
