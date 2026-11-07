@@ -103,6 +103,18 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - Do not destroy a port while the real-time thread may still call it: swap it out between
   ticks and retire it first. The transport outlives every port it opened (asserted in its
   destructor), and the real-time thread stops ticking it before it is destroyed.
+- A datagram's `payload` is the transport's until the next `receive()` on the port or the
+  next `begin_tick()`, whichever is first, unless `ReceivePort::hold(datagram)` keeps its frame
+  (`Datagram::frame` names it; `NO_FRAME` when the transport has none): then it stays until
+  `Transport::release_frame(frame)`, which the draining thread calls on the transport, the port
+  gone or not (`Receiver::release_frame()` after `clear()`). A transport that cannot hold, or
+  holds as many as it can, answers false and the caller copies within the tick.
+- `SendPort::send_gathered_at()` sends a packet's payload from buffers that lie in frames the
+  transport may send from (a shared UMEM's held frames: `Transport::frames_shared()`), its headers
+  in a frame of the transport's own or, with `headers_before`, over the bytes before the first
+  buffer where `Transport::writes_headers_before()` (untimed only). False, nothing queued, when it
+  cannot; `Transport::gather_buffers()` says how many buffers a packet may take (0: never), and
+  `Transport::holds_frames()` whether its receive ports hold at all. The defaults do none of it.
 - `send_rendered()` reserves the buffer first; when it cannot (as `send()` would fail),
   `render` is not called. When `render` returns false, or the packet is refused after it
   ran (the XDP TX ring is full), the buffer is released unsent: a batch slot is not
