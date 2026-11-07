@@ -16,6 +16,7 @@
 #include "statusbar/sdp/sdp.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <atomic>
 #include <bitset>
 #include <cstdint>
@@ -146,6 +147,8 @@ class Receiver
     Transport& transport_;
     std::unique_ptr<ReceivePort> port_;
     Datagram const* handling_{nullptr};  ///< the datagram whose frames the handler is given (hold_frame())
+    /// receive_batches()' datagrams, built once: Datagram::frame's NO_FRAME makes a fresh batch a store per field.
+    std::array<Datagram, BATCH> batch_{};
 
     std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet
     uint8_t payload_type_{0};
