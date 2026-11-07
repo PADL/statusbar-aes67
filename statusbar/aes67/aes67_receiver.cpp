@@ -269,19 +269,18 @@ auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
 {
     this_drain_ = {};
     uint64_t offset = offset_.load(std::memory_order_acquire);
-    std::array<Datagram, BATCH> batch{};
     for (size_t round = 0; round < MAX_BATCHES; ++round) {
-        size_t const n = port_->receive(batch);
+        size_t const n = port_->receive(batch_);
         ++polls_;
         for (size_t i = 0; i < n; ++i) {
             if (sender_clock_) {
                 offset = offset_.load(std::memory_order_acquire);  // set, or cleared by a new source
             }
-            if (!is_multiplexed_rtcp(batch[i].payload)) {
-                accept(batch[i], now_index, offset);  // the stream's own RTCP is not a refused packet
+            if (!is_multiplexed_rtcp(batch_[i].payload)) {
+                accept(batch_[i], now_index, offset);  // the stream's own RTCP is not a refused packet
             }
         }
-        if (n < batch.size()) {
+        if (n < batch_.size()) {
             return false;
         }
     }
