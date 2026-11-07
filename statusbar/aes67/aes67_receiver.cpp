@@ -315,20 +315,7 @@ void Receiver::accept(Datagram const& datagram, uint64_t const now_index, uint64
         drop(DropReason::no_offset);  // learnt, but not placed before the sender's first report
         return;
     }
-    deliver(datagram, *packet, *frames, offset, now_index);
-}
-
-auto Receiver::hold_frame() noexcept -> std::optional<uint64_t>
-{
-    if (handling_ == nullptr || !port_ || !port_->hold(*handling_)) {
-        return std::nullopt;
-    }
-    return handling_->frame;
-}
-
-void Receiver::release_frame(uint64_t const frame) noexcept
-{
-    transport_.release_frame(frame);  // the port may be gone (clear()): the transport keeps the frame until now
+    deliver(*packet, *frames, offset, now_index);
 }
 
 void Receiver::drop(DropReason const reason) noexcept
@@ -421,11 +408,7 @@ void Receiver::note_arrival(uint32_t const timestamp, uint64_t const now_index) 
 }
 
 void Receiver::deliver(
-    Datagram const& datagram,
-    rtp::RtpPacket const& packet,
-    uint32_t const frames,
-    uint64_t const offset,
-    uint64_t const now_index) noexcept
+    rtp::RtpPacket const& packet, uint32_t const frames, uint64_t const offset, uint64_t const now_index) noexcept
 {
     uint64_t const index =
         mediaclock::PtpMediaClock::index_of_rtp(packet.header.timestamp.get(), static_cast<uint32_t>(offset), now_index);
@@ -434,9 +417,7 @@ void Receiver::deliver(
         this_drain_.newest_frames = frames;
     }
     if (handler_) {
-        handling_ = &datagram;  // the handler may keep its frame (hold_frame())
         handler_(index, frames, packet.payload);
-        handling_ = nullptr;
     }
     ++counters_.packets;
     counters_.frames += frames;

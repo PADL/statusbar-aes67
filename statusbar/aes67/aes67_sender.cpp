@@ -360,7 +360,7 @@ void Sender::send_until(uint64_t const newest) noexcept
     while (next_index_ <= newest) {
         rtp::RtpHeader header{};
         header.init(destination_.payload_type, sequence_, mediaclock::PtpMediaClock::rtp_timestamp(next_index_, 0), run_ssrc);
-        if (send_gathered(header) || send_packet(header)) {
+        if (send_packet(header)) {
             ++queued;
         } else {
             ++counters_.dropped;
@@ -369,26 +369,6 @@ void Sender::send_until(uint64_t const newest) noexcept
         next_index_ += format_.frames_per_packet;
     }
     flush(queued, run_ssrc);
-}
-
-auto Sender::send_gathered(rtp::RtpHeader const& header) noexcept -> bool
-{
-    if (!gatherer_) {
-        return false;
-    }
-    bool headers_before = false;
-    auto const pieces = std::span{pieces_}.first(
-        std::min(gatherer_(next_index_, format_.frames_per_packet, pieces_, headers_before), pieces_.size()));
-    // Its frames were all there, the packet's worth of them: nothing lost, nothing copied.
-    bool const sent = whole(pieces) && port_->send_gathered_at(header, pieces, tick_ns_, headers_before);
-    gathered_ += sent ? 1 : 0;
-    return sent;
-}
-
-auto Sender::whole(std::span<std::span<uint8_t const> const> const pieces) const noexcept -> bool
-{
-    auto const length = std::ranges::fold_left(pieces, size_t{0}, [](size_t sum, auto const piece) { return sum + piece.size(); });
-    return !pieces.empty() && length == payload_.size();
 }
 
 auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool
