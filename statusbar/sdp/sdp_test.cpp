@@ -776,7 +776,7 @@ TEST(sdp_channel_order, the_primary_formats_order_is_read)
     EXPECT_EQ(session->media.at(0).max_packet_time_us, std::optional<uint32_t>{125});
 }
 
-TEST(sdp_channel_order, a_preferred_alternative_does_not_take_the_primarys_order)
+TEST(sdp_channel_order, a_preferred_alternative_does_not_adopt_the_primarys_order)
 {
     auto const session = parse(ST2110);
     EXPECT_EQ(session->media.at(0).other_formats().size(), size_t{1});

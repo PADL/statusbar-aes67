@@ -33,7 +33,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
 - `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, send offset, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
-- `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` takes the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
+- `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` accepts the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
 - `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, SR interval, receiver DSCP, cadence, `on_sender_report`), `RtcpStats`.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
@@ -112,7 +112,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   transport may send from (a shared UMEM's held frames: `Transport::frames_shared()`), its headers
   in a frame of the transport's own or, with `headers_before`, over the bytes before the first
   buffer where `Transport::writes_headers_before()` (untimed only). False, nothing queued, when it
-  cannot; `Transport::gather_buffers()` says how many buffers a packet may take (0: never), and
+  cannot; `Transport::gather_buffers()` says how many buffers a packet may use (0: never), and
   `Transport::holds_frames()` whether its receive ports hold at all. The defaults do none of it.
 - `send_rendered()` reserves the buffer first; when it cannot (as `send()` would fail),
   `render` is not called. When `render` returns false, or the packet is refused after it
@@ -150,7 +150,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   more of a receiver's latency budget is left (a Dante receiver at its 1 ms setting is
   already late with 1 ms packets), but a provider whose frames land later than that has
   them counted lost. `relay_send_offset()`, a packet plus two ticks, is for a provider fed
-  from the network (an AES67 receiver's frames). A changed send offset takes effect at the next
+  from the network (an AES67 receiver's frames). A changed send offset applies from the next
   tick: a longer one waits, a shorter one catches up, up to `MAX_BURST` packets.
 - Send phase stagger: with every 1 ms output on phase 0, all of them send on the same
   tick in eight, and that burst, not the mean load, sets the ceiling. Give the kth sender
@@ -209,14 +209,14 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   timestamps are PTP time; `ts-refclk` and `clock-domain` still name the grandmaster, the
   reference the sender reports are in. Such a stream needs its `RtcpSession` with
   `set_timebase()`: the SR is the only statement of its clock.
-- Who takes a `mediaclk:sender` stream: RAVENNA and IPMX receivers that follow its sender
+- Who accepts a `mediaclk:sender` stream: RAVENNA and IPMX receivers that follow its sender
   reports (their asynchronous case), and a `Receiver` with `set_sender_clock(true)`. Dante
   in AES67 mode expects `direct=0` on its PTP and refuses or drifts; nothing beyond the SDP
   telling the truth prevents it listing the announcement.
 
 ### Receiver
 
-- `configure()` takes the media's group and port, payload type, encoding, channels and
+- `configure()` accepts the media's group and port, payload type, encoding, channels and
   rate, an RFC 4570 source filter if any, and the RFC 7273 direct media clock offset. It
   prefers the offered format with the receiver's encoding (`Media::prefer()`), else the
   primary one; the encoding must be the receiver's (`encoding_mismatch`), and channels and
@@ -237,10 +237,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   (`Transport::is_local_address()`, `is_local()`: any 127/8 address on a loopback interface),
   not from a bind the kernel may allow (`ip_nonlocal_bind`). RTCP for a unicast stream
   arrives at the bound address at port + 1 and goes to the sender.
-- `set_sender_clock(true)` before `configure()` takes only `mediaclk:sender` streams (any
+- `set_sender_clock(true)` before `configure()` accepts only `mediaclk:sender` streams (any
   other fails `not_sender_clocked`, `direct` included, as a direct stream would drift in a
   foreign domain). Such a stream has no offset until `set_offset()`: `drain()` learns its
-  SSRC and sequence (so its session takes only that source's reports) but drops its
+  SSRC and sequence (so its session accepts only that source's reports) but drops its
   packets (counted) until then, and a new source clears the offset. The offset comes from the stream's first IPMX-form SR:
   `sender_clock_offset(report, timebase, fs)` is the RTP timestamp less the domain's index
   at the PTP time named, rounded to the nearest sample. `set_offset()` is an atomic store,
@@ -284,7 +284,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   which a cadence of its own will provide.
 - One SR form: the time field is always the PTP truncated time (TR-10-1 §8.7: PTP
   seconds mod 2³², then nanoseconds) and the SR always carries the IPMX Info Block with
-  the PCM Media Info Block, which tells any reader how to take the field. AES67-2018 §6.3
+  the PCM Media Info Block, which tells any reader how to read the field. AES67-2018 §6.3
   asks only for RFC 3550 §6 and prescribes no derivation of the field, and no AES67
   receiver synchronises from it. The pair is exact: the field is the presentation time
   of the latest sample at or before now, the RTP timestamp that sample's
@@ -294,7 +294,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   within a nanosecond), and none is sent while the timebase is not running. A null
   timebase, or the identity, gives the same bytes as before; the SR path costs one seqlock
   load per report, and the sender's tick is unchanged.
-- A receiver's session takes the pair from each of the stream's SRs that carries the IPMX
+- A receiver's session records the pair from each of the stream's SRs that carries the IPMX
   Info Block (`RtcpStats::remote_sr`, `RtcpSessionOptions::on_sender_report`); an SR
   without it names no PTP time (it may be RFC 3550's wall clock) and gives no pair.
 - The Info Block's strings are the SDP's (`sdp::ts_refclk_value()`,
@@ -328,12 +328,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `RtpSequence`; the session forms the interval's fraction from the cumulative
   `expected` and `received` it last reported, so nothing on the real-time thread resets.
 - A session hears its own reports when the group loops them back and skips its SSRC.
-  A receiver's session takes any SR on the stream's RTCP endpoint before the first media
+  A receiver's session accepts any SR on the stream's RTCP endpoint before the first media
   packet, and only the stream's SSRC after. A sender's "remote" is whichever receiver
   reported on its stream last.
 - The CNAME is the caller's: RFC 3550 §6.5.1's `user@host` shape, as
   `<identity>@<address>`, at most 255 bytes.
-- `Receiver::rtcp_options()` takes the endpoint from the SDP: `a=rtcp:` when given,
+- `Receiver::rtcp_options()` reads the endpoint from the SDP: `a=rtcp:` when given,
   else the media's address at port + 1. An `a=rtcp:` unicast address is where reports go
   (RFC 3605), received here at the same port; otherwise, for a unicast stream, reports go
   to the sender (the source filter's source, else the origin address) at the same port. `a=rtcp-mux`
@@ -389,7 +389,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   everything else to the kernel. With `set_receive_vid(vid)` one more rule, after the
   groups' (so setting or clearing the VID rewrites only the tail), redirects every IPv4
   group's UDP frames tagged with `vid`, any PCP (`tagged_groups_rule()`: MAC 01:00:5e with
-  bit 24 clear, RFC 1112 Section 6.4); the ports take their groups' and count the rest
+  bit 24 clear, RFC 1112 Section 6.4); the ports accept their groups' and count the rest
   `unmatched`, and the kernel no longer sees tagged multicast on that VID. `begin_tick()`
   drains the RX ring once and hands each frame, parsed with `rtp::parse_rtp_frame()`, to the ports for its destination group and
   port; senders write whole frames into UMEM and `end_tick()` kicks the NIC.
@@ -399,13 +399,13 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   call for receive ports beyond the RX ring. What the program passes is not received: a
   priority-tagged frame (VID 0, see Limits), a frame tagged with a VID other than
   `set_receive_vid()`'s, or a frame on a queue other than `queue_id()` (RSS below).
-- `begin_tick()` is the only place the port list and the installed rules change: it takes
+- `begin_tick()` is the only place the port list and the installed rules change: it adopts
   new ports from a bounded queue, drops closed ones (handing their state back on a retire
   queue, freed on the control thread's next `open_*()` or port destruction, or by the
   destructor), and reinstalls the rules when the set changed. That is a BPF map update, a
   syscall on the real-time thread, only when receivers come or go.
 - TX pool: senders keep `TX_POOL` UMEM frames back, topped up each tick before the fill
-  ring is; those are never offered to the kernel. A send takes a frame from the pool,
+  ring is; those are never offered to the kernel. A send claims a frame from the pool,
   writes it and commits it to the TX ring; a frame that does not fit, or whose render is
   abandoned, goes back to the pool (never to the kernel), and one the full TX ring refuses
   is freed to the UMEM. The rest of the UMEM backs the fill ring (`FILL_RING` entries) and
@@ -454,11 +454,11 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   would lose groups silently. It steers before the program attaches (on igb an attach resets
   the adapter); the write is one ioctl, so a refusal leaves the table as it was, and a socket
   that then fails to open puts the table back. `steer_rss()` is that step alone. A queue other
-  than 0 (an SR class queue a credit-based shaper paces) takes the same steering; traffic the
+  than 0 (an SR class queue a credit-based shaper paces) receives the same steering; traffic the
   NIC does not hash (non-IP) stays on its default queue and the kernel.
   A NIC without RSS reports `operation_not_supported` in `rss_status()` and opens; it needs one
   combined channel or a flow-steering rule. The table is left steered at close. `UdpTransport`
-  never touches RSS: the kernel's sockets take every queue.
+  never touches RSS: the kernel's sockets receive on every queue.
 - RTCP: the program steals every frame to a redirected group, whatever its port, so an
   RTCP port's kernel socket would miss reports to a group a receiver here has joined.
   `begin_tick()` therefore parses each frame as UDP (`rtp::parse_udp_frame()`; the RTP

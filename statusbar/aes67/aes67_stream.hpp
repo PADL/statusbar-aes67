@@ -301,7 +301,7 @@ struct SendState
 };
 
 /// What a receiver publishes for RTCP after each drain that accepted a packet (RFC 3550 Section
-/// 6.4.1 report block inputs, cumulative; the session takes interval differences).
+/// 6.4.1 report block inputs, cumulative; the session uses interval differences).
 struct ReceiveState
 {
     uint32_t ssrc{0};

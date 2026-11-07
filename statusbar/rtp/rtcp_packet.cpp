@@ -47,7 +47,7 @@ auto parse_receiver_report(uint8_t const count, std::span<uint8_t const> const b
     return RtcpReceiverReport{.ssrc = quadlet_at(body, 0), .blocks = {.bytes = body.subspan(4, blocks)}};
 }
 
-/// Takes the first CNAME and NAME from a chunk's item list; false when an item overruns it or no null octet ends it.
+/// Reads the first CNAME and NAME from a chunk's item list; false when an item overruns it or no null octet ends it.
 [[nodiscard]] auto parse_sdes_items(std::span<uint8_t const> const items, RtcpSdes& sdes) noexcept -> bool
 {
     size_t at = 0;

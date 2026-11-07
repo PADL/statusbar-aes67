@@ -45,7 +45,7 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
         return std::nullopt;
     }
     auto media = session->media.front();
-    (void)media.prefer(sdp::Encoding::l24);           // take an L24 offer if there is one
+    (void)media.prefer(sdp::Encoding::l24);           // accept an L24 offer if there is one
     return session->effective_media_clock_offset(media);  // nullopt: not PTP-locked
 }
 ```
@@ -91,7 +91,7 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   (`localmac=`, `ntp=`, ...) as read in `ReferenceClocks::other`, up to
   `ReferenceClocks::MAX` each. AES67-2018 Clause 8.2 asks receivers to evaluate them all.
   Past `MAX`, a PTP reference that can name a clock (a known version with a grandmaster,
-  or `traceable`) takes the place of one that cannot; any other is dropped. A level with
+  or `traceable`) replaces one that cannot; any other is dropped. A level with
   any `ts-refclk` overrides the session level, so `effective_clocks()` may be empty though
   the session names a PTP clock. With no `ts-refclk` at all, RFC 7273 Section 6 says a
   local clock is assumed: the session names no PTP clock. `to_string()` writes every

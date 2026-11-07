@@ -54,7 +54,7 @@ class Sender
     void clear() noexcept;
 
     /// The send offset in frames: a packet is sent once its last frame is this far
-    /// behind now. Default: default_send_offset(). Any thread, real-time safe; the next tick takes it.
+    /// behind now. Default: default_send_offset(). Any thread, real-time safe; the next tick adopts it.
     void set_send_offset(uint32_t const frames) noexcept { send_offset_.store(frames, std::memory_order_relaxed); }
     [[nodiscard]] auto send_offset() const noexcept -> uint32_t { return send_offset_.load(std::memory_order_relaxed); }
     /// One 125 us tick, rounded up (6 frames at 48 kHz): for a provider whose frames are there by
@@ -76,7 +76,7 @@ class Sender
     void set_gatherer(FrameGatherer gatherer) noexcept { gatherer_ = std::move(gatherer); }
     /// Packets sent where their frames lay. The sending thread.
     [[nodiscard]] auto gathered() const noexcept -> uint64_t { return gathered_; }
-    /// Where the packet grid starts, in frames (taken modulo frames_per_packet):
+    /// Where the packet grid starts, in frames (modulo frames_per_packet):
     /// packets carry [k * fpp + phase, (k + 1) * fpp + phase). Call before
     /// configure(), off the real-time thread.
     void set_packet_phase(uint32_t const frames) noexcept
@@ -96,7 +96,7 @@ class Sender
     }
 
     /// The SDP session id (o=), stable for the same stream across restarts (RFC 8866 §5.2). 0, the
-    /// default: the first configure() takes stable_session_id() of the origin address and the name.
+    /// default: the first configure() uses stable_session_id() of the origin address and the name.
     /// Call before configure(), off the real-time thread.
     void set_session_id(uint64_t const id) noexcept { session_id_ = id & SESSION_ID_MASK; }
     [[nodiscard]] auto session_id() const noexcept -> uint64_t { return session_id_; }
@@ -142,7 +142,7 @@ class Sender
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
 
-    /// Take `previous`'s send offset, grandmaster, media clock, name, SDP session id and version, DSCP, channel order,
+    /// Adopt `previous`'s send offset, grandmaster, media clock, name, SDP session id and version, DSCP, channel order,
     /// ST 2110 form and Info Block version, so this sender's next configure() announces the same session one version on.
     /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);
@@ -238,9 +238,9 @@ class Sender
     [[nodiscard]] auto resync(uint64_t newest) noexcept -> bool;
     /// Sends the packets from next_index_ up to `newest`, then flushes them.
     void send_until(uint64_t newest) noexcept;
-    /// Renders and queues the packet at next_index_; true when the transport took it.
+    /// Renders and queues the packet at next_index_; true when the transport accepted it.
     [[nodiscard]] auto send_packet(rtp::RtpHeader const& header) noexcept -> bool;
-    /// The packet sent where its frames lie, if the gatherer finds them and the port takes them.
+    /// The packet sent where its frames lie, if the gatherer finds them and the port accepts them.
     [[nodiscard]] auto send_gathered(rtp::RtpHeader const& header) noexcept -> bool;
     /// Whether `pieces` are one packet's payload exactly: some, and payload_.size() bytes between them.
     [[nodiscard]] auto whole(std::span<std::span<uint8_t const> const> pieces) const noexcept -> bool;

@@ -52,7 +52,7 @@ struct UdpFrame
     std::span<uint8_t const> datagram;
 };
 
-/// Bytes the headers take before the RTP packet: 42 untagged, 46 tagged.
+/// Bytes the headers use before the RTP packet: 42 untagged, 46 tagged.
 [[nodiscard]] constexpr auto rtp_frame_overhead(bool const tagged) noexcept -> size_t
 {
     return 14 + (tagged ? ieee::VlanTag::LENGTH : 0) + 20 + 8;
@@ -67,7 +67,7 @@ struct UdpFrame
 
 /// Parse an Ethernet frame carrying UDP over IPv4: nullopt unless it is unfragmented IPv4 (IHL
 /// >= 5, a valid checksum) and UDP, with lengths agreeing with each other and the frame.
-/// Addresses and ports are not judged; the payload is not looked at (RTCP takes this path).
+/// Addresses and ports are not judged; the payload is not looked at (RTCP uses this path).
 [[nodiscard]] auto parse_udp_frame(std::span<uint8_t const> frame) noexcept -> std::optional<UdpFrame>;
 
 /// parse_udp_frame(), and parse_rtp() accepts the payload. The payload type is not judged.

@@ -31,7 +31,7 @@ namespace {
 class UdpRtcpPort final : public RtcpPort
 {
   public:
-    /// Datagrams one receive() takes at most.
+    /// Datagrams one receive() reads at most.
     static constexpr size_t BATCH = 8;
     /// The largest datagram kept (an Ethernet MTU's worth).
     static constexpr size_t MAX_DATAGRAM = 1500;

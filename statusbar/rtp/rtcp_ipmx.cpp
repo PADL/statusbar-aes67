@@ -41,7 +41,7 @@ template <size_t N>
     };
 }
 
-/// The PCM Media Info Block's fixed part, its channel-order string taking `order` bytes (TR-10-3 Figure 1).
+/// The PCM Media Info Block's fixed part, its channel-order string using `order` bytes (TR-10-3 Figure 1).
 [[nodiscard]] auto pcm_media_header(IpmxPcmMediaInfo const& pcm, size_t const order) noexcept -> IpmxPcmMediaInfoHeader
 {
     return IpmxPcmMediaInfoHeader{

@@ -114,7 +114,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   and nanoseconds and only the sub-second part is scaled, so the largest intermediate is
   `1e9 * fs` (below 2^48 at 192 kHz).
 - Only the 48 kHz family is supported (`fs` a multiple of 24 kHz), which keeps every
-  125 µs tick a whole number of samples. Check a rate taken from an SDP with
+  125 µs tick a whole number of samples. Check a rate read from an SDP with
   `supports()` or `make()`; do not assume it.
 - `unwrap()` is unambiguous within ±2^31 samples of the reference, about 12 hours at
   48 kHz.
@@ -136,7 +136,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   All lock while the RMS residual is under 2 µs (`phc_pairs()`: 1 µs, half its step
   threshold, which keeps every residual in the window) and |r| under 500 ppm, and hold over for
   5 s after the last good fit. `crf()` assumes Milan's 48 kHz CRF with `timestamp_interval`
-  96; `phc_pairs()` takes PHC-to-PHC cross-timestamps with `count` the followed PTP time in
+  96; `phc_pairs()` accepts PHC-to-PHC cross-timestamps with `count` the followed PTP time in
   ns at `rate_hz` 1e9.
 - A residual over the step threshold is held; fewer than `step_pairs` in a row are dropped
   as outliers, `step_pairs` in a row are a step and restart the window from them. A new
