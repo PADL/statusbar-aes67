@@ -71,11 +71,6 @@ class Sender
         return format.frames_per_packet + (format.sample_rate / 4000);
     }
 
-    /// Send each packet whose frames `gatherer` finds where they lie from there (SendPort::send_gathered_at()),
-    /// the rest through the provider. Before configure(), off the real-time thread.
-    void set_gatherer(FrameGatherer gatherer) noexcept { gatherer_ = std::move(gatherer); }
-    /// Packets sent where their frames lay. The sending thread.
-    [[nodiscard]] auto gathered() const noexcept -> uint64_t { return gathered_; }
     /// Where the packet grid starts, in frames (modulo frames_per_packet):
     /// packets carry [k * fpp + phase, (k + 1) * fpp + phase). Call before
     /// configure(), off the real-time thread.
@@ -204,9 +199,6 @@ class Sender
   private:
     StreamFormat format_;
     FrameProvider provider_;
-    FrameGatherer gatherer_;
-    uint64_t gathered_{0};
-    std::array<std::span<uint8_t const>, MAX_GATHER_BUFFERS> pieces_{};  ///< the gatherer's, each packet
     Transport& transport_;
     std::string name_;
     /// One version on (the first: the wall clock's seconds, one on).
@@ -240,10 +232,6 @@ class Sender
     void send_until(uint64_t newest) noexcept;
     /// Renders and queues the packet at next_index_; true when the transport accepted it.
     [[nodiscard]] auto send_packet(rtp::RtpHeader const& header) noexcept -> bool;
-    /// The packet sent where its frames lie, if the gatherer finds them and the port accepts them.
-    [[nodiscard]] auto send_gathered(rtp::RtpHeader const& header) noexcept -> bool;
-    /// Whether `pieces` are one packet's payload exactly: some, and payload_.size() bytes between them.
-    [[nodiscard]] auto whole(std::span<std::span<uint8_t const> const> pieces) const noexcept -> bool;
     /// Flushes the `queued` packets and counts what went out.
     void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
     /// Adds `packets` sent to the SR's counts and publishes them.
@@ -256,6 +244,10 @@ class Sender
     std::atomic<uint32_t> ssrc_{0};
     uint64_t rng_{1};
     bool paused_{false};  ///< pause() since the last tick()
+    bool started_{false};
+    bool sender_clock_{false};
+    uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};
+    State state_{State::idle};
     uint16_t sequence_{0};
     std::string channel_order_;
     bool st2110_{false};
@@ -271,16 +263,12 @@ class Sender
     uint64_t session_id_{0};
     uint64_t session_version_{0};
     std::optional<Grandmaster> grandmaster_;
-    bool sender_clock_{false};
     uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
     std::atomic<uint32_t> send_offset_;
     uint32_t phase_{0};
-    uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};
     std::optional<ieee::VlanTag> vlan_;
-    bool started_{false};
     uint64_t next_index_{0};  ///< first frame of the next packet to send
     Counters counters_;
-    State state_{State::idle};
     std::error_code error_;
 };
 

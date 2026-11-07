@@ -41,16 +41,12 @@ struct Endpoint
     return {.address = media.address, .port = static_cast<uint16_t>(media.port + 1)};
 }
 
-/// Datagram::frame of a datagram whose payload no frame of the transport's holds.
-inline constexpr uint64_t NO_FRAME = ~uint64_t{0};
-
 /// A received UDP payload. `payload` is valid until the next receive() on the
-/// same port or the next begin_tick(), whichever is first, unless ReceivePort::hold() keeps it.
+/// same port or the next begin_tick(), whichever is first.
 struct Datagram
 {
     std::span<uint8_t const> payload;
     Endpoint source;
-    uint64_t frame{NO_FRAME};  ///< the transport's frame `payload` lies in (ReceivePort::hold()), or NO_FRAME
 };
 
 /// True when `datagram` is RTCP, as on a port carrying RTP and RTCP alike: version 2 and a packet type
@@ -117,14 +113,6 @@ class ReceivePort
     /// Why the stream cannot arrive now (the transport's filter does not accept its group), or none (the default).
     /// The draining thread; it clears when the transport accepts the group again.
     [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
-    /// Keep the frame a datagram receive() gave lies in past the next receive() and begin_tick(): its payload
-    /// stays valid until Transport::release_frame(datagram.frame). False when it cannot (no frame, or the
-    /// transport keeps as many as it can; the default): copy the payload within the tick instead. The draining thread.
-    [[nodiscard]] virtual auto hold(Datagram const& datagram) noexcept -> bool
-    {
-        (void)datagram;
-        return false;
-    }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX
@@ -156,18 +144,6 @@ class SendPort
     {
         (void)departure_ns;
         return send_rendered(header, payload_length, render);
-    }
-    /// Queue a packet of `payload`'s buffers sent where they lie (XdpTransport on a shared UMEM), as send_rendered_at();
-    /// with `headers_before` the bytes before the first buffer are the caller's to write the headers over. False, nothing
-    /// queued, when it cannot (the default).
-    [[nodiscard]] virtual auto send_gathered_at(
-        rtp::RtpHeader const& header,
-        std::span<std::span<uint8_t const> const> const payload,
-        uint64_t const departure_ns,
-        bool const headers_before) noexcept -> bool
-    {
-        (void)header, (void)payload, (void)departure_ns, (void)headers_before;
-        return false;
     }
     /// Send what send() and send_rendered() queued. Returns the number of packets the network
     /// refused (0 on success).
@@ -272,19 +248,6 @@ class Transport
     /// Start the transport's counters afresh: receive_refusals() now, a socket's own at its next
     /// tick; what it refuses meanwhile may go uncounted. Any thread. Default: nothing counted.
     virtual void reset_counters() noexcept {}
-    /// Whether its receive ports keep frames past their tick (ReceivePort::hold()). Default: false.
-    [[nodiscard]] virtual auto holds_frames() const noexcept -> bool { return false; }
-    /// Give back a frame a receive port's hold() kept, the port gone or not. The draining thread.
-    virtual void release_frame(uint64_t const frame) noexcept { (void)frame; }
-    /// Whether the frames its receive ports hold lie where another transport sharing them can send them from
-    /// (a UMEM shared across sockets). Default: false.
-    [[nodiscard]] virtual auto frames_shared() const noexcept -> bool { return false; }
-    /// The buffers one packet's payload may be sent from (SendPort::send_gathered_at()), its headers in a frame
-    /// of their own; 0: none (the default).
-    [[nodiscard]] virtual auto gather_buffers() const noexcept -> size_t { return 0; }
-    /// Whether a gathered packet's headers may go over the bytes before its first buffer instead, one buffer
-    /// more for its payload (SendPort::send_gathered_at()'s `headers_before`). Default: false.
-    [[nodiscard]] virtual auto writes_headers_before() const noexcept -> bool { return false; }
 };
 
 }  // namespace statusbar::aes67
