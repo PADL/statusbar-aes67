@@ -188,12 +188,13 @@ class XdpTransport final : public Transport
         /// Datagrams offer() refused. Any thread.
         [[nodiscard]] auto dropped() const noexcept -> uint64_t { return dropped_.load(std::memory_order_relaxed); }
 
-        std::atomic<bool> closed{false};  ///< set when the port is gone (control thread)
-
       private:
-        Endpoint destination_;
         itc::QueuedPipe<Frame, DEPTH + 1> queue_;
         std::atomic<uint64_t> dropped_{0};  ///< written by the real-time thread only
+        Endpoint destination_;
+
+      public:
+        std::atomic<bool> closed{false};  ///< set when the port is gone (control thread)
     };
 
     /// Frames held back for senders (internal; public for tests).
@@ -305,10 +306,7 @@ class XdpTransport final : public Transport
         return effective;
     }
     /// A transport that never opened, for with_launch_time() alone (tests).
-    [[nodiscard]] static auto unopened() -> std::unique_ptr<XdpTransport>
-    {
-        return std::unique_ptr<XdpTransport>{new XdpTransport{{}}};
-    }
+    [[nodiscard]] static auto unopened() -> std::unique_ptr<XdpTransport>;
     XdpTransport(XdpTransport const&) = delete;
     auto operator=(XdpTransport const&) -> XdpTransport& = delete;
     XdpTransport(XdpTransport&&) = delete;
