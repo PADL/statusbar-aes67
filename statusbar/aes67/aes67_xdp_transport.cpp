@@ -370,6 +370,11 @@ auto XdpTransport::open(std::string_view const interface, Options const& options
     return transport;
 }
 
+auto XdpTransport::unopened() -> std::unique_ptr<XdpTransport>
+{
+    return std::unique_ptr<XdpTransport>{new XdpTransport{{}}};
+}
+
 auto XdpTransport::open_steered(Options const& options) -> Status
 {
     // Steered first, so a refusal attaches nothing (on igb an attach resets the adapter). The table is written in
