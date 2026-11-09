@@ -306,7 +306,7 @@ auto RtcpSession::next_wake_ns(uint64_t const now_ns) const noexcept -> std::opt
         return next_report_ns_ != 0 ? std::optional{next_report_ns_} : std::nullopt;
     }
     auto const state = sending_state();
-    if (!state || state->ssrc != report_ssrc_ || report_index_ < report_stride_) {
+    if (!state || state->ssrc != report_ssrc_) {
         return std::nullopt;  // nothing sending, or a run not seen yet: the next tick finds it
     }
     return now_ns + (wake_frames(*state) * mediaclock::PtpMediaClock::NS_PER_SECOND / sample_rate_);

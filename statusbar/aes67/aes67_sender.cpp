@@ -275,8 +275,8 @@ auto Sender::hold_reports() -> ReportHold
 void Sender::count_hold(bool const held)
 {
     bool const was = holds_for_reports();
-    uint32_t const holds = holds_.load();
-    holds_.store(held ? holds + 1 : holds - std::min<uint32_t>(holds, 1));
+    uint32_t const holds = holds_.load(std::memory_order_relaxed);
+    holds_.store(held ? holds + 1 : holds - std::min<uint32_t>(holds, 1), std::memory_order_relaxed);
     if (holds_for_reports() != was) {
         bump_session_version();  // session() declares IPMX, or no longer
     }
