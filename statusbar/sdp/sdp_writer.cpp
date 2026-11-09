@@ -158,16 +158,29 @@ void write_media_line(std::string& text, Media const& media)
     text += "\r\n";
 }
 
-/// An rtpmap for each payload type, in order of preference, the primary's channel order, then ptime and maxptime.
+/// The primary format's fmtp: its channel order (ST 2110-30 Section 6.2.2), then `IPMX` (VSF TR-10-1 Section 10.1); none
+/// without either. Text appended, std::format for the payload type alone.
+void write_fmtp(std::string& text, Media const& media)
+{
+    bool const ordered = channel_order_channels(media.channel_order).has_value();
+    if (!ordered && !media.ipmx) {
+        return;
+    }
+    text += std::format("a=fmtp:{} ", media.payload_type);
+    if (ordered) {
+        text.append("channel-order=").append(media.channel_order).append(media.ipmx ? "; " : "");
+    }
+    text.append(media.ipmx ? "IPMX\r\n" : "\r\n");
+}
+
+/// An rtpmap for each payload type, in order of preference, the primary's fmtp, then ptime and maxptime.
 void write_formats(std::string& text, Media const& media)
 {
     write_rtpmap(text, media.format());
     for (auto const& alternative : media.other_formats()) {
         write_rtpmap(text, alternative);
     }
-    if (channel_order_channels(media.channel_order)) {
-        write_line(text, std::format("a=fmtp:{} channel-order=", media.payload_type), media.channel_order);
-    }
+    write_fmtp(text, media);
     write_ptime(text, media.packet_time_us);
     if (media.max_packet_time_us && *media.max_packet_time_us != 0) {
         write_ptime(text, *media.max_packet_time_us, "maxptime");
@@ -231,6 +244,12 @@ auto ts_refclk_value(PtpReference const& clock) -> std::string
         value += std::format(":{}", clock.domain);  // AES67-2018 Clause 8.2: none for 802.1AS
     }
     return value;
+}
+
+auto localmac_value(ieee::Eui48 const& mac) -> std::string
+{
+    auto const& v = mac.value;
+    return std::format("localmac={:02X}-{:02X}-{:02X}-{:02X}-{:02X}-{:02X}", v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 
 auto ts_refclk_text(ReferenceClocks const& clocks) -> std::string

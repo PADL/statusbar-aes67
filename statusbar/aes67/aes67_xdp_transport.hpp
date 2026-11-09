@@ -313,6 +313,7 @@ class XdpTransport final : public Transport
     auto operator=(XdpTransport&&) -> XdpTransport& = delete;
 
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
+    [[nodiscard]] auto local_mac() const noexcept -> std::optional<ieee::Eui48> override { return interface_.mac; }
     /// The interface the socket is bound on.
     [[nodiscard]] auto interface_name() const noexcept -> std::string_view { return interface_.name; }
     /// True when the socket runs zero-copy: the program is native and the

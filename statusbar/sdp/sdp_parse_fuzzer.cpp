@@ -41,13 +41,14 @@ void check_references(std::span<sdp::PtpReference const> const references)
     }
 }
 
-/// A kept channel order counts its channels, and `media`'s order and maxptime are `again`'s.
+/// A kept channel order counts its channels, and `media`'s order, IPMX declaration and maxptime are `again`'s.
 void check_written(sdp::Media const& media, sdp::Media const& again)
 {
     if (!media.channel_order.empty() && !sdp::channel_order_channels(media.channel_order)) {
         std::abort();
     }
-    if (again.channel_order != media.channel_order || again.max_packet_time_us != media.max_packet_time_us) {
+    bool const same_fmtp = again.channel_order == media.channel_order && again.ipmx == media.ipmx;
+    if (!same_fmtp || again.max_packet_time_us != media.max_packet_time_us) {
         std::abort();
     }
 }

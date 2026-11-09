@@ -169,10 +169,11 @@ void Sender::renew_session()
 }
 
 void Sender::become_ready() noexcept
-{
+{                           // NOLINT(statusbar-block-statements): the run's state, reset together
     send_state_.store({});  // not ticked while configured, so tick() is not storing too
     paused_ = false;
     started_ = false;
+    held_first_.reset();
     state_ = State::ready;
     error_.clear();
 }
@@ -227,6 +228,58 @@ void Sender::set_grandmaster(std::optional<Grandmaster> const& grandmaster)
     grandmaster_ = grandmaster;
     bump_session_version();  // the SDP changed: a receiver keying on o= sees a new version
     info_block_version_ += renamed ? 1 : 0;
+}
+
+auto Sender::references() const -> sdp::ReferenceClocks
+{
+    if (grandmaster_) {
+        return grandmaster_->references();
+    }
+    sdp::ReferenceClocks clocks;
+    if (auto const mac = transport_.local_mac()) {
+        clocks.other.push_back(sdp::localmac_value(*mac));
+    }
+    return clocks;
+}
+
+Sender::ReportHold::ReportHold(Sender& sender) noexcept
+    : sender_{&sender}
+{}
+
+Sender::ReportHold::~ReportHold()
+{
+    if (sender_ != nullptr) {
+        sender_->count_hold(false);
+    }
+}
+
+Sender::ReportHold::ReportHold(ReportHold&& other) noexcept
+    : sender_{std::exchange(other.sender_, nullptr)}
+{}
+
+auto Sender::ReportHold::operator=(ReportHold&& other) noexcept -> ReportHold&
+{
+    if (this != &other) {
+        ReportHold const ended{std::move(*this)};  // this one's hold ends here
+        sender_ = std::exchange(other.sender_, nullptr);
+    }
+    return *this;
+}
+
+auto Sender::hold_reports() -> ReportHold
+{
+    count_hold(true);
+    return ReportHold{*this};
+}
+
+void Sender::count_hold(bool const held)
+{
+    bool const was = holds_for_reports();
+    uint32_t const holds = holds_.load();
+    holds_.store(held ? holds + 1 : holds - std::min<uint32_t>(holds, 1));
+    if (holds_for_reports() != was) {
+        bump_session_version();  // session() declares IPMX, or no longer
+    }
 }
 
 void Sender::set_sender_clock(bool const sender)
@@ -305,6 +358,7 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
         ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);
         sequence_ = static_cast<uint16_t>(next_random());
         rtcp_counts_ = {};
+        held_first_.reset();
     }
     // A transport that cannot get packets out puts the sender in error until it can.
     if (auto const send_error = transport_.send_error()) {
@@ -317,6 +371,34 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
     if (auto const newest = newest_due(now_index)) {
         send_until(*newest);
     }
+}
+
+auto Sender::held_first(uint64_t const newest) const noexcept -> uint64_t
+{
+    uint64_t const fpp = format_.frames_per_packet;
+    uint64_t const lead = ((uint64_t{format_.sample_rate} * FIRST_REPORT_LEAD_US) / 1'000'000) + fpp - 1;
+    return newest + ((lead / fpp) * fpp);
+}
+
+void Sender::place_held(uint64_t const newest) noexcept
+{
+    held_first_ = held_first(newest);
+    send_state_.store({.ssrc = ssrc(), .first_index = *held_first_, .next_index = *held_first_});
+}
+
+auto Sender::start_held(uint64_t const newest) noexcept -> bool
+{
+    uint64_t const burst = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
+    if (!held_first_ || newest > *held_first_ + burst || *held_first_ > held_first(newest)) {
+        place_held(newest);
+        return false;
+    }
+    if (newest < *held_first_) {
+        return false;  // its SR has until then; the run starts then whether or not it went
+    }
+    next_index_ = run_first_ = *held_first_;
+    started_ = true;
+    return true;
 }
 
 auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint64_t>
@@ -335,8 +417,11 @@ auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint
 auto Sender::resync(uint64_t const newest) noexcept -> bool
 {
     uint64_t const fpp = format_.frames_per_packet;
+    if (!started_ && holds_for_reports() && !start_held(newest)) {
+        return false;  // the run's first packet waits for its SR
+    }
     if (!started_) {
-        next_index_ = newest;
+        next_index_ = run_first_ = newest;
         started_ = true;
     } else if (next_index_ > newest + fpp) {
         // The clock went back. A small step is waited out (nothing is due
@@ -404,7 +489,13 @@ void Sender::report_sent(uint32_t const packets, uint32_t const run_ssrc) noexce
 {
     rtcp_counts_.packets += packets;
     rtcp_counts_.octets += static_cast<uint32_t>(packets * payload_.size());
-    send_state_.store({.ssrc = run_ssrc, .packets = rtcp_counts_.packets, .octets = rtcp_counts_.octets});
+    send_state_.store({
+        .ssrc = run_ssrc,
+        .packets = rtcp_counts_.packets,
+        .octets = rtcp_counts_.octets,
+        .first_index = run_first_,
+        .next_index = next_index_,
+    });
 }
 
 void Sender::pause() noexcept
@@ -481,12 +572,13 @@ auto Sender::media_description(ip::IPv4Address const& origin, bool const multica
         .packet_time_us = format_.packet_time_us(),
         .max_packet_time_us = st2110_ ? std::optional{format_.packet_time_us()} : std::nullopt,
         .direction = sdp::Direction::recvonly,
-        .clocks = grandmaster_ ? grandmaster_->references() : sdp::ReferenceClocks{},
+        .clocks = references(),
         .media_clock = media_clock(),
         .source_filter =
             multicast ? std::optional{sdp::SourceFilter{.destination = destination_.address, .source = origin}} : std::nullopt,
         .clock_domain = clock_domain(),
         .channel_order = st2110_ ? described_channel_order() : std::string{},
+        .ipmx = holds_for_reports(),
     };
 }
 

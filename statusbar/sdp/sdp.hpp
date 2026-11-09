@@ -3,10 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection,
-/// L16/L24/L32/AM824 audio media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source
-/// filters, the RFC 3605 RTCP port, maxptime and ST 2110-30's channel-order. Session- or media-level values resolve
-/// through the effective_*() accessors.
+/// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection, L16/L24/L32/AM824 audio
+/// media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source filters, the RFC 3605 RTCP port, maxptime and
+/// fmtp's channel-order and IPMX. Session- or media-level values resolve through the effective_*() accessors.
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -254,6 +253,8 @@ struct Media
     /// The primary format's `a=fmtp:<pt> channel-order=` (ST 2110-30 Section 6.2.2), e.g. "SMPTE2110.(ST)": read and
     /// written only in the form channel_order_channels() counts; empty when absent.
     std::string channel_order;
+    /// The primary format's fmtp declares `IPMX` (VSF TR-10-1 Section 10.1): read, and written as that fmtp's last parameter.
+    bool ipmx{false};
 
     /// The primary format.
     [[nodiscard]] constexpr auto format() const noexcept -> PayloadFormat
@@ -403,6 +404,9 @@ struct Session
 /// "ptp=IEEE802.1AS-2011:<EUI-64>" or "ptp=<version>:traceable"), as to_string() writes it; a reference with no
 /// canonical form (another version, no grandmaster) as read (`text`); empty when it has neither.
 [[nodiscard]] auto ts_refclk_value(PtpReference const& clock) -> std::string;
+
+/// The `a=ts-refclk:` value naming the sender's own clock by `mac` (RFC 7273 Section 4.8): "localmac=00-20-FC-32-2F-40".
+[[nodiscard]] auto localmac_value(ieee::Eui48 const& mac) -> std::string;
 
 /// Every `a=ts-refclk:` value `clocks` gives, as to_string() writes them, space separated; "no ts-refclk" for none.
 [[nodiscard]] auto ts_refclk_text(ReferenceClocks const& clocks) -> std::string;

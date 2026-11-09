@@ -5,7 +5,8 @@
 
 /// The IPMX Info Block an IPMX SR carries as its profile-specific extension (VSF TR-10-1 Section
 /// 8.7), with the PCM digital audio Media Info Block (VSF TR-10-3 Section 11). Its presence says the
-/// SR's time field is PTP truncated time.
+/// SR's time field is the sender's Internal Clock in the PTP truncated format: PTP time only when its
+/// ts-refclk names a PTP grandmaster.
 
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -69,7 +70,7 @@ struct IpmxPcmMediaInfo
     uint8_t sample_size{0};     ///< bits: 16 or 24
     uint8_t channel_count{0};
     uint16_t packet_time_us{0};        ///< the ptime in microseconds
-    uint32_t measured_sample_rate{0};  ///< Hz (TR-10-1 Section 10.3); the nominal rate when PTP locked
+    uint32_t measured_sample_rate{0};  ///< Hz (VSF TR-10-3); the nominal rate when PTP locked
     std::string_view channel_order;    ///< ST 2110-30 Section 6.2.2, e.g. "SMPTE2110.(U08)"
 
     auto operator==(IpmxPcmMediaInfo const&) const noexcept -> bool = default;

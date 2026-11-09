@@ -395,20 +395,39 @@ enum class RtpmapResult
     return undefined && *undefined >= 1 && *undefined <= 64 ? undefined : std::nullopt;
 }
 
-/// The `channel-order=` value among an fmtp's `;`-separated parameters (RFC 4855), its name in any case; empty if none.
-[[nodiscard]] auto channel_order_parameter(std::string_view parameters) noexcept -> std::string_view
+/// What an fmtp line's `;`-separated parameters (RFC 4855) say, each name in any case: the first well-formed
+/// `channel-order=` (ST 2110-30 Section 6.2.2) and whether `IPMX` is declared (VSF TR-10-1 Section 10.1).
+struct FormatParameters
 {
-    while (!parameters.empty()) {
-        auto parameter = next_field(parameters, ';');
-        while (parameter.starts_with(' ')) {
-            parameter.remove_prefix(1);
-        }
-        auto const name = next_field(parameter, '=');
-        if (equal_ignoring_case(name, "channel-order")) {
-            return parameter;
-        }
+    std::string_view channel_order;
+    bool ipmx{false};
+};
+
+/// The next parameter of `parameters`, blanks around it trimmed.
+[[nodiscard]] auto next_parameter(std::string_view& parameters) noexcept -> std::string_view
+{
+    auto parameter = next_field(parameters, ';');
+    while (parameter.starts_with(' ')) {
+        parameter.remove_prefix(1);
     }
-    return {};
+    while (parameter.ends_with(' ')) {
+        parameter.remove_suffix(1);
+    }
+    return parameter;
+}
+
+[[nodiscard]] auto format_parameters(std::string_view parameters) noexcept -> FormatParameters
+{
+    FormatParameters found;
+    while (!parameters.empty()) {
+        auto value = next_parameter(parameters);
+        auto const name = next_field(value, '=');
+        if (equal_ignoring_case(name, "channel-order") && found.channel_order.empty() && channel_order_channels(value)) {
+            found.channel_order = value;
+        }
+        found.ipmx = found.ipmx || equal_ignoring_case(name, "IPMX");
+    }
+    return found;
 }
 
 auto parse_direction(std::string_view const name) noexcept -> std::optional<Direction>
@@ -529,7 +548,7 @@ class Parser
         media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = offered_.front()});
         rtpmap_ = RtpmapResult::other_payload_type;
         formats_.clear();
-        channel_orders_.clear();
+        parameters_.clear();
         return success();
     }
 
@@ -566,7 +585,7 @@ class Parser
             for (auto const& f : std::span{formats_}.subspan(1)) {
                 (void)closing->add_alternative(f);  // beyond the capacity, ignored
             }
-            closing->channel_order = primary_channel_order(closing->payload_type);
+            set_primary_parameters(*closing);
             return success();
         }
         bool const all_static = std::ranges::all_of(offered_, [](uint8_t const pt) { return pt < 96; });
@@ -578,11 +597,14 @@ class Parser
         return failure(SdpError::missing_field);
     }
 
-    /// The channel order fmtp gave `payload_type`, or empty.
-    [[nodiscard]] auto primary_channel_order(uint8_t const payload_type) const -> std::string
+    /// The channel order and IPMX declaration the fmtp of `media`'s primary payload type gave, if any.
+    void set_primary_parameters(Media& media) const
     {
-        auto const it = std::ranges::find(channel_orders_, payload_type, &ChannelOrder::payload_type);
-        return it != channel_orders_.end() ? it->order : std::string{};
+        auto const it = std::ranges::find(parameters_, media.payload_type, &PayloadParameters::payload_type);
+        if (it != parameters_.end()) {
+            media.channel_order = it->order;
+            media.ipmx = it->ipmx;
+        }
     }
 
     /// An `a=` line's handler, and whether it applies only within a media section.
@@ -710,19 +732,38 @@ class Parser
         return success();
     }
 
-    /// `a=fmtp:<pt> <parameters>`: an offered payload type's well-formed channel order (channel_order_channels()),
-    /// the first for each; another parameter, or a malformed order or line, is ignored.
+    /// One payload type's channel order and IPMX declaration, as its fmtp gives them.
+    struct PayloadParameters
+    {
+        uint8_t payload_type{0};
+        std::string order;
+        bool ipmx{false};
+    };
+
+    /// `a=fmtp:<pt> <parameters>`: an offered payload type's first well-formed channel order (channel_order_channels())
+    /// and an IPMX declaration on any of its lines; another parameter, or a malformed order or line, is ignored.
     auto fmtp_attribute(std::string_view rest) -> Status
     {
         auto const payload_type = parse_number<uint8_t>(next_field(rest, ' '));
-        auto const order = channel_order_parameter(rest);
-        if (!payload_type || !channel_order_channels(order) || !std::ranges::contains(offered_, *payload_type)) {
+        if (!payload_type || !std::ranges::contains(offered_, *payload_type)) {
             return success();
         }
-        if (!std::ranges::contains(channel_orders_, *payload_type, &ChannelOrder::payload_type)) {
-            channel_orders_.push_back({.payload_type = *payload_type, .order = std::string{order}});
-        }
+        merge(parameters_of(*payload_type), format_parameters(rest));
         return success();
+    }
+
+    /// `found` into a payload type's `parameters`: its first channel order kept, IPMX from any line.
+    static void merge(PayloadParameters& parameters, FormatParameters const& found)
+    {
+        parameters.order = parameters.order.empty() ? std::string{found.channel_order} : parameters.order;
+        parameters.ipmx = parameters.ipmx || found.ipmx;
+    }
+
+    /// The fmtp parameters gathered for `payload_type`, an empty entry when none yet.
+    auto parameters_of(uint8_t const payload_type) -> PayloadParameters&
+    {
+        auto const it = std::ranges::find(parameters_, payload_type, &PayloadParameters::payload_type);
+        return it != parameters_.end() ? *it : parameters_.emplace_back(PayloadParameters{.payload_type = payload_type});
     }
 
     /// `a=ptime:` in milliseconds; 0 is refused.
@@ -746,16 +787,9 @@ class Parser
         return success();
     }
 
-    /// One payload type's channel order, as its fmtp gives it.
-    struct ChannelOrder
-    {
-        uint8_t payload_type;
-        std::string order;
-    };
-
     Session session_;
     Media* media_{nullptr};
-    std::vector<ChannelOrder> channel_orders_;               ///< the current media's, by payload type
+    std::vector<PayloadParameters> parameters_;              ///< the current media's, by payload type
     std::vector<uint8_t> offered_;                           ///< the current media's payload types, from its m= line
     RtpmapResult rtpmap_{RtpmapResult::other_payload_type};  ///< unsupported once an offered map is unusable
     std::vector<PayloadFormat> formats_;                     ///< the current media's usable maps

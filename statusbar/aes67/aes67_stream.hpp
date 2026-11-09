@@ -283,9 +283,11 @@ struct Counters
 /// What a sender publishes for RTCP at the end of each tick (RFC 3550 Section 6.4.1 sender info).
 struct SendState
 {
-    uint32_t ssrc{0};     ///< 0 before the first tick after configure()
-    uint32_t packets{0};  ///< sent since configure(), mod 2^32
-    uint32_t octets{0};   ///< payload octets sent since configure(), mod 2^32
+    uint32_t ssrc{0};         ///< 0 before the first tick after configure()
+    uint32_t packets{0};      ///< sent since configure(), mod 2^32
+    uint32_t octets{0};       ///< payload octets sent since configure(), mod 2^32
+    uint64_t first_index{0};  ///< the run's first packet (its first frame's index), sent or held for its first SR
+    uint64_t next_index{0};   ///< the next packet to send: first_index while that is held
 
     auto operator==(SendState const&) const noexcept -> bool = default;
 };
