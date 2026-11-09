@@ -209,6 +209,9 @@ class Transport
     virtual ~Transport() = default;
     /// The interface's IPv4 address: the origin of every sender's SDP.
     [[nodiscard]] virtual auto local_address() const noexcept -> ip::IPv4Address = 0;
+    /// The interface's hardware address, which `ts-refclk:localmac=` names (RFC 7273 Section 4.8); nullopt, the default,
+    /// when unknown.
+    [[nodiscard]] virtual auto local_mac() const noexcept -> std::optional<ieee::Eui48> { return std::nullopt; }
     /// Whether `address` is this host's on the interface, so a receive port can bind it; by default local_address().
     [[nodiscard]] virtual auto is_local_address(ip::IPv4Address const& address) const noexcept -> bool
     {

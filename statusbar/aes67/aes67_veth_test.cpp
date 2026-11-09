@@ -274,6 +274,9 @@ TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arri
     if (!first_transport || !second_transport) {
         return;
     }
+    // Each names its own veth's MAC (ts-refclk:localmac, VSF TR-10-1 Section 10.4).
+    auto const first_mac = (*first_transport)->local_mac();
+    EXPECT_TRUE(first_mac.has_value() && first_mac != (*second_transport)->local_mac());
     IPv4Address const group{239, 69, 232, 1};
     Endpoint const rtp{.address = group, .port = 45200};
     RtcpOptions const rtcp{.destination = {.address = group, .port = 45201}};

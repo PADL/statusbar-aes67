@@ -155,6 +155,13 @@ class UdpRtcpPort final : public RtcpPort
     return found;
 }
 
+/// The interface's hardware address (net::read_interface_mac()), unless it has none or it is all zeros (loopback's).
+[[nodiscard]] auto interface_mac(std::string_view const name) noexcept -> std::optional<ieee::Eui48>
+{
+    auto const mac = net::read_interface_mac(name);
+    return mac && *mac != ieee::Eui48{} ? mac : std::nullopt;
+}
+
 /// The options a receive socket needs: shared when asked, IP_PKTINFO, and for a group only its own traffic.
 [[nodiscard]] auto set_receive_options(int const fd, bool const shared, bool const multicast) noexcept -> Status
 {
@@ -274,7 +281,8 @@ auto find_interface(std::string_view const name) -> StatusValue<InterfaceInfo>
         .index = index,
         .address = addresses->first.front(),
         .addresses = std::move(addresses->first),
-        .loopback = addresses->second};
+        .loopback = addresses->second,
+        .mac = interface_mac(name)};
 }
 
 auto to_sockaddr(Endpoint const& endpoint) noexcept -> sockaddr_in

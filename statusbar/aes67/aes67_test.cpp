@@ -1825,6 +1825,17 @@ TEST(aes67_udp, a_unicast_rtcp_port_reaches_its_peer)
     EXPECT_TRUE(from_b == (Endpoint{.address = y, .port = port}));
 }
 
+// ts-refclk:localmac names the interface's hardware address; loopback's is all zeros, so none (RFC 7273 Section 4.8)
+TEST(aes67_udp, the_loopback_interface_has_no_mac_to_name)
+{
+    auto const lo = find_interface("lo");
+    EXPECT_TRUE(lo.has_value());
+    EXPECT_FALSE(lo && lo->mac.has_value());
+    auto const transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    EXPECT_FALSE(transport && (*transport)->local_mac().has_value());
+}
+
 TEST(aes67_udp, multicast_receive_sockets_receive_only_their_own_joins)
 {
     auto const lo = find_interface("lo");

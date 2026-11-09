@@ -41,6 +41,7 @@ class UdpTransport final : public Transport
     auto operator=(UdpTransport&&) -> UdpTransport& = delete;
 
     [[nodiscard]] auto local_address() const noexcept -> ip::IPv4Address override { return interface_.address; }
+    [[nodiscard]] auto local_mac() const noexcept -> std::optional<ieee::Eui48> override { return interface_.mac; }
     [[nodiscard]] auto is_local_address(ip::IPv4Address const& address) const noexcept -> bool override
     {
         return is_local(interface_, address);

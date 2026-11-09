@@ -29,7 +29,8 @@ struct InterfaceInfo
     unsigned int index{0};
     ip::IPv4Address address;
     std::vector<ip::IPv4Address> addresses;
-    bool loopback{false};  ///< IFF_LOOPBACK: every 127/8 address is its own
+    bool loopback{false};            ///< IFF_LOOPBACK: every 127/8 address is its own
+    std::optional<ieee::Eui48> mac;  ///< its hardware address; nullopt for none (or all zeros, as loopback's)
 };
 
 /// Whether `address` is one of `interface`'s own: among its addresses, or any 127/8 address on a loopback interface.
