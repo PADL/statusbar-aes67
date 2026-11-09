@@ -245,7 +245,8 @@ auto Sender::references() const -> sdp::ReferenceClocks
 void Sender::hold_for_reports(bool const hold)
 {
     bool const was = holds_for_reports();
-    holds_.store(hold ? holds_.load() + 1 : holds_.load() - 1);
+    uint32_t const holds = holds_.load();
+    holds_.store(hold ? holds + 1 : holds - std::min<uint32_t>(holds, 1));
     if (holds_for_reports() != was) {
         bump_session_version();  // session() declares IPMX, or no longer
     }

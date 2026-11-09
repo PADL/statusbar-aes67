@@ -175,9 +175,9 @@ class Sender
     /// The latest SendState, published by tick(). Any thread.
     [[nodiscard]] auto send_state() const noexcept -> SendState { return send_state_.load(); }
 
-    /// One more (`hold`) or one fewer RTCP session: while any is open, each run's first packet goes FIRST_REPORT_LEAD_US
-    /// after the run starts, time for its SR to go first (VSF TR-10-1 Section 8.10.1), and session() declares IPMX. A
-    /// change of that bumps the session version. Off the real-time thread.
+    /// One more (`hold`) or one fewer ipmx RTCP session: while any is open, each run's first packet goes
+    /// FIRST_REPORT_LEAD_US after the run starts, time for its SR (VSF TR-10-1 Section 8.10.1), and session() declares
+    /// IPMX; a change of that bumps the session version. One thread only, the one that configures; never below none.
     void hold_for_reports(bool hold);
     [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load() != 0; }
 

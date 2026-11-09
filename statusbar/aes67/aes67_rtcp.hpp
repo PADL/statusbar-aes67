@@ -125,7 +125,7 @@ class RtcpSession
   public:
     /// RFC 3550 Section 6.2's fixed minimum, which a receiver (not an active sender) keeps.
     static constexpr uint32_t RECEIVER_INTERVAL_MS = 5000;
-    /// An rfc3550 sender's minimum (Tmin), the reduced minimum RFC 3550 Section 6.2 lets an active sender use.
+    /// An rfc3550 sender's minimum (Tmin): a chosen 1 s, under RFC 3550 Section 6.2's fixed 5 s.
     static constexpr uint32_t SENDER_INTERVAL_MS = 1000;
     /// The largest compound packet written.
     static constexpr size_t MAX_PACKET = 1024;
@@ -168,7 +168,7 @@ class RtcpSession
     void on_ready(uint64_t now_ns) noexcept;
     /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1. A sender's SR goes once the packet
     /// before its own on the grid has left; one whose packet left first is passed over. A sender's SSRC last seen
-    /// sending that is gone (stopped, or replaced by a new run's) gets its BYE now. Tick by next_wake_ns(), and at least every 10 ms.
+    /// sending that is gone (stopped, or replaced by a new run's) gets its BYE now. Tick as next_wake_ns() asks.
     void tick(uint64_t now_ns) noexcept;
     /// A sender's clock domain (null, the default: the packet's time is the sender's clock, PTP or a member
     /// interface's): each SR maps its packet's time to PTP time through it and reports the measured rate; none while
@@ -177,7 +177,7 @@ class RtcpSession
     /// When the session next wants a tick (PTP ns): a receiver's next report, or midway through a sender's next SR
     /// window; nullopt when nothing is due (a sender's next run is found by the next tick).
     [[nodiscard]] auto next_wake_ns(uint64_t now_ns) const noexcept -> std::optional<uint64_t>;
-    /// When a receiver's next report is due (PTP ns); 0 before the first tick.
+    /// When a receiver's or an rfc3550 sender's next report is due (PTP ns); 0 before the first tick.
     [[nodiscard]] auto next_report_ns() const noexcept -> uint64_t { return next_report_ns_; }
 
     [[nodiscard]] auto role() const noexcept -> Role { return role_; }
@@ -219,6 +219,8 @@ class RtcpSession
     /// The packet whose SR is due for `state`'s run, or nullopt: report_index_ moved past packets that left without
     /// one, and the grid restarted for a new run or a clock that went back.
     [[nodiscard]] auto due_report(SendState const& state) noexcept -> std::optional<uint64_t>;
+    /// Frames of `state`'s stream until an ipmx sender next wants a tick (next_wake_ns()).
+    [[nodiscard]] auto wake_frames(SendState const& state) const noexcept -> uint64_t;
     /// The SR for the packet `at` names, with SDES; whether it went.
     [[nodiscard]] auto send_sender_report(SendState const& state, ReportTime const& at, uint64_t now_ns) noexcept -> bool;
     /// An empty RR, SDES and BYE for `ssrc` (RFC 3550 Sections 6.1, 6.6); whether it went.

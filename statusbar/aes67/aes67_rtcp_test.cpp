@@ -427,6 +427,22 @@ TEST(aes67_rtcp, a_run_paused_before_its_first_packet_says_no_bye)
     EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{0});
 }
 
+// An SR that cannot go (its domain stopped) does not make the session ask to wake at once, again and again
+TEST(aes67_rtcp, a_session_whose_report_cannot_go_asks_to_wake_later_not_now)
+{
+    itc::SeqlockValue<mediaclock::Timebase> timebase{mediaclock::Timebase{.running = true}};
+    SenderRig rig;
+    rig.session->set_timebase(&timebase);
+    rig.run(T0, 40);
+    timebase.store(mediaclock::Timebase{});  // not running: report_time() has nothing to pair
+    for (uint64_t t = T0 + (41 * MS); t <= T0 + (60 * MS); t += MS) {
+        rig.sender.tick(index_at(t), 0);
+        rig.session->tick(t);
+    }
+    auto const wake = rig.session->next_wake_ns(T0 + (60 * MS));
+    EXPECT_TRUE(wake.value_or(0) > T0 + (60 * MS));
+}
+
 // A session wakes midway through its next SR's window, which opens when the last SR's packet leaves
 TEST(aes67_rtcp, a_sender_session_asks_to_wake_midway_through_its_next_window)
 {

@@ -317,7 +317,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   send a similar stream with. Table 1's defaults are AF41 (34) for media and EF (46) for
   clock; `DSCP_MEDIA` is 34, and a caller on a network with another policy sets its own
   (Dante marks media EF, 46).
-- A receiver's interval keeps RFC 3550 §6.2's 5 s fixed minimum; an `rfc3550` sender's is 1 s, the reduced minimum. `Rfc3550Interval` applies §6.3.1 with two
+- A receiver's interval keeps RFC 3550 §6.2's 5 s fixed minimum; an `rfc3550` sender's a chosen 1 s. `Rfc3550Interval` applies §6.3.1 with two
   members and one sender over 5 % of the stream's bandwidth (the share never binds at AES67 rates), halves the
   first interval, and randomises each. Receivers heard from are not counted into it.
 - Round trip: an RR echoes the middle bits of the SR's field, which for the PTP form are
