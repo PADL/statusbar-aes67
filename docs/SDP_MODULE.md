@@ -66,7 +66,7 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 - `Media::channel_order` is the primary format's `channel-order=` among its fmtp's `;`-separated parameters (the
   name in any case), kept only in the form `channel_order_channels()` counts and written only so, after the
   rtpmaps; another fmtp parameter, a malformed order and a malformed `maxptime` are ignored. Whether the
-  order names the media's channels is the consumer's to judge. A payload type's first well-formed order counts,
+  order names the media's channels is the consumer's to check. A payload type's first well-formed order counts,
   over all its fmtp lines.
 - `Media::ipmx` is a bare `IPMX` among those parameters (VSF TR-10-1 Section 10.1), any case; it is written last,
   `a=fmtp:<pt> channel-order=...; IPMX` or `a=fmtp:<pt> IPMX`. Other IPMX parameters (`measuredsamplerate`, a

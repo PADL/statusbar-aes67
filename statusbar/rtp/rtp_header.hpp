@@ -85,7 +85,7 @@ struct RtpPacket
 };
 
 /// Parse an RTP packet from a UDP payload: nullopt unless it is a well-formed version 2 packet
-/// (the CSRC list, extension and a nonzero padding count fit). The payload type is not judged:
+/// (the CSRC list, extension and a nonzero padding count fit). The payload type is not checked:
 /// AES67 does not multiplex RTCP on the RTP port, so the caller matches it to the stream's SDP.
 [[nodiscard]] auto parse_rtp(std::span<uint8_t const> datagram) noexcept -> std::optional<RtpPacket>;
 

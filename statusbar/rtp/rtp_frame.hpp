@@ -67,10 +67,10 @@ struct UdpFrame
 
 /// Parse an Ethernet frame carrying UDP over IPv4: nullopt unless it is unfragmented IPv4 (IHL
 /// >= 5, a valid checksum) and UDP, with lengths agreeing with each other and the frame.
-/// Addresses and ports are not judged; the payload is not looked at (RTCP uses this path).
+/// Addresses and ports are not checked; the payload is not looked at (RTCP uses this path).
 [[nodiscard]] auto parse_udp_frame(std::span<uint8_t const> frame) noexcept -> std::optional<UdpFrame>;
 
-/// parse_udp_frame(), and parse_rtp() accepts the payload. The payload type is not judged.
+/// parse_udp_frame(), and parse_rtp() accepts the payload. The payload type is not checked.
 [[nodiscard]] auto parse_rtp_frame(std::span<uint8_t const> frame) noexcept -> std::optional<RtpFrame>;
 
 /// Write an Ethernet frame carrying `header` and `payload` to `addressing`: the frame length, or

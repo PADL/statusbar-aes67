@@ -368,7 +368,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `unshare -rn sh -c 'ip link set lo up; build/statusbar_test statusbar/aes67/aes67_veth_test'`.
 - `receive_refusals()` counts a truncated datagram (longer than `MAX_DATAGRAM`) as
   `malformed`; one `IP_PKTINFO` puts on another address or interface (another group's on a
-  shared port) is skipped uncounted, and the receiver judges the rest (`Counters::drops`).
+  shared port) is skipped uncounted, and the receiver checks the rest (`Counters::drops`).
 - A sender's socket is unconnected and every message names the destination, so a unicast
   receiver's ICMP port-unreachable never fails a send (`open_send_socket()`). Multicast goes
   out of the interface with the configured TTL; unicast is bound to the interface's address

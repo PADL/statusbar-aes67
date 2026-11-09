@@ -81,14 +81,14 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 
 ## Notes & caveats
 
-- `parse_rtp()` does not judge the payload type. AES67 never multiplexes RTCP on the RTP
+- `parse_rtp()` does not check the payload type. AES67 never multiplexes RTCP on the RTP
   port, so a marked packet of any payload type is RTP; the caller matches the type to the
   stream's SDP.
 - `serialize_rtp()` writes a fixed-header-only packet and clears the padding, extension
   and CSRC-count bits, since none of those sections is written.
 - `parse_rtp_frame()` refuses anything that is not unfragmented IPv4/UDP with a correct
   header checksum and lengths that agree with each other and with the frame. Trailing
-  Ethernet padding is allowed. It does not judge addresses, ports or the payload type.
+  Ethernet padding is allowed. It does not check addresses, ports or the payload type.
 - `serialize_rtp_frame()` writes what an AES67 sender emits: IHL 5, DF set, the IPv4
   header checksum computed, and a zero (absent) UDP checksum, which IPv4 permits and
   AES67 receivers accept. Short frames are not padded; the NIC pads them.

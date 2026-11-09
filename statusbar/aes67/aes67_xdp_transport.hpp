@@ -353,7 +353,7 @@ class XdpTransport final : public Transport
     void clear_launch_lead() noexcept { launch_clock_.clear_lead(); }
     /// The launch lead in force (nullopt: not yet); the ordering's counters. Any thread.
     [[nodiscard]] auto launch_clock() const noexcept -> LaunchClock const& { return launch_clock_; }
-    /// The sending PHC's clock, which stamps an untimed frame and judges a late one (net::phc_now_ns);
+    /// The sending PHC's clock, which stamps an untimed frame and tells whether a frame is late (net::phc_now_ns);
     /// without one every frame is untimed (0), lead or none. Control thread, before ticking starts.
     auto set_phc_clock(net::ClockFn phc) noexcept -> void { phc_clock_ = std::move(phc); }
     /// Redirect groups' frames tagged with `vid` (an SR class VID) as well as untagged ones, or untagged
