@@ -79,11 +79,11 @@ struct TimebaseEstimatorParams
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
     /// RTCP sender reports (RFC 3550 Section 6.4.1), fed about one a second: a faster sender's (VSF TR-10-1
-    /// Section 8.10.1: one every 10 ms) thinned to that.
+    /// Section 8.10.1: one every 10 ms) thinned to that. 5 s outlasts an RFC 3550 sender's gap with one SR lost.
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
         return TimebaseEstimatorParams{
-            .window_pairs = 16, .lock_pairs = 4, .lock_span_ns = 0, .step_pairs = 2, .reference_timeout_ns = 3'000'000'000};
+            .window_pairs = 16, .lock_pairs = 4, .lock_span_ns = 0, .step_pairs = 2, .reference_timeout_ns = 5'000'000'000};
     }
 
     /// A CRF stream (Milan v1.2 Section 7.3), 500 timestamps a second (48 kHz, timestamp_interval 96).

@@ -129,7 +129,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   | Preset | Pairs/s | Window | Lock after | Step | Reference timeout | Absolute |
   |---|---|---|---|---|---|---|
   | `avb_stream()` | 1000 | 2048 pairs (2 s) | 256 pairs spanning 250 ms | 3 residuals over 20 µs | 100 ms | no |
-  | `rtcp_sender_reports()` | ~1 | 16 | 4 | 2 over 20 µs | 3 s | no |
+  | `rtcp_sender_reports()` | ~1 | 16 | 4 | 2 over 20 µs | 5 s | no |
   | `crf()` | 500 | 1024 (2 s) | 128 spanning 250 ms | 3 over 20 µs | 100 ms | no |
   | `phc_pairs()` | 16 | 64 (4 s) | 16 spanning 900 ms | 3 over 2 µs | 500 ms | yes |
 

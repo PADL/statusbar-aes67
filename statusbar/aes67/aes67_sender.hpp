@@ -305,7 +305,7 @@ class Sender
     uint64_t next_index_{0};              ///< first frame of the next packet to send
     uint64_t run_first_{0};               ///< the run's first packet (real-time thread)
     std::optional<uint64_t> held_first_;  ///< the packet a run held for its first SR starts at (real-time thread)
-    std::atomic<uint32_t> holds_{0};      ///< the ReportHolds held: control writes, real-time reads wait-free
+    std::atomic<uint32_t> holds_{0};      ///< the ReportHolds held: real-time reads wait-free
     /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.
     void count_hold(bool held);
     Counters counters_;
