@@ -905,4 +905,46 @@ TEST(sdp_ts_refclk, a_reference_without_a_domain_names_domain_zero_alone)
     EXPECT_TRUE(session->names_clock(media, PtpReference::naming(grandmaster, 0)));
 }
 
+TEST(sdp, long_text_fields_are_written_whole)
+{
+    // a field of a multiple of 256 characters (llvm-project issue 154670), as a SAP announcement may carry
+    for (size_t const length : {255UZ, 256UZ, 512UZ, 1024UZ}) {
+        std::string const long_text(length, 'x');
+        std::string text{DANTE};
+        text.replace(text.find("o=-"), 3, "o=" + long_text);
+        text.replace(text.find("192.168.1.20"), 12, long_text);
+        text.replace(text.find("AVIO-Bluetooth : 2"), 18, long_text);
+        text.replace(text.find("2 channels: Left, Right"), 23, long_text);
+        text.replace(text.find("t=0 0\r\n") + 7, 0, "a=ts-refclk:" + long_text + "\r\n");
+        auto const session = parse(text);
+        EXPECT_TRUE(session.has_value());
+        if (!session) {
+            continue;
+        }
+        auto const again = parse(to_string(*session));
+        EXPECT_TRUE(again.has_value() && *again == *session);
+        EXPECT_EQ(ts_refclk_text(session->clocks), long_text);
+    }
+}
+
+TEST(sdp, a_channel_order_of_256_characters_is_written_whole)
+{
+    std::string order{"SMPTE2110.(ST,ST,ST"};
+    for (int i = 0; i < 59; ++i) {
+        order += ",U01";
+    }
+    order += ")";
+    EXPECT_EQ(order.size(), size_t{256});
+    std::string text{DANTE};
+    text.replace(text.find("a=ptime"), 0, "a=fmtp:97 channel-order=" + order + "\r\n");
+    auto const session = parse(text);
+    bool const one_media = session.has_value() && session->media.size() == 1;
+    EXPECT_TRUE(one_media);
+    if (!one_media) {
+        return;
+    }
+    EXPECT_EQ(session->media.front().channel_order, order);
+    EXPECT_TRUE(to_string(*session).find("a=fmtp:97 channel-order=" + order + "\r\n") != std::string::npos);
+}
+
 TEST_MAIN(statusbar_sdp, sdp_test)
