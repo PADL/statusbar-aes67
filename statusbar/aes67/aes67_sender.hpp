@@ -197,7 +197,7 @@ class Sender
     /// A new hold for an ipmx RTCP session; the first one held bumps the session version, as the last one ending does.
     [[nodiscard]] auto hold_reports() -> ReportHold;
     /// Whether any ReportHold is held: session() declares IPMX. Any thread.
-    [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load() != 0; }
+    [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load(std::memory_order_relaxed) != 0; }
 
     /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
     /// handed to the transport departing at `tick_ns`, this tick's time in the ns the sending NIC's
@@ -305,7 +305,7 @@ class Sender
     uint64_t next_index_{0};              ///< first frame of the next packet to send
     uint64_t run_first_{0};               ///< the run's first packet (real-time thread)
     std::optional<uint64_t> held_first_;  ///< the packet a run held for its first SR starts at (real-time thread)
-    itc::SeqlockValue<uint32_t> holds_;   ///< the ReportHolds held: control -> real-time
+    std::atomic<uint32_t> holds_{0};      ///< the ReportHolds held: control writes, real-time reads wait-free
     /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.
     void count_hold(bool held);
     Counters counters_;
