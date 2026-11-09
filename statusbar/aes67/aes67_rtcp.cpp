@@ -28,16 +28,17 @@ auto rtcp_bandwidth(StreamFormat const& format) noexcept -> double
     return 0.05 * packets_per_second * octets_per_packet;
 }
 
-/// A receiver's cadence: one sender and the receivers that report, an RR + SDES about 100 octets with the headers.
-auto default_cadence(StreamFormat const& format, uint64_t const minimum_ns) -> std::unique_ptr<RtcpCadence>
+/// RFC 3550 Section 6.3.1's cadence: one sender and the receivers that report; SR + Info Block + SDES is about 200
+/// octets with the UDP and IP headers, an RR + SDES about 100.
+auto default_cadence(StreamFormat const& format, uint64_t const minimum_ns, bool const sender) -> std::unique_ptr<RtcpCadence>
 {
     rtp::RtcpIntervalParams const params{
         .minimum_ns = minimum_ns,
         .members = 2,
         .senders = 1,
-        .we_sent = false,
+        .we_sent = sender,
         .rtcp_bandwidth = rtcp_bandwidth(format),
-        .average_size = 100.0,
+        .average_size = sender ? 200.0 : 100.0,
     };
     std::random_device random;
     return std::make_unique<Rfc3550Interval>(params, random());
@@ -142,18 +143,17 @@ RtcpSession::RtcpSession(
     , port_{std::move(port)}
     , options_{std::move(options)}
     , sample_rate_{format_of(sender, receiver).sample_rate}
-    , minimum_ns_{uint64_t{RECEIVER_INTERVAL_MS} * NS_PER_MS}
+    , minimum_ns_{uint64_t{role == Role::sender ? SENDER_INTERVAL_MS : RECEIVER_INTERVAL_MS} * NS_PER_MS}
     , report_stride_{report_stride(format_of(sender, receiver))}
 {
-    if (role_ == Role::sender) {
+    if (ipmx()) {
         sender_->hold_for_reports(true);
-        return;
     }
     if (!options_.cadence) {
-        options_.cadence = default_cadence(receiver_->format(), minimum_ns_);
+        options_.cadence = default_cadence(format_of(sender, receiver), minimum_ns_, role_ == Role::sender);
     }
     std::random_device random;
-    own_ssrc_ = random();
+    own_ssrc_ = role_ == Role::receiver ? random() : 0;
 }
 
 RtcpSession::~RtcpSession()
@@ -203,7 +203,7 @@ void RtcpSession::close() noexcept
         (void)send_bye(ssrc());
     }
     port_.reset();
-    if (role_ == Role::sender) {
+    if (ipmx()) {
         sender_->hold_for_reports(false);
     }
 }
@@ -248,14 +248,14 @@ void RtcpSession::tick(uint64_t const now_ns) noexcept
         on_ready(now_ns);
     }
     note_sending();
-    if (role_ == Role::sender) {
+    if (ipmx()) {
         send_due_report(now_ns);
     } else {
-        schedule_receiver_report(now_ns);
+        schedule_report(now_ns);
     }
 }
 
-void RtcpSession::schedule_receiver_report(uint64_t const now_ns) noexcept
+void RtcpSession::schedule_report(uint64_t const now_ns) noexcept
 {
     if (next_report_ns_ == 0) {
         next_report_ns_ = now_ns + options_.cadence->next_interval_ns(true);
@@ -265,8 +265,18 @@ void RtcpSession::schedule_receiver_report(uint64_t const now_ns) noexcept
         next_report_ns_ = now_ns + options_.cadence->next_interval_ns(false);  // PTP stepped back
     }
     if (now_ns >= next_report_ns_) {
-        send_receiver_report(now_ns);
+        role_ == Role::receiver ? send_receiver_report(now_ns) : send_scheduled_sender_report(now_ns);
         next_report_ns_ = now_ns + options_.cadence->next_interval_ns(false);
+    }
+}
+
+void RtcpSession::send_scheduled_sender_report(uint64_t const now_ns) noexcept
+{
+    auto const state = sending_state();
+    bool const sending = state && state->packets != 0;  // a pair the receiver can place: a packet of this run
+    auto const at = sending ? report_time(state->next_index) : std::nullopt;
+    if (at) {
+        (void)send_sender_report(*state, *at, now_ns);
     }
 }
 
@@ -294,7 +304,7 @@ void RtcpSession::send_due_report(uint64_t const now_ns) noexcept
 
 auto RtcpSession::next_wake_ns(uint64_t const now_ns) const noexcept -> std::optional<uint64_t>
 {
-    if (role_ == Role::receiver) {
+    if (!ipmx()) {
         return next_report_ns_ != 0 ? std::optional{next_report_ns_} : std::nullopt;
     }
     auto const state = sending_state();

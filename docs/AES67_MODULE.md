@@ -35,7 +35,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` accepts the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
-- `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, receiver DSCP, receiver cadence, `on_sender_report`), `RtcpStats`.
+- `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, receiver DSCP, a sender's `SenderReports`, the RFC 3550 cadence, `on_sender_report`), `RtcpStats`.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
 - `RtcpCadence` — when a receiver's next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
@@ -275,7 +275,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   Out of scope: an RFC 3550 wall-clock NTP mode, APP, SDES items past CNAME, RTCP-XR,
   timer reconsideration and member tables (§6.3.3–6.3.7), and RTP/RTCP multiplexing (RFC
   5761).
-- The SR schedule (VSF TR-10-1 §8.10.1): one SR for a run's first packet, then one every N = int(10 ms / ptime)
+- A sender's schedule is `RtcpSessionOptions::reports`: `rfc3550` (the default) sends an SR at RFC 3550 §6.3.1's
+  randomised interval (Tmin `SENDER_INTERVAL_MS`, 1 s), naming the next packet to send, with no first-packet hold and
+  no IPMX declaration; `ipmx` follows TR-10-1 below. Both carry the Info Block, which says how the time field reads.
+- The `ipmx` schedule (VSF TR-10-1 §8.10.1): one SR for a run's first packet, then one every N = int(10 ms / ptime)
   packets (`REPORT_SPACING_US`; 10 at 1 ms, 80 at 125 µs), each naming its packet's RTP timestamp and sent before
   that packet and after the one N before. The sender places a run's first packet `FIRST_REPORT_LEAD_US` (20 ms)
   ahead, publishes it (`SendState::first_index`), and sends it when due, whether or not its SR went: audio never
@@ -314,7 +317,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   send a similar stream with. Table 1's defaults are AF41 (34) for media and EF (46) for
   clock; `DSCP_MEDIA` is 34, and a caller on a network with another policy sets its own
   (Dante marks media EF, 46).
-- A receiver's interval keeps RFC 3550 §6.2's 5 s fixed minimum. `Rfc3550Interval` applies §6.3.1 with two
+- A receiver's interval keeps RFC 3550 §6.2's 5 s fixed minimum; an `rfc3550` sender's is 1 s, the reduced minimum. `Rfc3550Interval` applies §6.3.1 with two
   members and one sender over 5 % of the stream's bandwidth (the share never binds at AES67 rates), halves the
   first interval, and randomises each. Receivers heard from are not counted into it.
 - Round trip: an RR echoes the middle bits of the SR's field, which for the PTP form are

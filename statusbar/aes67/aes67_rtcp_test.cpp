@@ -88,9 +88,11 @@ class FixedCadence final : public RtcpCadence
     uint64_t ns_;
 };
 
-auto options(std::string cname, uint64_t const interval_ns = 10 * MS) -> RtcpSessionOptions
+/// A sender's options are ipmx unless `reports` says; `interval_ns` is an rfc3550 sender's or a receiver's cadence.
+auto options(std::string cname, uint64_t const interval_ns = 10 * MS, SenderReports const reports = SenderReports::ipmx)
+    -> RtcpSessionOptions
 {
-    return {.cname = std::move(cname), .cadence = std::make_unique<FixedCadence>(interval_ns)};
+    return {.cname = std::move(cname), .reports = reports, .cadence = std::make_unique<FixedCadence>(interval_ns)};
 }
 
 /// A transport in memory: RTP sent is counted and dropped, RTP and RTCP to receive are injected,
@@ -435,6 +437,30 @@ TEST(aes67_rtcp, a_sender_session_asks_to_wake_midway_through_its_next_window)
     EXPECT_TRUE(wake.has_value());
     EXPECT_TRUE(wake.value_or(0) >= T0 + (40 * MS));
     EXPECT_TRUE(wake.value_or(0) <= T0 + (55 * MS));  // at most one and a half windows ahead
+}
+
+// rfc3550: SRs at the cadence's interval, the first packet sent at once, no IPMX declaration; the Info Block stays
+// (it tells a reader how to read the time field, whatever the schedule)
+TEST(aes67_rtcp, an_rfc3550_sender_reports_at_its_interval_without_holding_or_declaring_ipmx)
+{
+    FakeTransport transport;
+    Sender sender{STEREO_L24, {}, transport, "Out"};
+    sender.set_send_offset(0);
+    (void)sender.configure(Destination{.address = GROUP.address, .port = GROUP.port});
+    auto session =
+        std::move(*RtcpSession::open_sender(sender, transport, options("bridge@10.0.0.2", 100 * MS, SenderReports::rfc3550)));
+    EXPECT_FALSE(sender.holds_for_reports());
+    EXPECT_FALSE(sender.session().value_or(sdp::Session{}).media.at(0).ipmx);
+    for (uint64_t t = T0; t <= T0 + (500 * MS); t += MS) {
+        sender.tick(index_at(t), 0);
+        session->tick(t);
+    }
+    EXPECT_FALSE(transport.log.empty() || transport.log.front().rtcp);  // RTP from the first tick, no SR first
+    auto const reports = std::ranges::count_if(transport.log, [](auto const& e) { return e.rtcp; });
+    EXPECT_TRUE(reports >= 4);  // armed at T0, then one each 100 ms
+    EXPECT_TRUE(reports <= 5);
+    auto const block = info_block_of(transport.rtcp_out.back());
+    EXPECT_EQ(block.mediaclk, std::string_view{"direct=0"});
 }
 
 // The media never waits on the RTCP path: with every SR refused by the port, the run starts all the same

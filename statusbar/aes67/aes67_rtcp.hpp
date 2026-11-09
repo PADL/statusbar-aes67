@@ -101,6 +101,13 @@ struct RtcpStats
     std::optional<SenderReportTime> remote_sr;  ///< receiver: the stream's latest IPMX-form SR
 };
 
+/// When a sender's SRs go.
+enum class SenderReports : uint8_t
+{
+    rfc3550,  ///< RFC 3550 Section 6.3.1's randomised interval, about a second (SENDER_INTERVAL_MS); no first-packet hold
+    ipmx,     ///< VSF TR-10-1 Section 8.10.1's: the first packet's, then every 10 ms of packets; the SDP declares IPMX
+};
+
 /// What a session is opened with.
 struct RtcpSessionOptions
 {
@@ -108,8 +115,9 @@ struct RtcpSessionOptions
     /// A receiver's RTCP DSCP: what it would send a similar stream with (AES67-2023 Clause 6.2).
     /// A sender's is its stream's.
     uint8_t dscp{rtp::FrameAddressing::DSCP_MEDIA};
-    std::unique_ptr<RtcpCadence> cadence;  ///< a receiver's (a sender's follows TR-10-1); null: Rfc3550Interval
-    SenderReportHandler on_sender_report;  ///< receiver: each new RtcpStats::remote_sr; may be empty
+    SenderReports reports{SenderReports::rfc3550};  ///< a sender's schedule
+    std::unique_ptr<RtcpCadence> cadence;           ///< rfc3550's and a receiver's; null: Rfc3550Interval
+    SenderReportHandler on_sender_report;           ///< receiver: each new RtcpStats::remote_sr; may be empty
 };
 
 class RtcpSession
@@ -117,6 +125,8 @@ class RtcpSession
   public:
     /// RFC 3550 Section 6.2's fixed minimum, which a receiver (not an active sender) keeps.
     static constexpr uint32_t RECEIVER_INTERVAL_MS = 5000;
+    /// An rfc3550 sender's minimum (Tmin), the reduced minimum RFC 3550 Section 6.2 lets an active sender use.
+    static constexpr uint32_t SENDER_INTERVAL_MS = 1000;
     /// The largest compound packet written.
     static constexpr size_t MAX_PACKET = 1024;
     /// SRs whose send times are kept for the round trip: 1.28 s of them at one every 10 ms.
@@ -132,9 +142,9 @@ class RtcpSession
         receiver,
     };
 
-    /// A session for `sender`'s stream (configured): SRs to its RTCP endpoint, marked with its DSCP, one for each run's
-    /// first packet, which `sender` places a lead ahead (Sender::hold_for_reports()), then every REPORT_SPACING_US of
-    /// packets. `sender` must outlive the session. Off the real-time thread.
+    /// A session for `sender`'s stream (configured): SRs to its RTCP endpoint, marked with its DSCP, on
+    /// `options.reports`' schedule; under ipmx `sender` places each run's first packet a lead ahead for its SR
+    /// (Sender::hold_for_reports()). `sender` must outlive the session. Off the real-time thread.
     [[nodiscard]] static auto open_sender(Sender& sender, Transport& transport, RtcpSessionOptions options)
         -> StatusValue<std::unique_ptr<RtcpSession>>;
     /// A session for `receiver`'s stream (configured): RRs to its RTCP endpoint, marked with
@@ -198,9 +208,12 @@ class RtcpSession
         uint64_t time_ns{0};
         uint32_t measured_rate{0};
     };
-    /// A receiver's RR when its cadence says, re-armed after a PTP step back.
-    void schedule_receiver_report(uint64_t now_ns) noexcept;
+    /// A receiver's RR, or an rfc3550 sender's SR, when its cadence says, re-armed after a PTP step back.
+    void schedule_report(uint64_t now_ns) noexcept;
     void send_receiver_report(uint64_t now_ns) noexcept;
+    /// An rfc3550 sender's SR, naming the next packet to send.
+    void send_scheduled_sender_report(uint64_t now_ns) noexcept;
+    [[nodiscard]] auto ipmx() const noexcept -> bool { return role_ == Role::sender && options_.reports == SenderReports::ipmx; }
     /// A sender's SR when one is due (due_report()).
     void send_due_report(uint64_t now_ns) noexcept;
     /// The packet whose SR is due for `state`'s run, or nullopt: report_index_ moved past packets that left without
