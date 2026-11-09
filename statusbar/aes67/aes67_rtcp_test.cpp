@@ -489,6 +489,22 @@ TEST(aes67_rtcp, a_refused_first_sender_report_does_not_stop_the_run)
     EXPECT_TRUE(std::ranges::any_of(rig.transport.log, [](auto const& e) { return !e.rtcp; }));
 }
 
+// A ReportHold lasts as long as it lives, moves with its owner, and the holds are counted
+TEST(aes67_sender, a_report_hold_ends_with_its_guard)
+{
+    FakeTransport transport;
+    Sender sender{STEREO_L24, {}, transport, "Out"};
+    {
+        auto first = sender.hold_reports();
+        auto moved = std::move(first);
+        EXPECT_TRUE(sender.holds_for_reports());
+        auto second = sender.hold_reports();
+        moved = {};
+        EXPECT_TRUE(sender.holds_for_reports());  // the second still holds it
+    }
+    EXPECT_FALSE(sender.holds_for_reports());
+}
+
 // Each session holds the sender; IPMX is declared while any does, and its coming and going is a new session version
 TEST(aes67_rtcp, the_ipmx_declaration_follows_the_sessions_and_bumps_the_version)
 {

@@ -147,7 +147,7 @@ RtcpSession::RtcpSession(
     , report_stride_{report_stride(format_of(sender, receiver))}
 {
     if (ipmx()) {
-        sender_->hold_for_reports(true);
+        hold_ = sender_->hold_reports();
     }
     if (!ipmx() && !options_.cadence) {
         options_.cadence = default_cadence(format_of(sender, receiver), minimum_ns_, role_ == Role::sender);
@@ -203,9 +203,7 @@ void RtcpSession::close() noexcept
         (void)send_bye(ssrc());
     }
     port_.reset();
-    if (ipmx()) {
-        sender_->hold_for_reports(false);
-    }
+    hold_ = {};  // an ipmx sender's next run waits for no SR
 }
 
 void RtcpSession::note_sending() noexcept

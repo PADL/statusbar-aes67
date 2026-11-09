@@ -144,7 +144,7 @@ class RtcpSession
 
     /// A session for `sender`'s stream (configured): SRs to its RTCP endpoint, marked with its DSCP, on
     /// `options.reports`' schedule; under ipmx `sender` places each run's first packet a lead ahead for its SR
-    /// (Sender::hold_for_reports()). `sender` must outlive the session. Off the real-time thread.
+    /// (Sender::hold_reports()). `sender` must outlive the session. Off the real-time thread.
     [[nodiscard]] static auto open_sender(Sender& sender, Transport& transport, RtcpSessionOptions options)
         -> StatusValue<std::unique_ptr<RtcpSession>>;
     /// A session for `receiver`'s stream (configured): RRs to its RTCP endpoint, marked with
@@ -262,6 +262,7 @@ class RtcpSession
 
     Role role_;
     Sender* sender_;
+    Sender::ReportHold hold_;  ///< an ipmx sender's, while the session is open
     Receiver const* receiver_;
     std::unique_ptr<RtcpPort> port_;
     RtcpSessionOptions options_;

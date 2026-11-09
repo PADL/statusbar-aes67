@@ -175,10 +175,28 @@ class Sender
     /// The latest SendState, published by tick(). Any thread.
     [[nodiscard]] auto send_state() const noexcept -> SendState { return send_state_.load(); }
 
-    /// One more (`hold`) or one fewer ipmx RTCP session: while any is open, each run's first packet goes
-    /// FIRST_REPORT_LEAD_US after the run starts, time for its SR (VSF TR-10-1 Section 8.10.1), and session() declares
-    /// IPMX; a change of that bumps the session version. One thread only, the one that configures; never below none.
-    void hold_for_reports(bool hold);
+    /// An ipmx RTCP session's hold on the sender, held as long as the guard lives (moved, it goes with it). While any
+    /// is held, each run's first packet goes FIRST_REPORT_LEAD_US after the run starts, time for its SR (VSF TR-10-1
+    /// Section 8.10.1), and session() declares IPMX. Made and ended on the thread that configures.
+    class ReportHold
+    {
+      public:
+        ReportHold() noexcept = default;
+        ~ReportHold();
+        ReportHold(ReportHold const&) = delete;
+        auto operator=(ReportHold const&) -> ReportHold& = delete;
+        ReportHold(ReportHold&& other) noexcept;
+        auto operator=(ReportHold&& other) noexcept -> ReportHold&;
+
+      private:
+        friend class Sender;
+        explicit ReportHold(Sender& sender) noexcept;
+        Sender* sender_{nullptr};
+    };
+
+    /// A new hold for an ipmx RTCP session; the first one held bumps the session version, as the last one ending does.
+    [[nodiscard]] auto hold_reports() -> ReportHold;
+    /// Whether any ReportHold is held: session() declares IPMX. Any thread.
     [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load() != 0; }
 
     /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
@@ -287,7 +305,9 @@ class Sender
     uint64_t next_index_{0};              ///< first frame of the next packet to send
     uint64_t run_first_{0};               ///< the run's first packet (real-time thread)
     std::optional<uint64_t> held_first_;  ///< the packet a run held for its first SR starts at (real-time thread)
-    itc::SeqlockValue<uint32_t> holds_;   ///< the RTCP sessions open (hold_for_reports()): control -> real-time
+    itc::SeqlockValue<uint32_t> holds_;   ///< the ReportHolds held: control -> real-time
+    /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.
+    void count_hold(bool held);
     Counters counters_;
     std::error_code error_;
 };

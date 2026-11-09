@@ -242,11 +242,41 @@ auto Sender::references() const -> sdp::ReferenceClocks
     return clocks;
 }
 
-void Sender::hold_for_reports(bool const hold)
+Sender::ReportHold::ReportHold(Sender& sender) noexcept
+    : sender_{&sender}
+{}
+
+Sender::ReportHold::~ReportHold()
+{
+    if (sender_ != nullptr) {
+        sender_->count_hold(false);
+    }
+}
+
+Sender::ReportHold::ReportHold(ReportHold&& other) noexcept
+    : sender_{std::exchange(other.sender_, nullptr)}
+{}
+
+auto Sender::ReportHold::operator=(ReportHold&& other) noexcept -> ReportHold&
+{
+    if (this != &other) {
+        ReportHold const ended{std::move(*this)};  // this one's hold ends here
+        sender_ = std::exchange(other.sender_, nullptr);
+    }
+    return *this;
+}
+
+auto Sender::hold_reports() -> ReportHold
+{
+    count_hold(true);
+    return ReportHold{*this};
+}
+
+void Sender::count_hold(bool const held)
 {
     bool const was = holds_for_reports();
     uint32_t const holds = holds_.load();
-    holds_.store(hold ? holds + 1 : holds - std::min<uint32_t>(holds, 1));
+    holds_.store(held ? holds + 1 : holds - std::min<uint32_t>(holds, 1));
     if (holds_for_reports() != was) {
         bump_session_version();  // session() declares IPMX, or no longer
     }

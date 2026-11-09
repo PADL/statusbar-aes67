@@ -192,7 +192,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   (`a=fmtp:<pt> channel-order=`, `channel_order()`: the one set, or undefined groups) and `a=maxptime`, the packet
   time. Off by default, so an AES67 receiver sees AES67's attributes alone. A change, and a channel order changed
   while it is on, bumps the session version.
-- While an `RtcpSession` holds the sender (`hold_for_reports()`, counted per session), `session()` declares IPMX in
+- While an ipmx `RtcpSession` holds the sender (a `Sender::ReportHold` from `hold_reports()`, which the session owns
+  while open; the holds are counted, so one session closing lifts no other's), `session()` declares IPMX in
   the fmtp (`a=fmtp:<pt> IPMX`, after any channel order; VSF TR-10-1 §10.1): its SRs then follow §8.10.1. The
   declaration appearing or going bumps the session version. Without a session the SDP is AES67's alone.
 - A clock domain other than PTP: the caller ticks the sender with the domain's index
