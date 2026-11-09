@@ -176,11 +176,13 @@ void write_fmtp(Out out, Media const& media)
     if (!ordered && !media.ipmx) {
         return;
     }
-    out = std::format_to(out, "a=fmtp:{} ", media.payload_type);
+    // Text appended, std::format for the number alone: a long text through format_to overflows libc++ 20's buffer.
+    std::string line = std::format("a=fmtp:{} ", media.payload_type);
     if (ordered) {
-        out = std::format_to(out, "channel-order={}{}", media.channel_order, media.ipmx ? "; " : "");
+        line.append("channel-order=").append(media.channel_order).append(media.ipmx ? "; " : "");
     }
-    std::format_to(out, "{}\r\n", media.ipmx ? "IPMX" : "");
+    line.append(media.ipmx ? "IPMX\r\n" : "\r\n");
+    std::ranges::copy(line, out);
 }
 
 /// An rtpmap for each payload type, in order of preference, the primary's fmtp, then ptime and maxptime.
