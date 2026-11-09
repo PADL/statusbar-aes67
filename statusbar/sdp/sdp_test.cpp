@@ -852,6 +852,45 @@ TEST(sdp_channel_order, each_group_counts_its_channels)
     EXPECT_EQ(channel_order_channels(""), std::nullopt);
 }
 
+TEST(sdp_ipmx, the_declaration_is_read_beside_the_channel_order)
+{
+    auto const session = parse(with_fmtp("a=fmtp:97 channel-order=SMPTE2110.(51,ST); IPMX; measuredsamplerate=47952\r\n"));
+    EXPECT_TRUE(session.has_value());
+    EXPECT_TRUE(session->media.at(0).ipmx);
+    EXPECT_EQ(session->media.at(0).channel_order, std::string{"SMPTE2110.(51,ST)"});
+    EXPECT_TRUE(parse(with_fmtp("a=fmtp:97 ipmx\r\n"))->media.at(0).ipmx);
+    EXPECT_FALSE(parse(ST2110)->media.at(0).ipmx);
+}
+
+TEST(sdp_ipmx, each_fmtp_line_of_a_payload_type_counts)
+{
+    auto const session = parse(with_fmtp("a=fmtp:97 IPMX\r\na=fmtp:97 channel-order=SMPTE2110.(51,ST)\r\n"));
+    EXPECT_TRUE(session.has_value());
+    EXPECT_TRUE(session && session->media.at(0).ipmx);
+    EXPECT_TRUE(session && session->media.at(0).channel_order == "SMPTE2110.(51,ST)");
+}
+
+TEST(sdp_ipmx, another_payload_types_declaration_is_not_the_primarys)
+{
+    auto const session = parse(with_fmtp("a=fmtp:99 IPMX\r\n"));
+    EXPECT_FALSE(session->media.at(0).ipmx);
+    auto const other = parse(with_fmtp("a=fmtp:98 IPMX\r\n"));  // 98's first fmtp line is the channel order's
+    EXPECT_FALSE(other->media.at(0).ipmx);
+}
+
+TEST(sdp_ipmx, the_declaration_is_written_after_the_channel_order_or_alone)
+{
+    auto session = *parse(ST2110);
+    session.media.at(0).ipmx = true;
+    auto text = to_string(session);
+    EXPECT_TRUE(text.find("a=fmtp:97 channel-order=SMPTE2110.(51,ST); IPMX\r\n") != std::string::npos);
+    EXPECT_TRUE(parse(text)->media.at(0).ipmx);
+    session.media.at(0).channel_order.clear();
+    text = to_string(session);
+    EXPECT_TRUE(text.find("a=fmtp:97 IPMX\r\n") != std::string::npos);
+    EXPECT_TRUE(parse(text)->media.at(0).ipmx);
+}
+
 // RFC 7273 Section 4.8: a reference with no domain is domain 0's, so it never names a domain-127 grandmaster (ST 2110-10
 // senders write the domain)
 TEST(sdp_ts_refclk, a_reference_without_a_domain_names_domain_zero_alone)

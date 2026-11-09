@@ -12,7 +12,7 @@ TTL included), and audio media over RTP/AVP with L16, L24, L32 and AM824 rtpmaps
 the RFC 7273 reference clock and media clock (`ts-refclk:ptp=...`,
 `mediaclk:direct=<offset>`), RAVENNA's `clock-domain:PTPv2 <n>`, RFC 4570 source
 filters, the RFC 3605 RTCP port (`a=rtcp:`), `a=maxptime` (RFC 8866 Section 6.5) and the ST 2110-30
-Section 6.2.2 channel order (`a=fmtp:<pt> channel-order=SMPTE2110.(...)`). A session may hold several audio media (ST 2022-7 sends the same stream twice);
+Section 6.2.2 channel order (`a=fmtp:<pt> channel-order=SMPTE2110.(...)`) with VSF TR-10-1's `IPMX` declaration beside it. A session may hold several audio media (ST 2022-7 sends the same stream twice);
 other media are skipped, and attributes nothing here uses are ignored. Connection, clock,
 media clock, source filter, clock domain and direction may be given at session or media
 level; the `Session::effective_*()` accessors resolve them (media level wins).
@@ -27,7 +27,8 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `PtpVersion` — `ieee1588_2002`, `ieee1588_2008`, `ieee1588_2019`, `ieee802_1as`, `other`; `ptp_version_name()`.
 - `ReferenceClocks` — one level's `ts-refclk` lines: the PTP references and the other sources (up to `MAX` each); `ReferenceClocks::of()`, `PtpReference::naming()` build a sender's.
 - `Session::effective_clocks()`, `Session::names_clock()`, `PtpReference::same_clock()` — the references in force for a media, and whether one of them names a given clock (AES67-2018 Clause 8.2).
-- `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings.
+- `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings. `localmac_value()` — `localmac=` with a MAC (RFC 7273 Section 4.8; VSF TR-10-1 Section 10.4), for `ReferenceClocks::other`.
+- `Media::ipmx` — the primary format's fmtp declares `IPMX` (VSF TR-10-1 Section 10.1).
 - `channel_order_channels()` — the channels an ST 2110-30 channel order names, or nullopt for another form.
 - `SdpError` — `enum class`, category `statusbar.sdp`.
 
@@ -65,7 +66,11 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 - `Media::channel_order` is the primary format's `channel-order=` among its fmtp's `;`-separated parameters (the
   name in any case), kept only in the form `channel_order_channels()` counts and written only so, after the
   rtpmaps; another fmtp parameter, a malformed order and a malformed `maxptime` are ignored. Whether the
-  order names the media's channels is the consumer's to judge.
+  order names the media's channels is the consumer's to judge. A payload type's first well-formed order counts,
+  over all its fmtp lines.
+- `Media::ipmx` is a bare `IPMX` among those parameters (VSF TR-10-1 Section 10.1), any case; it is written last,
+  `a=fmtp:<pt> channel-order=...; IPMX` or `a=fmtp:<pt> IPMX`. Other IPMX parameters (`measuredsamplerate`, a
+  baseband sender's, Section 10.3) are read past and never written.
 
 - Several rtpmaps on one m= line: every offered payload type with a supported rtpmap is
   kept. The primary format is the first on the m= line (RFC 8866 §5.14: the order of
