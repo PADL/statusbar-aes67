@@ -153,8 +153,8 @@ void Sender::seed_run()
 {
     std::random_device random;
     payload_.assign(format_.bytes_per_packet(), 0);
-    ssrc_.store(random(), std::memory_order_relaxed);
     rng_ = ((uint64_t{random()} << 32U) | random()) | 1U;
+    ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);  // never 0, nor the last run's
     sequence_ = static_cast<uint16_t>(random());
     rtcp_counts_ = {};
 }
@@ -274,11 +274,10 @@ auto Sender::hold_reports() -> ReportHold
 
 void Sender::count_hold(bool const held)
 {
-    bool const was = holds_for_reports();
-    uint32_t const holds = holds_.load(std::memory_order_relaxed);
-    holds_.store(held ? holds + 1 : holds - std::min<uint32_t>(holds, 1), std::memory_order_relaxed);
-    if (holds_for_reports() != was) {
-        bump_session_version();  // session() declares IPMX, or no longer
+    // A hold ends only once, after it began: the count never goes below 0.
+    uint32_t const before = held ? holds_.fetch_add(1, std::memory_order_relaxed) : holds_.fetch_sub(1, std::memory_order_relaxed);
+    if (before == (held ? 0U : 1U)) {
+        bump_session_version();  // the first began or the last ended: session() declares IPMX, or no longer
     }
 }
 
