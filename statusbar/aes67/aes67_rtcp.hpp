@@ -119,8 +119,8 @@ class RtcpSession
     static constexpr uint32_t RECEIVER_INTERVAL_MS = 5000;
     /// The largest compound packet written.
     static constexpr size_t MAX_PACKET = 1024;
-    /// SRs whose send times are kept for the round trip.
-    static constexpr size_t SR_HISTORY = 8;
+    /// SRs whose send times are kept for the round trip: 1.28 s of them at one every 10 ms.
+    static constexpr size_t SR_HISTORY = 128;
     /// A sender's SR spacing: one every int(10 ms / ptime) packets (VSF TR-10-1 Section 8.10.1).
     static constexpr uint32_t REPORT_SPACING_US = 10'000;
     /// Datagrams one poll reads at most.
@@ -133,8 +133,8 @@ class RtcpSession
     };
 
     /// A session for `sender`'s stream (configured): SRs to its RTCP endpoint, marked with its DSCP, one for each run's
-    /// first packet, which `sender` holds until it has gone or the port refused it (Sender::hold_for_reports()), then
-    /// every REPORT_SPACING_US of packets. `sender` must outlive the session. Off the real-time thread.
+    /// first packet, which `sender` places a lead ahead (Sender::hold_for_reports()), then every REPORT_SPACING_US of
+    /// packets. `sender` must outlive the session. Off the real-time thread.
     [[nodiscard]] static auto open_sender(Sender& sender, Transport& transport, RtcpSessionOptions options)
         -> StatusValue<std::unique_ptr<RtcpSession>>;
     /// A session for `receiver`'s stream (configured): RRs to its RTCP endpoint, marked with
@@ -149,7 +149,7 @@ class RtcpSession
     RtcpSession(RtcpSession&&) = delete;
     auto operator=(RtcpSession&&) -> RtcpSession& = delete;
 
-    /// Send a report with SDES and BYE (RFC 3550 Sections 6.1, 6.6) and close the port, releasing a sender's hold; once.
+    /// Send a report with SDES and BYE (RFC 3550 Sections 6.1, 6.6) and close the port, ending a sender's hold; once.
     void close() noexcept;
 
     /// The port's descriptor to poll, or -1: tick() then receives.
@@ -158,12 +158,15 @@ class RtcpSession
     void on_ready(uint64_t now_ns) noexcept;
     /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1. A sender's SR goes once the packet
     /// before its own on the grid has left; one whose packet left first is passed over. A sender's SSRC last seen
-    /// sending that is gone (stopped, or replaced by a new run's) gets its BYE now. Tick at least every 5 ms.
+    /// sending that is gone (stopped, or replaced by a new run's) gets its BYE now. Tick by next_wake_ns(), and at least every 10 ms.
     void tick(uint64_t now_ns) noexcept;
     /// A sender's clock domain (null, the default: the packet's time is the sender's clock, PTP or a member
     /// interface's): each SR maps its packet's time to PTP time through it and reports the measured rate; none while
     /// the domain is not running. `timebase` must outlive the session.
     void set_timebase(itc::SeqlockValue<mediaclock::Timebase> const* const timebase) noexcept { timebase_ = timebase; }
+    /// When the session next wants a tick (PTP ns): a receiver's next report, or midway through a sender's next SR
+    /// window; nullopt when nothing is due (a sender's next run is found by the next tick).
+    [[nodiscard]] auto next_wake_ns(uint64_t now_ns) const noexcept -> std::optional<uint64_t>;
     /// When a receiver's next report is due (PTP ns); 0 before the first tick.
     [[nodiscard]] auto next_report_ns() const noexcept -> uint64_t { return next_report_ns_; }
 
@@ -198,14 +201,11 @@ class RtcpSession
     /// A receiver's RR when its cadence says, re-armed after a PTP step back.
     void schedule_receiver_report(uint64_t now_ns) noexcept;
     void send_receiver_report(uint64_t now_ns) noexcept;
-    /// A sender's SR when one is due (due_report()); the first of a held run releases it.
+    /// A sender's SR when one is due (due_report()).
     void send_due_report(uint64_t now_ns) noexcept;
     /// The packet whose SR is due for `state`'s run, or nullopt: report_index_ moved past packets that left without
     /// one, and the grid restarted for a new run or a clock that went back.
     [[nodiscard]] auto due_report(SendState const& state) noexcept -> std::optional<uint64_t>;
-    /// After the SR for the packet at `index` went (`sent`) or the port refused it: a held first packet released, and
-    /// the next SR's packet set once it went.
-    void note_report(SendState const& state, uint64_t index, bool sent) noexcept;
     /// The SR for the packet `at` names, with SDES; whether it went.
     [[nodiscard]] auto send_sender_report(SendState const& state, ReportTime const& at, uint64_t now_ns) noexcept -> bool;
     /// An empty RR, SDES and BYE for `ssrc` (RFC 3550 Sections 6.1, 6.6); whether it went.

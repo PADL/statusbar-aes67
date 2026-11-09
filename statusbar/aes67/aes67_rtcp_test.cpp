@@ -361,17 +361,15 @@ TEST(aes67_rtcp, a_sender_sends_an_ipmx_sr_and_its_cname)
     EXPECT_EQ(compound->sdes->cname, std::string_view{"bridge@10.0.0.2"});
 }
 
-TEST(aes67_rtcp, a_runs_first_packet_waits_for_its_sender_report)
+// The first packet goes a lead after the run starts: time for its SR, which the session sends at its first tick
+TEST(aes67_rtcp, a_runs_first_packet_follows_its_sender_report)
 {
     SenderRig rig;
-    for (uint64_t t = T0; t <= T0 + (40 * MS); t += MS) {
-        rig.sender.tick(index_at(t), 0);
-    }
-    EXPECT_TRUE(rig.transport.log.empty());  // held past its first place: placed again, still held
-    rig.session->tick(T0 + (40 * MS));
+    rig.sender.tick(index_at(T0), 0);
+    rig.session->tick(T0);
     EXPECT_EQ(rig.transport.log.size(), size_t{1});
     uint32_t const reported = rig.transport.log.at(0).timestamp;
-    for (uint64_t t = T0 + (41 * MS); t <= T0 + (70 * MS); t += MS) {
+    for (uint64_t t = T0 + MS; t <= T0 + (30 * MS); t += MS) {
         rig.sender.tick(index_at(t), 0);
     }
     EXPECT_TRUE(rig.transport.log.size() > 1);
@@ -379,8 +377,68 @@ TEST(aes67_rtcp, a_runs_first_packet_waits_for_its_sender_report)
     EXPECT_EQ(rig.transport.log.at(1).timestamp, reported);
 }
 
-// The media never waits on the RTCP path: a first SR the port refuses releases the held packet all the same
-TEST(aes67_rtcp, a_refused_first_sender_report_still_releases_the_run)
+// Audio never waits on RTCP: with no SR at all (the session never ticks), the run starts one lead after it began
+TEST(aes67_rtcp, a_run_starts_a_lead_after_it_began_whether_or_not_its_report_went)
+{
+    SenderRig rig;
+    for (uint64_t t = T0; t <= T0 + (30 * MS); t += MS) {
+        rig.sender.tick(index_at(t), 0);
+    }
+    auto const first = static_cast<uint32_t>(rig.sender.send_state().first_index);
+    EXPECT_FALSE(rig.transport.log.empty());
+    EXPECT_FALSE(rig.transport.log.empty() || rig.transport.log.front().rtcp);
+    EXPECT_EQ(rig.transport.log.empty() ? 0U : rig.transport.log.front().timestamp, first);
+    EXPECT_TRUE(
+        index_at(T0) + 960 - 96 <= rig.sender.send_state().first_index);  // 20 ms at 48 kHz past the newest packet due at T0
+}
+
+// A step past the held packet, more than a burst, places it afresh: its SR never names a packet that is not sent
+TEST(aes67_rtcp, a_clock_step_past_the_held_packet_places_it_afresh)
+{
+    SenderRig rig;
+    rig.sender.tick(index_at(T0), 0);
+    uint64_t const held = rig.sender.send_state().first_index;
+    rig.sender.tick(index_at(T0 + (200 * MS)), 0);  // PTP stepped 200 ms forward
+    uint64_t const placed = rig.sender.send_state().first_index;
+    EXPECT_TRUE(placed > held);
+    for (uint64_t t = T0 + (201 * MS); t <= T0 + (230 * MS); t += MS) {
+        rig.sender.tick(index_at(t), 0);
+    }
+    EXPECT_FALSE(rig.transport.log.empty());
+    EXPECT_EQ(rig.transport.log.empty() ? 0U : rig.transport.log.front().timestamp, static_cast<uint32_t>(placed));
+    EXPECT_EQ(rig.sender.counters().lost, uint64_t{0});
+}
+
+// A run paused while its first packet is held sent no RTP: no BYE for its SSRC
+TEST(aes67_rtcp, a_run_paused_before_its_first_packet_says_no_bye)
+{
+    SenderRig rig;
+    rig.sender.tick(index_at(T0), 0);
+    rig.session->tick(T0);  // its first SR
+    rig.sender.pause();
+    rig.session->tick(T0 + MS);
+    auto const byes = std::ranges::count_if(rig.transport.rtcp_out, [](auto const& bytes) {
+        auto const compound = rtp::parse_rtcp(bytes);
+        return compound && compound->bye;
+    });
+    EXPECT_EQ(byes, 0);
+    EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{0});
+}
+
+// A session wakes midway through its next SR's window, which opens when the last SR's packet leaves
+TEST(aes67_rtcp, a_sender_session_asks_to_wake_midway_through_its_next_window)
+{
+    SenderRig rig;
+    EXPECT_FALSE(rig.session->next_wake_ns(T0).has_value());  // nothing sending
+    rig.run(T0, 40);
+    auto const wake = rig.session->next_wake_ns(T0 + (40 * MS));
+    EXPECT_TRUE(wake.has_value());
+    EXPECT_TRUE(wake.value_or(0) >= T0 + (40 * MS));
+    EXPECT_TRUE(wake.value_or(0) <= T0 + (55 * MS));  // at most one and a half windows ahead
+}
+
+// The media never waits on the RTCP path: with every SR refused by the port, the run starts all the same
+TEST(aes67_rtcp, a_refused_first_sender_report_does_not_stop_the_run)
 {
     SenderRig rig;
     rig.transport.refuse_rtcp = true;
@@ -567,14 +625,14 @@ TEST(aes67_rtcp, a_paused_sender_says_bye_once_and_reports_again_when_it_sends)
 TEST(aes67_rtcp, a_pause_and_resume_between_two_ticks_still_says_bye_for_the_old_ssrc)
 {
     SenderRig rig;
-    rig.run(T0, 10);
+    rig.run(T0, 30);
     uint32_t const old = rig.sender.ssrc();
     rig.sender.pause();
-    rig.sender.tick(index_at(T0 + (11 * MS)), 0);  // resumed before the session's next tick
+    rig.sender.tick(index_at(T0 + (31 * MS)), 0);  // resumed before the session's next tick
     uint32_t const fresh = rig.sender.ssrc();
     EXPECT_NE(fresh, old);
     size_t const before = rig.transport.rtcp_out.size();
-    rig.run(T0 + (12 * MS), 20);
+    rig.run(T0 + (32 * MS), 30);
     EXPECT_TRUE(rig.transport.rtcp_out.size() >= before + 2);
     if (rig.transport.rtcp_out.size() < before + 2) {
         return;
@@ -591,9 +649,9 @@ TEST(aes67_rtcp, a_pause_and_resume_between_two_ticks_still_says_bye_for_the_old
 TEST(aes67_rtcp, a_sender_closed_while_stopped_says_bye_only_once)
 {
     SenderRig rig;
-    rig.run(T0, 10);
+    rig.run(T0, 30);
     rig.sender.pause();
-    rig.session->tick(T0 + (11 * MS));
+    rig.session->tick(T0 + (31 * MS));
     size_t const sent = rig.transport.rtcp_out.size();
     rig.session->close();
     EXPECT_EQ(rig.transport.rtcp_out.size(), sent);

@@ -174,7 +174,6 @@ void Sender::become_ready() noexcept
     paused_ = false;
     started_ = false;
     held_first_.reset();
-    released_first_.store(0, std::memory_order_relaxed);
     state_ = State::ready;
     error_.clear();
 }
@@ -246,7 +245,7 @@ auto Sender::references() const -> sdp::ReferenceClocks
 void Sender::hold_for_reports(bool const hold)
 {
     bool const was = holds_for_reports();
-    hold ? holds_.fetch_add(1, std::memory_order_relaxed) : holds_.fetch_sub(1, std::memory_order_relaxed);
+    holds_.store(hold ? holds_.load() + 1 : holds_.load() - 1);
     if (holds_for_reports() != was) {
         bump_session_version();  // session() declares IPMX, or no longer
     }
@@ -329,7 +328,6 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
         sequence_ = static_cast<uint16_t>(next_random());
         rtcp_counts_ = {};
         held_first_.reset();
-        released_first_.store(0, std::memory_order_relaxed);  // the last run's release names no packet of this one
     }
     // A transport that cannot get packets out puts the sender in error until it can.
     if (auto const send_error = transport_.send_error()) {
@@ -359,14 +357,13 @@ void Sender::place_held(uint64_t const newest) noexcept
 
 auto Sender::start_held(uint64_t const newest) noexcept -> bool
 {
-    bool const released = held_first_ && released_first_.load(std::memory_order_acquire) == *held_first_;
-    // None yet, passed unreleased, or the clock went back: placed afresh.
-    if (!held_first_ || (!released && newest >= *held_first_) || *held_first_ > held_first(newest)) {
+    uint64_t const burst = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
+    if (!held_first_ || newest > *held_first_ + burst || *held_first_ > held_first(newest)) {
         place_held(newest);
         return false;
     }
-    if (!released || newest < *held_first_) {
-        return false;
+    if (newest < *held_first_) {
+        return false;  // its SR has until then; the run starts then whether or not it went
     }
     next_index_ = run_first_ = *held_first_;
     started_ = true;

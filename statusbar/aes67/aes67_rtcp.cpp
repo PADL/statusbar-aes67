@@ -213,8 +213,10 @@ void RtcpSession::note_sending() noexcept
     if (role_ != Role::sender) {
         return;
     }
-    // The SSRC last seen sending is gone (stopped, or a new run under a new SSRC): its BYE.
-    uint32_t const sending = sender_->send_state().ssrc;
+    // The SSRC last seen sending is gone (stopped, or a new run under a new SSRC): its BYE. A run held for its first
+    // SR has sent no packet: not sending.
+    SendState const state = sender_->send_state();
+    uint32_t const sending = state.packets != 0 ? state.ssrc : 0;
     if (sending_ssrc_ != 0 && sending != sending_ssrc_) {
         bool const sent = send_bye(sending_ssrc_);
         stats_.bye_sent += sent ? 1 : 0;
@@ -285,21 +287,24 @@ void RtcpSession::send_due_report(uint64_t const now_ns) noexcept
     auto const state = sending_state();
     auto const index = state ? due_report(*state) : std::nullopt;
     auto const at = index ? report_time(*index) : std::nullopt;
-    if (!at) {
-        return;
+    if (at && send_sender_report(*state, *at, now_ns)) {
+        report_index_ = *index + report_stride_;
     }
-    bool const sent = send_sender_report(*state, *at, now_ns);
-    note_report(*state, *index, sent);
 }
 
-void RtcpSession::note_report(SendState const& state, uint64_t const index, bool const sent) noexcept
+auto RtcpSession::next_wake_ns(uint64_t const now_ns) const noexcept -> std::optional<uint64_t>
 {
-    if (index == state.first_index && state.next_index == state.first_index) {
-        sender_->release_first(index);  // its SR has gone, or the port refused it: the stream goes on regardless
+    if (role_ == Role::receiver) {
+        return next_report_ns_ != 0 ? std::optional{next_report_ns_} : std::nullopt;
     }
-    if (sent) {
-        report_index_ = index + report_stride_;
+    auto const state = sending_state();
+    if (!state || state->ssrc != report_ssrc_ || report_index_ < report_stride_) {
+        return std::nullopt;  // nothing sending, or a run not seen yet: the next tick finds it
     }
+    // Midway through the next SR's window, at the sender's rate: a wake serves every session whose window is open.
+    uint64_t const middle = report_index_ - (report_stride_ / 2);
+    uint64_t const frames = middle > state->next_index ? middle - state->next_index : 0;
+    return now_ns + (frames * mediaclock::PtpMediaClock::NS_PER_SECOND / sample_rate_);
 }
 
 auto RtcpSession::due_report(SendState const& state) noexcept -> std::optional<uint64_t>

@@ -175,13 +175,11 @@ class Sender
     /// The latest SendState, published by tick(). Any thread.
     [[nodiscard]] auto send_state() const noexcept -> SendState { return send_state_.load(); }
 
-    /// One more (`hold`) or one fewer RTCP session holding each run's first packet until release_first() (VSF TR-10-1
-    /// Section 8.10.1: the SR goes first); while any does, session() declares IPMX. A change of that bumps the session
-    /// version. Off the real-time thread.
+    /// One more (`hold`) or one fewer RTCP session: while any is open, each run's first packet goes FIRST_REPORT_LEAD_US
+    /// after the run starts, time for its SR to go first (VSF TR-10-1 Section 8.10.1), and session() declares IPMX. A
+    /// change of that bumps the session version. Off the real-time thread.
     void hold_for_reports(bool hold);
-    [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load(std::memory_order_relaxed) != 0; }
-    /// The SR for the held packet at `first_index` (SendState::first_index) has gone: the run may start there. Any thread.
-    void release_first(uint64_t const first_index) noexcept { released_first_.store(first_index, std::memory_order_release); }
+    [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load() != 0; }
 
     /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
     /// handed to the transport departing at `tick_ns`, this tick's time in the ns the sending NIC's
@@ -238,10 +236,10 @@ class Sender
     /// The newest packet due at `now_index`, next_index_ resynchronised; nullopt when none is to be sent.
     [[nodiscard]] auto newest_due(uint64_t now_index) noexcept -> std::optional<uint64_t>;
     /// Moves next_index_ toward `newest` after a start or a clock step; false to wait out a small step back, or while
-    /// a held run's first packet waits for its SR (start_held()).
+    /// a held run's first packet is not yet due (start_held()).
     [[nodiscard]] auto resync(uint64_t newest) noexcept -> bool;
-    /// While the run waits for its first SR: whether the released first packet is due at `newest`; else the held
-    /// packet, placed FIRST_REPORT_LEAD_US ahead and again when passed unreleased, is published.
+    /// Whether a held run starts at `newest`: its first packet, FIRST_REPORT_LEAD_US ahead, is due; placed afresh when
+    /// none is yet, or the clock stepped back past it or forward past a burst (its SR would name a packet never sent).
     [[nodiscard]] auto start_held(uint64_t newest) noexcept -> bool;
     /// Places the held run's first packet at held_first(`newest`) and publishes it.
     void place_held(uint64_t newest) noexcept;
@@ -286,11 +284,10 @@ class Sender
     std::atomic<uint32_t> send_offset_;
     uint32_t phase_{0};
     std::optional<ieee::VlanTag> vlan_;
-    uint64_t next_index_{0};                   ///< first frame of the next packet to send
-    uint64_t run_first_{0};                    ///< the run's first packet (real-time thread)
-    std::optional<uint64_t> held_first_;       ///< the packet a run held for its first SR starts at (real-time thread)
-    std::atomic<uint32_t> holds_{0};           ///< the RTCP sessions holding first packets (hold_for_reports())
-    std::atomic<uint64_t> released_first_{0};  ///< release_first()'s
+    uint64_t next_index_{0};              ///< first frame of the next packet to send
+    uint64_t run_first_{0};               ///< the run's first packet (real-time thread)
+    std::optional<uint64_t> held_first_;  ///< the packet a run held for its first SR starts at (real-time thread)
+    itc::SeqlockValue<uint32_t> holds_;   ///< the RTCP sessions open (hold_for_reports()): control -> real-time
     Counters counters_;
     std::error_code error_;
 };

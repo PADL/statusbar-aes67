@@ -278,11 +278,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - The SR schedule (VSF TR-10-1 §8.10.1): one SR for a run's first packet, then one every N = int(10 ms / ptime)
   packets (`REPORT_SPACING_US`; 10 at 1 ms, 80 at 125 µs), each naming its packet's RTP timestamp and sent before
   that packet and after the one N before. The sender places a run's first packet `FIRST_REPORT_LEAD_US` (20 ms)
-  ahead and holds it until the session's SR for it has gone (`release_first()`, one atomic the tick reads; no
-  syscall there); passed unreleased, it is placed again. An SR the port refuses releases it all the same (counted in
-  `send_errors`): the media never waits on the RTCP path. A domain not running holds it, as it sends nothing. Later SRs go from the reactor once the previous grid
-  packet has left (`SendState::next_index`), so the reactor must tick at least every 5 ms. One whose packet left
-  first (the reactor late) is passed over; a clock step back restarts the grid. About 100 SRs a second of about
+  ahead, publishes it (`SendState::first_index`), and sends it when due, whether or not its SR went: audio never
+  waits on RTCP. The session sends that SR at its next tick. A clock step back past the packet, or forward past
+  a burst, places it afresh, so no SR names a packet never sent. Later SRs go once the previous grid packet has left
+  (`SendState::next_index`); `next_wake_ns()` says when, midway through the next SR's window, for the caller's
+  timer. One whose packet left first (the caller late) is passed over; a clock step back restarts the grid. A run
+  paused before its first packet sent none and gets no BYE. About 100 SRs a second of about
   180 octets: 0.15 Mbit/s against a 9 Mbit/s 8-channel L24 stream.
 - One SR form: the time field is the sender's clock in the PTP truncated format (TR-10-1 §8.7: seconds mod 2³²,
   then nanoseconds) and the SR always carries the IPMX Info Block with the PCM Media Info Block. The field is PTP
@@ -318,7 +319,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   first interval, and randomises each. Receivers heard from are not counted into it.
 - Round trip: an RR echoes the middle bits of the SR's field, which for the PTP form are
   not RFC 3550's 1/65536 s units, so the sender keeps the PTP time of its last
-  `SR_HISTORY` SRs and finds the one an RR's LSR names; the RTT is arrival − that time −
+  `SR_HISTORY` SRs (128, 1.28 s of them) and finds the one an RR's LSR names; the RTT is arrival − that time −
   DLSR, resolved to DLSR's 15.26 µs.
 - Jitter (RFC 3550 §6.4.1, Appendix A.8) is computed in `Receiver::accept()` from the
   drain's index as the arrival time, so it is quantised to one tick (125 µs, 6 samples at

@@ -56,6 +56,8 @@ class Receiver
     /// any before; a sender-clocked stream's packets are learnt but dropped until it is set, and a new
     /// source clears it. Any thread.
     void set_offset(uint32_t const offset) noexcept { offset_.store(OFFSET_SET | offset, std::memory_order_release); }
+    /// Forget the offset: a sender-clocked stream's packets are dropped until set_offset() again. Any thread.
+    void clear_offset() noexcept { offset_.store(0, std::memory_order_release); }
     /// The offset in force, or nullopt while a sender-clocked stream waits for set_offset(). Any thread.
     [[nodiscard]] auto offset() const noexcept -> std::optional<uint32_t>
     {
