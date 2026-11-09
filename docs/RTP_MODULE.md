@@ -102,9 +102,11 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
   IPMX sends) passes; APP, XR and other types are skipped, as TR-10-1 §8.7 asks IPMX
   receivers to tolerate. Only the first chunk of an SDES packet is read.
 - The SR's 64-bit time field is whatever the sender wrote. The library writes only the
-  PTP truncated form (TR-10-1 §8.7 Figure 2: PTP seconds, then nanoseconds), and a reader
+  PTP truncated form (TR-10-1 §8.7 Figure 2: seconds, then nanoseconds), and a reader
   reads it as such only when the SR carries an IPMX Info Block (tag 0x5831), never by
-  looking at the values. There is no NTP form and no UTC offset.
+  looking at the values. The field is the sender's Internal Clock in that format: PTP time
+  only when the sender's `ts-refclk` names a PTP grandmaster, not with `localmac` (§10.4).
+  There is no NTP form and no UTC offset.
 - An RR's LSR echoes the middle 32 bits of the SR's field; for a PTP-form SR its low
   half is nanoseconds ÷ 65536, not 1/65536 s. A sender therefore keeps the PTP time of
   each SR it sent, finds it by the echoed LSR, and computes the round trip with

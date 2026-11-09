@@ -78,7 +78,8 @@ struct TimebaseEstimatorParams
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
-    /// RTCP sender reports (RFC 3550 Section 6.4.1), about one a second.
+    /// RTCP sender reports (RFC 3550 Section 6.4.1), fed about one a second: a faster sender's (VSF TR-10-1
+    /// Section 8.10.1: one every 10 ms) thinned to that.
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
         return TimebaseEstimatorParams{
