@@ -3,9 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// An AES67 sender: a FrameProvider's frames by sample index, sent as RTP on the sample-index grid
-/// with `mediaclk:direct=0` (or `sender`, for an index not derived from PTP), and the stream's SDP.
-/// Each packet is handed to the transport with its departure, the time of the tick that sends it.
+/// An AES67 sender: a FrameProvider's frames by sample index, sent as RTP on the sample-index grid, each departing at
+/// its tick's time, and the stream's SDP; under an RTCP session an IPMX sender (VSF TR-10-1 Section 8.10.1).
 /// configure(), clear(), the setters and session() allocate; tick() and the accessors are real-time safe.
 
 #include "statusbar/aes67/aes67_stream.hpp"
@@ -41,6 +40,8 @@ class Sender
     static constexpr uint32_t MAX_PAYLOAD = 1440;
     /// Session ids and versions are kept to 63 bits: positive in any signed reading.
     static constexpr uint64_t SESSION_ID_MASK = 0x7FFF'FFFF'FFFF'FFFFULL;
+    /// How far ahead a held run's first packet is placed, in microseconds: time for the reactor to send its SR.
+    static constexpr uint32_t FIRST_REPORT_LEAD_US = 20'000;
 
     /// `name` is the session name (s=) of session().
     Sender(StreamFormat const& format, FrameProvider provider, Transport& transport, std::string name);
@@ -107,12 +108,14 @@ class Sender
         return hash == 0 ? 1 : hash;
     }
 
-    /// The PTP grandmaster ts-refclk names; nullopt until it is known, and the
-    /// SDP then has no ts-refclk. A change bumps the session version (o=), as
-    /// configure() does.
+    /// The PTP grandmaster ts-refclk names; nullopt until it is known, and ts-refclk then names the interface's
+    /// MAC (references()). A change bumps the session version (o=), as configure() does.
     void set_grandmaster(std::optional<Grandmaster> const& grandmaster);
 
     [[nodiscard]] auto grandmaster() const noexcept -> std::optional<Grandmaster> const& { return grandmaster_; }
+    /// What session() and the Info Block put in ts-refclk: the grandmaster's references, else `localmac=` with
+    /// Transport::local_mac() (VSF TR-10-1 Section 10.4: no common reference clock), else none.
+    [[nodiscard]] auto references() const -> sdp::ReferenceClocks;
 
     /// Announce `mediaclk:sender` (true: the index tick() is given is the sender's own clock, RFC 7273
     /// Section 5) instead of `direct=0` (false, the default); a change bumps the session and Info Block
@@ -172,6 +175,14 @@ class Sender
     /// The latest SendState, published by tick(). Any thread.
     [[nodiscard]] auto send_state() const noexcept -> SendState { return send_state_.load(); }
 
+    /// One more (`hold`) or one fewer RTCP session holding each run's first packet until release_first() (VSF TR-10-1
+    /// Section 8.10.1: the SR goes first); while any does, session() declares IPMX. A change of that bumps the session
+    /// version. Off the real-time thread.
+    void hold_for_reports(bool hold);
+    [[nodiscard]] auto holds_for_reports() const noexcept -> bool { return holds_.load(std::memory_order_relaxed) != 0; }
+    /// The SR for the held packet at `first_index` (SendState::first_index) has gone: the run may start there. Any thread.
+    void release_first(uint64_t const first_index) noexcept { released_first_.store(first_index, std::memory_order_release); }
+
     /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
     /// handed to the transport departing at `tick_ns`, this tick's time in the ns the sending NIC's
     /// PHC reads (0: untimed; SendPort::send_rendered_at).
@@ -226,8 +237,16 @@ class Sender
     void become_ready() noexcept;
     /// The newest packet due at `now_index`, next_index_ resynchronised; nullopt when none is to be sent.
     [[nodiscard]] auto newest_due(uint64_t now_index) noexcept -> std::optional<uint64_t>;
-    /// Moves next_index_ toward `newest` after a start or a clock step; false to wait out a small step back.
+    /// Moves next_index_ toward `newest` after a start or a clock step; false to wait out a small step back, or while
+    /// a held run's first packet waits for its SR (start_held()).
     [[nodiscard]] auto resync(uint64_t newest) noexcept -> bool;
+    /// While the run waits for its first SR: whether the released first packet is due at `newest`; else the held
+    /// packet, placed FIRST_REPORT_LEAD_US ahead and again when passed unreleased, is published.
+    [[nodiscard]] auto start_held(uint64_t newest) noexcept -> bool;
+    /// Places the held run's first packet at held_first(`newest`) and publishes it.
+    void place_held(uint64_t newest) noexcept;
+    /// The packet a held run starts at: FIRST_REPORT_LEAD_US past `newest`, on the packet grid.
+    [[nodiscard]] auto held_first(uint64_t newest) const noexcept -> uint64_t;
     /// Sends the packets from next_index_ up to `newest`, then flushes them.
     void send_until(uint64_t newest) noexcept;
     /// Renders and queues the packet at next_index_; true when the transport accepted it.
@@ -267,7 +286,11 @@ class Sender
     std::atomic<uint32_t> send_offset_;
     uint32_t phase_{0};
     std::optional<ieee::VlanTag> vlan_;
-    uint64_t next_index_{0};  ///< first frame of the next packet to send
+    uint64_t next_index_{0};                   ///< first frame of the next packet to send
+    uint64_t run_first_{0};                    ///< the run's first packet (real-time thread)
+    std::optional<uint64_t> held_first_;       ///< the packet a run held for its first SR starts at (real-time thread)
+    std::atomic<uint32_t> holds_{0};           ///< the RTCP sessions holding first packets (hold_for_reports())
+    std::atomic<uint64_t> released_first_{0};  ///< release_first()'s
     Counters counters_;
     std::error_code error_;
 };

@@ -15,6 +15,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -42,6 +43,36 @@ Grandmaster const GRANDMASTER{.identity = *ieee::eui64_from_string("EC-46-70-FF-
 auto index_at(uint64_t const ptp_ns) -> uint64_t
 {
     return mediaclock::PtpMediaClock::make(48000)->index_at(ptp_ns);
+}
+
+/// The time of sample `index` at 48 kHz, PTP ns.
+auto time_of(uint64_t const index) -> uint64_t
+{
+    return mediaclock::PtpMediaClock::make(48000).transform([&](auto const& clock) { return clock.time_of(index); }).value_or(0);
+}
+
+/// The SR of the compound packet `bytes`; an empty one, failing the expectation, without.
+auto sr_of(std::vector<uint8_t> const& bytes) -> rtp::RtcpSenderReport
+{
+    auto const compound = rtp::parse_rtcp(bytes);
+    EXPECT_TRUE(compound.has_value() && compound->sr.has_value());
+    return compound && compound->sr ? *compound->sr : rtp::RtcpSenderReport{};
+}
+
+/// The IPMX Info Block of the SR in `bytes`; an empty one, failing the expectation, without.
+auto info_block_of(std::vector<uint8_t> const& bytes) -> rtp::IpmxInfoBlock
+{
+    auto const block = rtp::parse_ipmx_info_block(sr_of(bytes).extension);
+    EXPECT_TRUE(block.has_value());
+    return block.value_or(rtp::IpmxInfoBlock{});
+}
+
+/// The time an SR's field names, read near `reference`; 0, failing the expectation, when it does not read.
+auto sr_time(rtp::RtcpSenderReport const& sr, uint64_t const reference) -> uint64_t
+{
+    auto const at = rtp::ns_from_ptp_truncated({.seconds = sr.info.ntp_msw.get(), .nanoseconds = sr.info.ntp_lsw.get()}, reference);
+    EXPECT_TRUE(at.has_value());
+    return at.value_or(0);
 }
 
 /// The same interval every time.
@@ -91,13 +122,19 @@ class FakeTransport final : public Transport
     class Tx final : public SendPort
     {
       public:
+        explicit Tx(FakeTransport& t)
+            : transport{t}
+        {}
         auto send(rtp::RtpHeader const&, std::span<uint8_t const>) noexcept -> bool override { return true; }
-        auto send_rendered(rtp::RtpHeader const&, size_t const length, PayloadRenderer const& render) noexcept -> bool override
+        auto send_rendered(rtp::RtpHeader const& header, size_t const length, PayloadRenderer const& render) noexcept
+            -> bool override
         {
+            transport.log.push_back({.rtcp = false, .timestamp = header.timestamp.get()});
             std::vector<uint8_t> payload(length);
             return render(payload);
         }
         auto flush() noexcept -> size_t override { return 0; }
+        FakeTransport& transport;
     };
 
     class Rtcp final : public RtcpPort
@@ -120,7 +157,14 @@ class FakeTransport final : public Transport
         }
         auto send(std::span<uint8_t const> const packet) noexcept -> Status override
         {
+            if (transport.refuse_rtcp) {
+                return failure(std::errc::network_unreachable);
+            }
             transport.rtcp_out.emplace_back(packet.begin(), packet.end());
+            auto const compound = rtp::parse_rtcp(packet);
+            if (compound && compound->sr) {
+                transport.log.push_back({.rtcp = true, .timestamp = compound->sr->info.rtp_timestamp.get()});
+            }
             return success();
         }
         FakeTransport& transport;
@@ -128,11 +172,15 @@ class FakeTransport final : public Transport
     };
 
     [[nodiscard]] auto local_address() const noexcept -> IPv4Address override { return IPv4Address{10, 0, 0, 2}; }
+    [[nodiscard]] auto local_mac() const noexcept -> std::optional<ieee::Eui48> override
+    {
+        return ieee::Eui48{0x00, 0x20, 0xFC, 0x32, 0x2F, 0x40};
+    }
     auto open_receive(Endpoint const&) -> StatusValue<std::unique_ptr<ReceivePort>> override { return std::make_unique<Rx>(*this); }
     auto open_send(SendOptions const& options) -> StatusValue<std::unique_ptr<SendPort>> override
     {
         sends.push_back(options);
-        return std::make_unique<Tx>();
+        return std::make_unique<Tx>(*this);
     }
     auto open_rtcp(RtcpOptions const& options) -> StatusValue<std::unique_ptr<RtcpPort>> override
     {
@@ -146,6 +194,14 @@ class FakeTransport final : public Transport
     std::vector<std::vector<uint8_t>> rtcp_out;
     std::vector<RtcpOptions> opened;
     std::vector<SendOptions> sends;
+    bool refuse_rtcp{false};  ///< the RTCP port refuses every send
+    /// An RTP packet or SR sent, by its RTP timestamp, in the order sent.
+    struct Sent
+    {
+        bool rtcp{false};
+        uint32_t timestamp{0};
+    };
+    std::vector<Sent> log;
 };
 
 auto stream_session(Endpoint const& destination) -> sdp::Session
@@ -270,7 +326,7 @@ TEST(aes67_rtcp, media_and_rtcp_default_to_af41)
 TEST(aes67_rtcp, a_sender_sends_an_ipmx_sr_and_its_cname)
 {
     SenderRig rig;
-    rig.run(T0, 10);  // armed at T0, due at T0 + 10 ms
+    rig.run(T0, 0);  // the run's first packet is held: its SR goes at once
     EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{1});
     EXPECT_EQ(rig.session->stats().sr_sent, uint64_t{1});
     auto const compound = rtp::parse_rtcp(rig.transport.rtcp_out[0]);
@@ -279,14 +335,16 @@ TEST(aes67_rtcp, a_sender_sends_an_ipmx_sr_and_its_cname)
     auto const& sr = *compound->sr;
     EXPECT_EQ(sr.ssrc, rig.sender.ssrc());
     EXPECT_EQ(sr.blocks.count(), size_t{0});
-    EXPECT_EQ(sr.info.packet_count.get(), static_cast<uint32_t>(rig.sender.counters().packets));
-    EXPECT_EQ(sr.info.octet_count.get(), static_cast<uint32_t>(rig.sender.counters().packets * 288));
+    EXPECT_EQ(sr.info.packet_count.get(), uint32_t{0});
+    EXPECT_EQ(sr.info.octet_count.get(), uint32_t{0});
 
-    // The time field is PTP truncated time, paired exactly with the RTP timestamp.
-    auto const at = rtp::ns_from_ptp_truncated({.seconds = sr.info.ntp_msw.get(), .nanoseconds = sr.info.ntp_lsw.get()}, T0);
-    EXPECT_TRUE(at.has_value());
-    EXPECT_EQ(*at, T0 + (10 * MS));
-    EXPECT_EQ(sr.info.rtp_timestamp.get(), static_cast<uint32_t>(index_at(T0 + (10 * MS))));
+    // VSF TR-10-1 Section 8.10.1: the first packet's RTP timestamp and the time its media clock is sampled.
+    uint64_t const first = rig.sender.send_state().first_index;
+    uint64_t const at = sr_time(sr, T0);
+    EXPECT_EQ(at, time_of(first));
+    EXPECT_EQ(sr.info.rtp_timestamp.get(), static_cast<uint32_t>(first));
+    EXPECT_TRUE(at > T0);
+    EXPECT_TRUE(at <= T0 + (uint64_t{Sender::FIRST_REPORT_LEAD_US} * 1000) + MS);
 
     auto const block = rtp::parse_ipmx_info_block(sr.extension);
     EXPECT_TRUE(block.has_value());
@@ -303,17 +361,145 @@ TEST(aes67_rtcp, a_sender_sends_an_ipmx_sr_and_its_cname)
     EXPECT_EQ(compound->sdes->cname, std::string_view{"bridge@10.0.0.2"});
 }
 
+TEST(aes67_rtcp, a_runs_first_packet_waits_for_its_sender_report)
+{
+    SenderRig rig;
+    for (uint64_t t = T0; t <= T0 + (40 * MS); t += MS) {
+        rig.sender.tick(index_at(t), 0);
+    }
+    EXPECT_TRUE(rig.transport.log.empty());  // held past its first place: placed again, still held
+    rig.session->tick(T0 + (40 * MS));
+    EXPECT_EQ(rig.transport.log.size(), size_t{1});
+    uint32_t const reported = rig.transport.log.at(0).timestamp;
+    for (uint64_t t = T0 + (41 * MS); t <= T0 + (70 * MS); t += MS) {
+        rig.sender.tick(index_at(t), 0);
+    }
+    EXPECT_TRUE(rig.transport.log.size() > 1);
+    EXPECT_FALSE(rig.transport.log.at(1).rtcp);
+    EXPECT_EQ(rig.transport.log.at(1).timestamp, reported);
+}
+
+// The media never waits on the RTCP path: a first SR the port refuses releases the held packet all the same
+TEST(aes67_rtcp, a_refused_first_sender_report_still_releases_the_run)
+{
+    SenderRig rig;
+    rig.transport.refuse_rtcp = true;
+    rig.run(T0, 40);
+    EXPECT_TRUE(rig.session->stats().send_errors > 0);
+    EXPECT_TRUE(std::ranges::any_of(rig.transport.log, [](auto const& e) { return !e.rtcp; }));
+}
+
+// Each session holds the sender; IPMX is declared while any does, and its coming and going is a new session version
+TEST(aes67_rtcp, the_ipmx_declaration_follows_the_sessions_and_bumps_the_version)
+{
+    FakeTransport transport;
+    Sender sender{STEREO_L24, {}, transport, "Out"};
+    (void)sender.configure(Destination{.address = GROUP.address, .port = GROUP.port});
+    auto const version = [&] { return sender.session().value_or(sdp::Session{}).session_version; };
+    uint64_t const plain = version();
+    auto first = std::move(*RtcpSession::open_sender(sender, transport, options("a@10.0.0.2")));
+    uint64_t const held = version();
+    EXPECT_TRUE(held > plain);
+    auto second = std::move(*RtcpSession::open_sender(sender, transport, options("b@10.0.0.2")));
+    EXPECT_EQ(version(), held);
+    first->close();
+    EXPECT_TRUE(sender.holds_for_reports());  // the second still holds it
+    second->close();
+    EXPECT_FALSE(sender.holds_for_reports());
+    EXPECT_TRUE(version() > held);
+}
+
+// VSF TR-10-1 Section 8.10.1: one SR every int(10 ms / ptime) packets, each before its packet and after the last one's
+TEST(aes67_rtcp, sender_reports_go_before_their_packets_every_ten_milliseconds)
+{
+    SenderRig rig;
+    rig.run(T0, 120);
+    auto const& log = rig.transport.log;
+    auto const position = [&](bool const rtcp, uint32_t const timestamp) {
+        auto const it = std::ranges::find_if(log, [&](auto const& e) { return e.rtcp == rtcp && e.timestamp == timestamp; });
+        return it - log.begin();
+    };
+    auto const first = static_cast<uint32_t>(rig.sender.send_state().first_index);
+    size_t reports = 0;
+    for (auto const& entry : log) {
+        if (!entry.rtcp) {
+            continue;
+        }
+        uint32_t const k = (entry.timestamp - first) / 480;  // ten 1 ms packets of 48 frames
+        EXPECT_EQ(entry.timestamp, first + (k * 480));
+        EXPECT_TRUE(position(true, entry.timestamp) < position(false, entry.timestamp));
+        if (k > 0) {
+            EXPECT_TRUE(position(false, entry.timestamp - 480) < position(true, entry.timestamp));
+        }
+        ++reports;
+    }
+    EXPECT_TRUE(reports >= 9);
+    EXPECT_EQ(rig.session->stats().sr_sent, uint64_t{reports});
+}
+
+TEST(aes67_rtcp, a_late_session_passes_over_a_report_whose_packet_left)
+{
+    SenderRig rig;
+    rig.run(T0, 30);
+    size_t const before = rig.transport.log.size();
+    for (uint64_t t = T0 + (31 * MS); t <= T0 + (60 * MS); t += MS) {
+        rig.sender.tick(index_at(t), 0);
+    }
+    rig.session->tick(T0 + (60 * MS));
+    auto const& log = rig.transport.log;
+    EXPECT_TRUE(log.back().rtcp);
+    EXPECT_TRUE(log.size() > before + 1);
+    auto const first = static_cast<uint32_t>(rig.sender.send_state().first_index);
+    EXPECT_EQ((log.back().timestamp - first) % 480, uint32_t{0});
+    EXPECT_TRUE(std::ranges::none_of(log, [&](auto const& e) { return !e.rtcp && e.timestamp >= log.back().timestamp; }));
+}
+
+// VSF TR-10-1 Sections 10.1 and 10.4: an IPMX sender says so in fmtp, and names its own clock without a grandmaster
+TEST(aes67_rtcp, a_held_sender_declares_ipmx_and_names_its_mac_without_a_grandmaster)
+{
+    FakeTransport transport;
+    Sender sender{STEREO_L24, {}, transport, "Out"};
+    (void)sender.configure(Destination{.address = GROUP.address, .port = GROUP.port, .payload_type = 97});
+    EXPECT_FALSE(sender.session().value_or(sdp::Session{}).media.at(0).ipmx);
+    auto session = std::move(*RtcpSession::open_sender(sender, transport, options("bridge@10.0.0.2")));
+    auto const text = sdp::to_string(sender.session().value_or(sdp::Session{}));
+    EXPECT_TRUE(text.find("a=fmtp:97 IPMX\r\n") != std::string::npos);
+    EXPECT_TRUE(text.find("a=ts-refclk:localmac=00-20-FC-32-2F-40\r\n") != std::string::npos);
+    sender.tick(index_at(T0), 0);
+    session->tick(T0);
+    EXPECT_EQ(info_block_of(transport.rtcp_out.at(0)).ts_refclk, std::string_view{"localmac=00-20-FC-32-2F-40"});
+    session->close();
+    EXPECT_FALSE(sender.holds_for_reports());
+    auto const closed = sender.session();
+    EXPECT_TRUE(closed.has_value());
+    EXPECT_FALSE(closed && closed->media.at(0).ipmx);
+}
+
+// A member interface's output: its indices are that PTP's, so its SRs carry that time, whatever the reactor's clock reads
+TEST(aes67_rtcp, an_sr_names_its_packets_own_time_whatever_the_session_clock_reads)
+{
+    constexpr uint64_t MEMBER = 1'000'000ULL * 1'000'000'000ULL;  // a timescale near 1970, as Dante's
+    SenderRig rig;
+    for (uint64_t t = 0; t <= 30 * MS; t += MS) {
+        rig.sender.tick(index_at(MEMBER + t), 0);
+        rig.session->tick(T0 + t);
+    }
+    auto const sr = sr_of(rig.transport.rtcp_out.at(0));
+    uint64_t const first = rig.sender.send_state().first_index;
+    EXPECT_EQ(sr_time(sr, MEMBER), time_of(first));
+    EXPECT_EQ(sr.info.rtp_timestamp.get(), static_cast<uint32_t>(first));
+}
+
 TEST(aes67_rtcp, the_info_block_version_follows_the_senders_changes)
 {
     SenderRig rig;
     rig.run(T0, 10);
-    uint8_t const first = rtp::parse_ipmx_info_block(rtp::parse_rtcp(rig.transport.rtcp_out[0])->sr->extension)->version;
+    uint8_t const first = info_block_of(rig.transport.rtcp_out.at(0)).version;
     rig.sender.set_channel_order("SMPTE2110.(ST)");
-    rig.run(T0 + (11 * MS), 10);
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
-    auto const block = rtp::parse_ipmx_info_block(rtp::parse_rtcp(rig.transport.rtcp_out[1])->sr->extension);
-    EXPECT_EQ(block->version, static_cast<uint8_t>(first + 1));
-    EXPECT_EQ(block->pcm->channel_order, std::string_view{"SMPTE2110.(ST)"});
+    rig.run(T0 + (11 * MS), 30);
+    auto const block = info_block_of(rig.transport.rtcp_out.back());
+    EXPECT_EQ(block.version, static_cast<uint8_t>(first + 1));
+    EXPECT_TRUE(block.pcm.has_value() && block.pcm->channel_order == std::string_view{"SMPTE2110.(ST)"});
 }
 
 TEST(aes67_rtcp, the_default_channel_order_groups_up_to_64_channels)
@@ -347,26 +533,27 @@ TEST(aes67_rtcp, a_sender_not_sending_reports_nothing)
 TEST(aes67_rtcp, a_paused_sender_says_bye_once_and_reports_again_when_it_sends)
 {
     SenderRig rig;
-    rig.run(T0, 10);
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{1});
+    rig.run(T0, 30);
+    size_t const reported = rig.transport.rtcp_out.size();
+    EXPECT_TRUE(reported >= 2);
     uint32_t const ssrc = rig.sender.ssrc();
 
     // Stopped: a BYE at the next tick, not at the report interval, then nothing.
     rig.sender.pause();
-    rig.session->tick(T0 + (11 * MS));
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+    rig.session->tick(T0 + (31 * MS));
+    EXPECT_EQ(rig.transport.rtcp_out.size(), reported + 1);
     auto const bye = rtp::parse_rtcp(rig.transport.rtcp_out.back());
     EXPECT_TRUE(bye.has_value() && bye->bye.has_value() && bye->bye->contains(ssrc));
     EXPECT_FALSE(bye.has_value() && bye->sr.has_value());
     EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{1});
-    for (uint64_t t = T0 + (12 * MS); t <= T0 + (40 * MS); t += MS) {
+    for (uint64_t t = T0 + (32 * MS); t <= T0 + (60 * MS); t += MS) {
         rig.session->tick(t);
     }
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+    EXPECT_EQ(rig.transport.rtcp_out.size(), reported + 1);
 
     // Sending again, under a new SSRC: its SRs, and its BYE when closed.
-    rig.run(T0 + (41 * MS), 20);
-    EXPECT_TRUE(rig.transport.rtcp_out.size() >= 3);
+    rig.run(T0 + (61 * MS), 20);
+    EXPECT_TRUE(rig.transport.rtcp_out.size() >= reported + 2);
     EXPECT_NE(rig.sender.ssrc(), ssrc);
     auto const compound = rtp::parse_rtcp(rig.transport.rtcp_out.back());
     auto const* const sr = compound && compound->sr ? &*compound->sr : nullptr;
@@ -416,7 +603,7 @@ TEST(aes67_rtcp, a_sender_closed_while_stopped_says_bye_only_once)
 TEST(aes67_rtcp, a_sender_measures_the_round_trip_from_a_report_block)
 {
     SenderRig rig;
-    rig.run(T0, 10);
+    rig.run(T0, 0);
     auto const sr = rtp::parse_rtcp(rig.transport.rtcp_out[0])->sr;
     uint32_t const lsr = rtp::lsr_of(sr->info.ntp_msw.get(), sr->info.ntp_lsw.get());
 
@@ -431,7 +618,7 @@ TEST(aes67_rtcp, a_sender_measures_the_round_trip_from_a_report_block)
     rtp::RtcpWriter writer{out};
     writer.receiver_report(0xACE, std::span{&block, 1}).sdes(0xACE, "listener@10.0.0.9");
     rig.transport.rtcp_in.emplace_back(writer.bytes().begin(), writer.bytes().end());
-    rig.session->tick(T0 + (10 * MS) + 2'500'000);
+    rig.session->tick(T0 + 2'500'000);
 
     auto const& stats = rig.session->stats();
     EXPECT_EQ(stats.rr_received, uint64_t{1});
@@ -541,43 +728,48 @@ TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)
     auto domain_index = [&](uint64_t const t) {
         return clock.index_at(static_cast<uint64_t>(domain.to_domain(static_cast<int64_t>(t))));
     };
-
     SenderRig rig;
     rig.sender.set_sender_clock(true);
     rig.session->set_timebase(&timebase);
-    for (uint64_t t = T0; t <= T0 + (10 * MS); t += MS) {
-        rig.sender.tick(domain_index(t), 0);
-        rig.session->tick(t);
-    }
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{1});
-    auto const sr = rtp::parse_rtcp(rig.transport.rtcp_out[0])->sr;
-    auto const at = rtp::ns_from_ptp_truncated({.seconds = sr->info.ntp_msw.get(), .nanoseconds = sr->info.ntp_lsw.get()}, T0);
-    uint64_t const index = domain_index(T0 + (10 * MS));  // the latest at or before the report
-    EXPECT_EQ(sr->info.rtp_timestamp.get(), static_cast<uint32_t>(index));
+    auto run = [&](uint64_t const from, uint64_t const to) {
+        for (uint64_t t = from; t <= to; t += MS) {
+            rig.sender.tick(domain_index(t), 0);
+            rig.session->tick(t);
+        }
+    };
+    run(T0, T0 + (30 * MS));
+    auto const sr = sr_of(rig.transport.rtcp_out.at(0));
+    uint64_t const at = sr_time(sr, T0);
+    uint64_t const index = rig.sender.send_state().first_index;  // the held first packet's
+    EXPECT_EQ(sr.info.rtp_timestamp.get(), static_cast<uint32_t>(index));
     // The time field is the PTP time of that index, within the timebase's nanosecond.
-    int64_t const error = domain.to_domain(static_cast<int64_t>(*at)) - static_cast<int64_t>(clock.time_of(index));
-    EXPECT_TRUE(error >= -1 && error <= 1);
-    EXPECT_TRUE(*at <= T0 + (10 * MS));
+    int64_t const error = domain.to_domain(static_cast<int64_t>(at)) - static_cast<int64_t>(clock.time_of(index));
+    EXPECT_TRUE(error >= -1);
+    EXPECT_TRUE(error <= 1);
     // So a receiver in the domain reads offset 0 from it.
-    SenderReportTime const report{.rtp_timestamp = sr->info.rtp_timestamp.get(), .ptp_ns = *at};
+    SenderReportTime const report{.rtp_timestamp = sr.info.rtp_timestamp.get(), .ptp_ns = at};
     EXPECT_TRUE(sender_clock_offset(report, domain, 48000) == std::optional<uint32_t>{0});
 
-    auto const block = rtp::parse_ipmx_info_block(sr->extension);
-    EXPECT_EQ(block->mediaclk, std::string_view{"sender"});
-    EXPECT_EQ(block->ts_refclk, std::string_view{"ptp=IEEE1588-2008:EC-46-70-FF-FE-10-FF-B0:0"});
-    EXPECT_EQ(block->pcm->sampling_rate, uint32_t{48000});
-    EXPECT_EQ(block->pcm->measured_sample_rate, uint32_t{48005});  // 48004.8
-    EXPECT_EQ(block->version, rig.sender.info_block_version());
+    auto const block = info_block_of(rig.transport.rtcp_out.at(0));
+    EXPECT_EQ(block.mediaclk, std::string_view{"sender"});
+    EXPECT_EQ(block.ts_refclk, std::string_view{"ptp=IEEE1588-2008:EC-46-70-FF-FE-10-FF-B0:0"});
+    auto const pcm = block.pcm.value_or(rtp::IpmxPcmMediaInfo{});
+    EXPECT_EQ(pcm.sampling_rate, uint32_t{48000});
+    EXPECT_EQ(pcm.measured_sample_rate, uint32_t{48005});  // 48004.8
+    EXPECT_EQ(block.version, rig.sender.info_block_version());
 
     // The measured rate moving is a new Info Block version; a domain not running sends no SR.
     timebase.store(mediaclock::Timebase{.reference_ns = static_cast<int64_t>(T0), .domain_ns = domain.domain_ns, .running = true});
-    rig.session->tick(T0 + (20 * MS));
-    auto const moved = rtp::parse_ipmx_info_block(rtp::parse_rtcp(rig.transport.rtcp_out.at(1))->sr->extension);
-    EXPECT_EQ(moved->pcm->measured_sample_rate, uint32_t{48000});
-    EXPECT_EQ(moved->version, static_cast<uint8_t>(block->version + 1));
+    run(T0 + (31 * MS), T0 + (50 * MS));
+    auto const moved = info_block_of(rig.transport.rtcp_out.back());
+    EXPECT_EQ(moved.pcm.value_or(rtp::IpmxPcmMediaInfo{}).measured_sample_rate, uint32_t{48000});
+    EXPECT_EQ(moved.version, static_cast<uint8_t>(block.version + 1));
+    size_t const sent = rig.transport.rtcp_out.size();
     timebase.store(mediaclock::Timebase{});
-    rig.session->tick(T0 + (30 * MS));
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
+    for (uint64_t t = T0 + (51 * MS); t <= T0 + (80 * MS); t += MS) {
+        rig.session->tick(t);
+    }
+    EXPECT_EQ(rig.transport.rtcp_out.size(), sent);
 }
 
 TEST(aes67_rtcp, an_identity_timebase_leaves_the_sender_report_unchanged)
@@ -586,13 +778,17 @@ TEST(aes67_rtcp, an_identity_timebase_leaves_the_sender_report_unchanged)
     SenderRig rig;
     auto mapped = std::move(*RtcpSession::open_sender(rig.sender, rig.transport, options("bridge@10.0.0.2")));
     mapped->set_timebase(&timebase);
-    for (uint64_t t = T0; t <= T0 + (10 * MS); t += MS) {
+    for (uint64_t t = T0; t <= T0 + (30 * MS); t += MS) {
         rig.sender.tick(index_at(t), 0);
         rig.session->tick(t);
         mapped->tick(t);
     }
-    EXPECT_EQ(rig.transport.rtcp_out.size(), size_t{2});
-    EXPECT_TRUE(rig.transport.rtcp_out.at(0) == rig.transport.rtcp_out.at(1));
+    auto const& out = rig.transport.rtcp_out;
+    EXPECT_TRUE(out.size() >= 2);
+    EXPECT_EQ(out.size() % 2, size_t{0});
+    for (size_t i = 0; i + 1 < out.size(); i += 2) {
+        EXPECT_TRUE(out.at(i) == out.at(i + 1));
+    }
 }
 
 TEST(aes67_rtcp, a_foreign_domain_input_waits_for_a_sender_report)
