@@ -22,8 +22,10 @@ struct Timebase
     std::int64_t reference_ns{0};  ///< PTP time of the anchor, ns
     std::int64_t domain_ns{0};     ///< domain time at the anchor, ns
     double rate_offset{0.0};       ///< r: domain ns per PTP ns, minus one (1e-6 is 1 ppm)
-    std::uint32_t epoch{0};  ///< bumped at each lock (a join, or an absolute fit's re-anchor, which may jump) and each free_run()
-    bool running{false};     ///< outputs in the domain send: locked or in holdover, a follow_phase fit's always
+    /// Bumped at each lock (a join, or an absolute fit's re-anchor, which may jump) and at a free_run() of a
+    /// follow_phase fit that had locked.
+    std::uint32_t epoch{0};
+    bool running{false};        ///< outputs in the domain send: locked or in holdover, a follow_phase fit's always
     std::uint16_t restarts{0};  ///< a follow_phase fit's media clock restarts: a talker toggles mr on each change
 
     /// The provisional map before a first lock: domain time is PTP time; not running.
