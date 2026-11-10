@@ -476,28 +476,16 @@ TEST(sdp, writes_domain_zero_and_reads_both_forms)
     EXPECT_TRUE(to_string(*bare).find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0\r\n") != std::string::npos);
 }
 
-TEST(sdp, carries_the_ravenna_clock_domain)
+TEST(sdp, writes_the_ravenna_clock_domain_and_reads_past_it)
 {
     std::string text{DANTE};
     text += "a=clock-domain:PTPv2 3\r\n";
-    auto const session = parse(text);
+    auto session = parse(text);
     EXPECT_TRUE(session.has_value());
-    auto const& m = session->media.at(0);
-    EXPECT_EQ(m.clock_domain, std::optional<uint8_t>{3});
-    EXPECT_EQ(session->effective_clock_domain(m), std::optional<uint8_t>{3});
+    EXPECT_FALSE(session->media.at(0).clock_domain.has_value());  // ts-refclk names the domain
+    session->media.at(0).clock_domain = 3;
     auto const written = to_string(*session);
     EXPECT_TRUE(written.find("a=mediaclk:direct=1266592257\r\na=clock-domain:PTPv2 3\r\n") != std::string::npos);
-    EXPECT_TRUE(*parse(written) == *session);
-
-    // Session level applies to every media; other kinds and bad domains are ignored.
-    Session level;
-    level.clock_domain = 1;
-    Media media{};
-    level.media.push_back(media);
-    EXPECT_EQ(level.effective_clock_domain(level.media[0]), std::optional<uint8_t>{1});
-    std::string other{DANTE};
-    other += "a=clock-domain:IEEE1588-2002 _DFLT\r\na=clock-domain:PTPv2 200\r\n";
-    EXPECT_FALSE(parse(other)->media.at(0).clock_domain.has_value());
 }
 
 TEST(sdp, reads_and_writes_the_rtcp_port)

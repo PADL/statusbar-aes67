@@ -623,7 +623,7 @@ class Parser
         bool media_only;
         auto (Parser::*parse)(std::string_view) -> Status;
     };
-    static std::array<AttributeHandler, 10> const ATTRIBUTES;
+    static std::array<AttributeHandler, 9> const ATTRIBUTES;
 
     /// An `a=` line: a direction, or one of ATTRIBUTES; any other is ignored.
     auto attribute(std::string_view rest) -> Status
@@ -669,19 +669,6 @@ class Parser
         auto& slot = media_ != nullptr ? media_->media_clock : session_.media_clock;
         if (!slot || !slot->direct_offset || clock->direct_offset) {
             slot = *clock;
-        }
-        return success();
-    }
-
-    /// `a=clock-domain:PTPv2 <domain>`; another clock kind, or a domain out of range, is ignored.
-    auto clock_domain_attribute(std::string_view const rest) -> Status
-    {
-        if (!rest.starts_with("PTPv2 ")) {
-            return success();
-        }
-        auto const domain = parse_number<uint8_t>(rest.substr(6));
-        if (domain && *domain <= 127) {
-            (media_ != nullptr ? media_->clock_domain : session_.clock_domain) = domain;
         }
         return success();
     }
@@ -810,10 +797,9 @@ class Parser
     bool unsupported_media_{false};
 };
 
-std::array<Parser::AttributeHandler, 10> const Parser::ATTRIBUTES{{
+std::array<Parser::AttributeHandler, 9> const Parser::ATTRIBUTES{{
     {.name = "ts-refclk", .media_only = false, .parse = &Parser::ts_refclk_attribute},
     {.name = "mediaclk", .media_only = false, .parse = &Parser::mediaclk_attribute},
-    {.name = "clock-domain", .media_only = false, .parse = &Parser::clock_domain_attribute},
     {.name = "source-filter", .media_only = false, .parse = &Parser::source_filter_attribute},
     {.name = "rtpmap", .media_only = true, .parse = &Parser::rtpmap_attribute},
     {.name = "rtcp", .media_only = true, .parse = &Parser::rtcp_attribute},
