@@ -40,11 +40,14 @@ auto origin_line(std::string_view const sdp) -> std::string_view
     return line;
 }
 
-auto hash_of(std::string_view const sdp) noexcept -> uint16_t
+/// The message id hash of `sdp`, never `previous` (RFC 2974 Section 5: a modified session has a new one) nor 0,
+/// which means "no hash".
+auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -> uint16_t
 {
     auto const h = std::hash<std::string_view>{}(sdp);
     auto value = static_cast<uint16_t>(h ^ (h >> 16U) ^ (h >> 32U) ^ (h >> 48U));
-    return value == 0 ? uint16_t{1} : value;  // 0 means "no hash"
+    value = value == previous ? static_cast<uint16_t>(previous + 1) : value;
+    return value == 0 ? uint16_t{1} : value;
 }
 
 /// A version 1 header with no IPv6 origin, encryption or compression, and room for its authentication data.
@@ -160,9 +163,8 @@ void SapAnnouncer::announce(std::string const& key, sdp::Session const& session)
         if (it->sdp == text) {
             return;
         }
-        (void)send(true, *it);  // the old description goes before the new one comes
-        it->sdp = std::move(text);
-        it->hash = hash_of(it->sdp);
+        it->sdp = std::move(text);  // RFC 2974 Section 5: re-announced under a new hash, no deletion
+        it->hash = hash_of(it->sdp, it->hash);
         it->due = true;
         return;
     }

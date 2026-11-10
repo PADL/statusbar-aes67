@@ -132,21 +132,24 @@ TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
     EXPECT_TRUE(second.has_value());
     EXPECT_EQ(parse_sap_packet(*second)->message_id_hash, message->message_id_hash);
 
-    // The same session again changes nothing; a changed one is sent at once,
-    // after a deletion of the old, with a new hash.
+    // The same session again changes nothing; a changed one is a single announcement at the next tick, with a new
+    // hash and no deletion before it (RFC 2974 Section 5).
     sap.announce("aes67-out-0", session("A"));
     sap.tick(t0 + SapAnnouncer::INTERVAL_NS + 1);
     EXPECT_TRUE(listener.quiet());
     sap.announce("aes67-out-0", session("B"));
-    auto const deleted = listener.next();
-    EXPECT_TRUE(deleted.has_value());
-    EXPECT_TRUE(parse_sap_packet(*deleted)->deletion);
-    EXPECT_EQ(parse_sap_packet(*deleted)->message_id_hash, message->message_id_hash);
+    EXPECT_TRUE(listener.quiet());
     sap.tick(t0 + SapAnnouncer::INTERVAL_NS + 2);
     auto const changed = listener.next();
-    EXPECT_TRUE(changed.has_value());
-    EXPECT_NE(parse_sap_packet(*changed)->message_id_hash, message->message_id_hash);
-    EXPECT_EQ(sdp::parse(parse_sap_packet(*changed)->sdp)->name, std::string{"B"});
+    auto const update = changed ? parse_sap_packet(*changed) : std::nullopt;
+    EXPECT_TRUE(update.has_value());
+    if (!update) {
+        return;
+    }
+    EXPECT_FALSE(update->deletion);
+    EXPECT_NE(update->message_id_hash, message->message_id_hash);
+    EXPECT_EQ(sdp::parse(update->sdp)->name, std::string{"B"});
+    EXPECT_TRUE(listener.quiet());
 
     EXPECT_TRUE(sap.withdraw("aes67-out-0").has_value());
     EXPECT_EQ(sap.announced(), size_t{0});
