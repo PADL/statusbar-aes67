@@ -3,12 +3,14 @@
 
 #include "statusbar/sap/sap.hpp"
 
+#include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/sap/sap_receiver.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <format>
 #include <optional>
 #include <string>
 #include <thread>
@@ -52,7 +54,9 @@ class Listener
         address.sin_family = AF_INET;
         address.sin_port = htons(port);
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        (void)::bind(fd_.get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address));
+        if (fd_.get() >= 0) {
+            (void)::bind(fd_.get(), net::sockaddr_cast(address), sizeof(address));
+        }
     }
 
     auto next() -> std::optional<std::vector<uint8_t>>
@@ -62,6 +66,21 @@ class Listener
             auto const n = ::recv(fd_.get(), buffer.data(), buffer.size(), MSG_DONTWAIT);
             if (n > 0) {
                 return std::vector<uint8_t>(buffer.begin(), buffer.begin() + n);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        return std::nullopt;
+    }
+
+    /// The source address of the next datagram.
+    auto next_source() -> std::optional<IPv4Address>
+    {
+        for (int tries = 0; tries < 100; ++tries) {
+            std::array<uint8_t, 2048> buffer{};
+            sockaddr_in from{};
+            socklen_t length = sizeof(from);
+            if (::recvfrom(fd_.get(), buffer.data(), buffer.size(), MSG_DONTWAIT, net::sockaddr_cast(from), &length) > 0) {
+                return IPv4Address{ntohl(from.sin_addr.s_addr)};
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
@@ -326,7 +345,7 @@ TEST(sap_directory, times_out_sessions_not_reannounced)
 {
     int64_t const timeout = 10 * SapAnnouncer::INTERVAL_NS;
     SapDirectory directory{timeout};
-    EXPECT_EQ(SapDirectory::DEFAULT_TIMEOUT_NS, timeout);
+    EXPECT_TRUE(SapDirectory::DEFAULT_TIMEOUT_NS > 2 * (300'000'000'000 + 100'000'000'000));  // RFC 2974's slowest
     (void)from_origin(directory, announcement(dante_session("A", 1)), 0);
     (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2"), IPv4Address{10, 0, 0, 2}), 0);
     (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2"), IPv4Address{10, 0, 0, 2}), timeout / 20);
@@ -448,21 +467,29 @@ TEST(sap_directory, a_packet_longer_than_max_packet_is_ignored)
     EXPECT_TRUE(from_origin(directory, at_limit, 1).has_value());
 }
 
+namespace {
+
+/// An announcement of session `id` from origin 10.10.<host / 256>.<host % 256>.
+auto numbered(uint64_t const id, uint32_t const host) -> std::vector<uint8_t>
+{
+    IPv4Address const origin{10, 10, static_cast<uint8_t>(host / 256), static_cast<uint8_t>(host % 256)};
+    auto s = dante_session("S" + std::to_string(id), 1, std::format("10.10.{}.{}", host / 256, host % 256));
+    s.session_id = id;
+    return announcement(s, origin);
+}
+
+}  // namespace
+
 TEST(sap_directory, a_full_directory_evicts_the_session_announced_least_recently)
 {
     SapDirectory directory;
-    for (size_t i = 0; i < SapDirectory::MAX_SESSIONS; ++i) {
-        auto s = dante_session("S" + std::to_string(i), 1);
-        s.session_id = 1000 + i;
-        (void)from_origin(directory, announcement(s), static_cast<int64_t>(i));
+    size_t const origins = SapDirectory::MAX_SESSIONS / SapDirectory::MAX_SESSIONS_PER_ORIGIN;
+    for (uint64_t i = 0; i < SapDirectory::MAX_SESSIONS; ++i) {
+        (void)from_origin(directory, numbered(i, static_cast<uint32_t>(i % origins)), static_cast<int64_t>(i));
     }
-    // S0 re-announced: S1 is now the least recent.
-    auto first = dante_session("S0", 1);
-    first.session_id = 1000;
-    (void)from_origin(directory, announcement(first), 5000);
-    auto next = dante_session("New", 1);
-    next.session_id = 9999;
-    auto const event = from_origin(directory, announcement(next), 5001);
+    EXPECT_EQ(directory.entries().size(), SapDirectory::MAX_SESSIONS);
+    (void)from_origin(directory, numbered(0, 0), 5000);  // S0 re-announced: S1 is now the least recent
+    auto const event = from_origin(directory, numbered(9999, 200), 5001);
     EXPECT_TRUE(event.has_value());
     if (!event) {
         return;
@@ -470,9 +497,26 @@ TEST(sap_directory, a_full_directory_evicts_the_session_announced_least_recently
     EXPECT_TRUE(event->kind == SapDirectory::Kind::announced);
     EXPECT_EQ(event->evicted.value_or(SapDirectory::Entry{}).session.name, std::string{"S1"});
     EXPECT_EQ(directory.entries().size(), SapDirectory::MAX_SESSIONS);
-    EXPECT_TRUE(directory.find("New", "") != nullptr);
+    EXPECT_TRUE(directory.find("S9999", "") != nullptr);
     EXPECT_TRUE(directory.find("S0", "") != nullptr);
     EXPECT_TRUE(directory.find("S1", "") == nullptr);
+}
+
+TEST(sap_directory, one_origin_past_its_share_evicts_its_own_sessions)
+{
+    SapDirectory directory;
+    (void)from_origin(directory, numbered(1, 1), 0);  // another origin's, the least recent of all
+    for (uint64_t i = 0; i < SapDirectory::MAX_SESSIONS_PER_ORIGIN; ++i) {
+        (void)from_origin(directory, numbered(100 + i, 7), static_cast<int64_t>(i + 1));
+    }
+    auto const event = from_origin(directory, numbered(9999, 7), 5000);
+    EXPECT_TRUE(event.has_value());
+    if (!event) {
+        return;
+    }
+    EXPECT_EQ(event->evicted.value_or(SapDirectory::Entry{}).session.name, std::string{"S100"});
+    EXPECT_EQ(directory.entries().size(), SapDirectory::MAX_SESSIONS_PER_ORIGIN + 1);
+    EXPECT_TRUE(directory.find("S1", "") != nullptr);
 }
 
 TEST(sap_receiver, receives_announcements_and_deletions)
@@ -522,19 +566,34 @@ TEST(sap_receiver, an_announcement_whose_origin_is_not_its_source_is_ignored)
     std::vector<SapDirectory::Event> events;
     sap.set_handler([&events](SapDirectory::Event const& event) { events.push_back(event); });
     // Sent from 127.0.0.1, naming another host as its origin.
-    auto announcer = SapAnnouncer::open(0, IPv4Address{10, 0, 0, 9}, IPv4Address{127, 0, 0, 1}, port_of(sap.fd()));
-    EXPECT_TRUE(announcer.has_value());
-    if (!announcer) {
-        return;
-    }
-    (*announcer)->announce("out", session("Forged"));
-    (*announcer)->tick(0);
+    auto const packet = make_sap_packet(false, 1, IPv4Address{10, 0, 0, 9}, sdp::to_string(session("Forged")));
+    net::FileDescriptor const sender{::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0)};
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port_of(sap.fd()));
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    EXPECT_TRUE(::sendto(sender.get(), packet.data(), packet.size(), 0, net::sockaddr_cast(to), sizeof(to)) > 0);
     for (int tries = 0; tries < 20; ++tries) {
         sap.on_ready(0);
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
     EXPECT_TRUE(events.empty());
     EXPECT_TRUE(sap.directory().entries().empty());
+}
+
+TEST(sap, an_announcer_sends_from_its_origin)
+{
+    // Bound to its origin, 127.0.0.2: a host with several addresses sends from the one its packets name.
+    Listener listener{49877};
+    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 2}, IPv4Address{127, 0, 0, 1}, 49877);
+    EXPECT_TRUE(announcer.has_value());
+    if (!announcer) {
+        return;
+    }
+    (*announcer)->announce("out", session("From"));
+    (*announcer)->tick(0);
+    auto const from = listener.next_source();
+    EXPECT_TRUE(from == (std::optional{IPv4Address{127, 0, 0, 2}}));
 }
 
 TEST(sap_receiver, expires_on_tick)

@@ -62,6 +62,8 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 - A changed session is announced again under a new message id hash, with no deletion
   first (RFC 2974 §5); the new hash always differs from the old, and is never 0, which
   RFC 2974 reserves for "no hash".
+- `SapAnnouncer::open()` binds its socket to the origin, so its packets leave from the
+  address their origin field names, which listeners require.
 - `withdraw()` sends the deletion at once, not at the next tick, so a caller shutting
   down may withdraw and close straight away. A deletion carries only the o= line.
 - A session is known by its SDP origin (o= username, session id and address: RFC 8866
@@ -80,14 +82,16 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 - A re-announcement likewise counts only from the announcing origin, whatever its
   version: a device whose version counter restarted is read at once.
 - Timeout: RFC 2974 §3.1 says ten of the sender's intervals or an hour, whichever is
-  more. AES67 devices announce far more often than the RFC's 300 s minimum and a source
-  that is gone should show as gone within minutes, so the timeout is fixed, by default
-  ten 30 s intervals.
+  more. A source that is gone should show as gone within minutes, so the timeout is fixed,
+  by default 15 minutes: two of the RFC's slowest starting intervals (300 s, plus up to a
+  third of jitter), and thirty of AES67 devices' usual 30 s.
 - Compressed and encrypted packets, payload types other than `application/sdp` (compared
   case-insensitively), and SDP the parser refuses are ignored (`sdp::parse()` reads at most
   `Session::MAX_MEDIA` audio sections). Once `MAX_SESSIONS` are known, a new session
-  evicts the one announced least recently: the announced `Event` carries it in `evicted`,
-  and `SapReceiver` hands it to its handler first as a `Kind::evicted` event.
+  evicts the one announced least recently, and an origin holding `MAX_SESSIONS_PER_ORIGIN`
+  (128) evicts its own, so one host cannot flood out the others' sessions. The announced
+  `Event` carries the evicted entry in `evicted`, and `SapReceiver` hands it to its handler
+  first as a `Kind::evicted` event.
 - `SapReceiver` joins the administratively scoped group (AES67's) first and must succeed
   there; the organisation-local and global groups are best effort. The handler runs
   inside `on_ready()` and `tick()`: it may read `directory()` but must not destroy the

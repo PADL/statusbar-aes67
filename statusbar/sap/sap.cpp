@@ -77,14 +77,24 @@ auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -
     return true;
 }
 
-/// Connects `fd` to `destination`:`port`, so send() needs no address.
-[[nodiscard]] auto connect_to(int const fd, ip::IPv4Address const& destination, uint16_t const port) noexcept -> Status
+/// An IPv4 socket address.
+[[nodiscard]] auto socket_address(ip::IPv4Address const& address, uint16_t const port) noexcept -> sockaddr_in
 {
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(destination.to_uint32());
-    if (::connect(fd, net::sockaddr_cast(address), sizeof(address)) != 0) {
+    sockaddr_in socket{};
+    socket.sin_family = AF_INET;
+    socket.sin_port = htons(port);
+    socket.sin_addr.s_addr = htonl(address.to_uint32());
+    return socket;
+}
+
+/// Binds `fd` to `origin`, so packets leave from the address their origin field names (RFC 2974 Section 6), and
+/// connects it to `destination`:`port`, so send() needs no address.
+[[nodiscard]] auto connect_from(
+    int const fd, ip::IPv4Address const& origin, ip::IPv4Address const& destination, uint16_t const port) noexcept -> Status
+{
+    auto const from = socket_address(origin, 0);
+    auto const to = socket_address(destination, port);
+    if (::bind(fd, net::sockaddr_cast(from), sizeof(from)) != 0 || ::connect(fd, net::sockaddr_cast(to), sizeof(to)) != 0) {
         return failure(net::errno_code());
     }
     return success();
@@ -144,7 +154,7 @@ auto SapAnnouncer::open(
             return failure(set.error());
         }
     }
-    if (auto connected = connect_to(fd->get(), destination, port); !connected) {
+    if (auto connected = connect_from(fd->get(), origin, destination, port); !connected) {
         return failure(connected.error());
     }
     return std::make_unique<SapAnnouncer>(std::move(*fd), origin);

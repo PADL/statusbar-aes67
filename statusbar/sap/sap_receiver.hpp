@@ -59,11 +59,13 @@ struct OriginLine
 class SapDirectory
 {
   public:
-    /// Ten AES67 announcement intervals (300 s), short of RFC 2974 Section 3.1's hour, so a source that is gone
-    /// shows as gone within minutes.
-    static constexpr int64_t DEFAULT_TIMEOUT_NS = 10 * SapAnnouncer::INTERVAL_NS;
+    /// 15 minutes: two of RFC 2974 Section 3.1's slowest-starting intervals (300 s plus a third), short of its hour,
+    /// so a source that is gone shows as gone within minutes.
+    static constexpr int64_t DEFAULT_TIMEOUT_NS = 900'000'000'000;
     /// The most sessions kept; a new one past them evicts the one announced least recently.
     static constexpr size_t MAX_SESSIONS = 1024;
+    /// The most sessions one origin keeps; a new one past them evicts that origin's least recent.
+    static constexpr size_t MAX_SESSIONS_PER_ORIGIN = 128;
     /// The largest SAP packet read: a 1500-octet MTU's UDP payload (RFC 2974 Section 6 recommends under 1 KB).
     static constexpr size_t MAX_PACKET = 1472;
 
@@ -117,10 +119,13 @@ class SapDirectory
     [[nodiscard]] auto handle_deletion(SapMessage const& message) -> std::optional<Event>;
     /// An announcement: a new entry, or a changed one; nothing for a copy or another origin's.
     [[nodiscard]] auto handle_announcement(SapMessage const& message, int64_t now_ns) -> std::optional<Event>;
-    /// A new session, announced; in a full directory it replaces the entry announced least recently.
+    /// A new session, announced, with the entry make_room() evicted for it.
     [[nodiscard]] auto add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t now_ns) -> Event;
-    /// The entry announced least recently, removed.
-    [[nodiscard]] auto evict_oldest() -> Entry;
+    /// Room for a session from `origin`: the least recent of its own sessions once it holds MAX_SESSIONS_PER_ORIGIN,
+    /// else of all once the directory is full, removed; nullopt when there is room.
+    [[nodiscard]] auto make_room(ip::IPv4Address const& origin) -> std::optional<Entry>;
+    /// The entry at `it`, removed.
+    [[nodiscard]] auto remove_entry(std::vector<Entry>::iterator it) -> Entry;
 
     int64_t timeout_ns_;
     std::vector<Entry> entries_;
@@ -164,8 +169,8 @@ class SapReceiver final : public net::Pollable
   private:
     /// Reads one datagram into the directory; false when none is waiting.
     [[nodiscard]] auto receive_one(int64_t now_ns) -> bool;
-    /// The handler's events for `event`: its eviction, then itself.
-    void deliver(SapDirectory::Event const& event);
+    /// The handler's events for `event`, if any: its eviction, then itself.
+    void deliver(std::optional<SapDirectory::Event> const& event);
 
     net::FileDescriptor fd_;
     SapDirectory directory_;
