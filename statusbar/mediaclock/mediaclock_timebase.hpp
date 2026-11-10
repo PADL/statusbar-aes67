@@ -26,6 +26,7 @@ struct Timebase
     /// follow_phase fit that had locked.
     std::uint32_t epoch{0};
     bool running{false};        ///< outputs in the domain send: locked or in holdover, a follow_phase fit's always
+    bool locked{false};         ///< the fit is locked to its source (not before a lock, not in holdover)
     std::uint16_t restarts{0};  ///< a follow_phase fit's media clock restarts: a talker toggles mr on each change
 
     /// The provisional map before a first lock: domain time is PTP time; not running.
@@ -50,6 +51,7 @@ struct Timebase
 };
 
 static_assert(sizeof(Timebase) == 32);
+static_assert(offsetof(Timebase, locked) == 29);
 static_assert(offsetof(Timebase, restarts) == 30);
 static_assert(std::is_trivially_copyable_v<Timebase>);
 
@@ -68,16 +70,23 @@ static_assert(sizeof(ClockSample) == 24);
 /// Starting values for one kind of source (window, lock, step, holdover); tuned on the bench.
 struct TimebaseEstimatorParams
 {
-    std::uint32_t window_pairs{2048};                ///< pairs fitted, at most TimebaseEstimator::MAX_WINDOW_PAIRS
+    std::uint32_t window_pairs{2048};  ///< pairs fitted, at most TimebaseEstimator::MAX_WINDOW_PAIRS
+    /// A pair older than the newest by more than this leaves a window of over MIN_SPAN_PAIRS and lock_pairs, ns; 0: no limit.
+    std::int64_t window_span_ns{0};
     std::uint32_t lock_pairs{256};                   ///< pairs needed before the fit may lock
     std::int64_t lock_span_ns{250'000'000};          ///< PTP time those pairs must span, ns
     std::int64_t lock_rms_ns{2'000};                 ///< locked while the RMS residual is under this, ns
     double lock_rate_ppm{500.0};                     ///< and |rate offset| is under this, ppm
     std::int64_t step_threshold_ns{20'000};          ///< a residual over this is held, not fitted, ns
-    std::uint32_t step_pairs{3};                     ///< this many held in a row is a step (at most 8)
+    std::uint32_t step_pairs{3};                     ///< this many held in a row is a step
+    std::int64_t step_span_ns{0};                    ///< and they span this much PTP time, ns: one rule at any cadence
     std::int64_t reference_timeout_ns{100'000'000};  ///< no pair for this long: reference absent, ns
-    std::int64_t holdover_ns{5'000'000'000};         ///< run on the last line this long after the last good fit, ns
-    bool absolute{false};                            ///< domain time is the source's own time: each lock re-anchors, not joins
+    /// Nonzero: the timeout is this many of the window's mean pair intervals, within [reference_timeout_ns,
+    /// reference_timeout_max_ns], and the ceiling while under two pairs are held: a sender's own cadence sets it.
+    std::uint32_t timeout_intervals{0};
+    std::int64_t reference_timeout_max_ns{0};  ///< the ceiling of a cadence-derived timeout, ns
+    std::int64_t holdover_ns{5'000'000'000};   ///< run on the last line this long after the last good fit, ns
+    bool absolute{false};                      ///< domain time is the source's own time: each lock re-anchors, not joins
     /// A media clock follower (clears `absolute`): runs from the start, holds over without end, each lock landing the
     /// source's frames on its frame grid; a loss of the reference, and a lock after it, after a source discontinuity or
     /// moving domain time by over RESTART_NS, each count a restart (IEEE 1722-2016 Clause 4.4.4.3).
@@ -86,12 +95,21 @@ struct TimebaseEstimatorParams
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
-    /// RTCP sender reports (RFC 3550 Section 6.4.1), fed about one a second: a faster sender's (VSF TR-10-1
-    /// Section 8.10.1: one every 10 ms) thinned to that. 5 s outlasts an RFC 3550 sender's gap with one SR lost.
+    /// RTCP sender reports (RFC 3550 Section 6.4.1), every one fed, from RFC 3550's randomised 5 s to IPMX's 10 ms (VSF
+    /// TR-10-1 Section 8.10.1): 15 s of them (16 at least), locked on 4 spanning 2.5 s, lost after 3 mean intervals (1 to 20 s).
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
         return TimebaseEstimatorParams{
-            .window_pairs = 16, .lock_pairs = 4, .lock_span_ns = 0, .step_pairs = 2, .reference_timeout_ns = 5'000'000'000};
+            .window_pairs = 2048,
+            .window_span_ns = 15'000'000'000,
+            .lock_pairs = 4,
+            .lock_span_ns = 2'500'000'000,
+            .step_pairs = 2,
+            .step_span_ns = 2'000'000'000,
+            .reference_timeout_ns = 1'000'000'000,
+            .timeout_intervals = 3,
+            .reference_timeout_max_ns = 20'000'000'000,
+        };
     }
 
     /// A CRF stream (Milan v1.2 Section 7.3), 500 timestamps a second (48 kHz, timestamp_interval 96).
@@ -100,11 +118,15 @@ struct TimebaseEstimatorParams
         return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128};
     }
 
-    /// A CRF stream a talker follows: crf(), its rate and phase followed (follow_phase).
-    [[nodiscard]] static constexpr auto crf_follower() noexcept -> TimebaseEstimatorParams
+    /// `params` as a media clock follower: follow_phase set (a fit then ignores `absolute`).
+    [[nodiscard]] static constexpr auto follower(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams
     {
-        return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128, .follow_phase = true};
+        params.follow_phase = true;
+        return params;
     }
+
+    /// A CRF stream a talker follows: follower(crf()).
+    [[nodiscard]] static constexpr auto crf_follower() noexcept -> TimebaseEstimatorParams { return follower(crf()); }
 
     /// PHC-to-PHC cross-timestamps against a followed PTP instance, 16 a second; count is that
     /// PTP's time in ns at rate_hz 1e9, and domain time is that PTP's time (absolute).
@@ -146,8 +168,10 @@ class TimebaseEstimator
     static constexpr std::size_t MAX_WINDOW_PAIRS = 2048;
     /// A follower's lock that moves domain time by more than this is a restart, whatever came before it, ns.
     static constexpr std::int64_t RESTART_NS = 1'000;
-    /// The largest step_pairs a preset may ask for.
+    /// The largest step_pairs a preset may ask for; a step spanning more pairs restarts the window from its last ones.
     static constexpr std::size_t MAX_STEP_PAIRS = 8;
+    /// window_span_ns never trims a window to fewer pairs than this: a slow sender's fit keeps its averaging.
+    static constexpr std::size_t MIN_SPAN_PAIRS = 16;
 
     /// A fit with the given preset: window_pairs clamped to [2, MAX_WINDOW_PAIRS], step_pairs to
     /// [1, MAX_STEP_PAIRS], lock_pairs to [2, window_pairs].
@@ -170,6 +194,11 @@ class TimebaseEstimator
     /// in a new epoch, a restart once it had locked; the window dropped. Pairs fed afterwards are followed afresh.
     auto free_run(std::int64_t now_ns) noexcept -> void;
 
+    /// A follow_phase fit (else nothing) leaves its source at now_ns as free_run() does (a restart once it had locked),
+    /// then adopts another source kind's preset, clamped as constructed and kept a follower: the old source forgotten
+    /// (window, reference, epoch), the line continuous.
+    auto retune(std::int64_t now_ns, TimebaseEstimatorParams const& params) noexcept -> void;
+
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
     [[nodiscard]] auto status() const noexcept -> TimebaseEstimatorStatus;
 
@@ -191,6 +220,10 @@ class TimebaseEstimator
     };
 
     auto push(Pair const& p) noexcept -> void;
+    /// Drops the oldest pairs past window_span_ns of the newest, keeping MIN_SPAN_PAIRS and lock_pairs.
+    auto trim_span() noexcept -> void;
+    /// window_pairs, step_pairs and lock_pairs clamped to their ranges; absolute cleared on a follower.
+    [[nodiscard]] static auto clamped(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams;
     auto reset_window() noexcept -> void;
     auto source_discontinuity() noexcept -> void;
     auto refit() noexcept -> void;
@@ -204,8 +237,13 @@ class TimebaseEstimator
     [[nodiscard]] auto accept_reference(std::int64_t reference_ns) noexcept -> bool;
     /// Holds a pair off the fit when its residual says it may be a step; true when it was held.
     [[nodiscard]] auto screen_step(Pair const& p) noexcept -> bool;
-    /// Holds a step candidate; enough in a row restart the window from them (a step, once the fit was long).
+    /// Holds a step candidate; enough in a row, spanning step_span_ns, restart the window from them (a step, once the
+    /// fit was long).
     auto hold(Pair const& p) noexcept -> void;
+    /// Restarts the window from the pairs held: a step when the fit spanned lock_pairs.
+    auto confirm_step() noexcept -> void;
+    /// The time without a pair after which the reference is absent: fixed, or from the window's cadence.
+    [[nodiscard]] auto reference_timeout() const noexcept -> std::int64_t;
     /// Notes whether the reference is present at `now_ns`; pairs from before a silence are dropped.
     auto check_reference(std::int64_t now_ns) noexcept -> void;
     /// Publishes the locked line, joining it to the one in use when the lock is new; true when published.
@@ -236,9 +274,10 @@ class TimebaseEstimator
     std::array<Pair, MAX_WINDOW_PAIRS> window_{};
     std::size_t head_{0};  // index of the oldest pair
     std::size_t size_{0};
-    std::size_t pending_{0};  // pairs since the last refit
-    std::array<Pair, MAX_STEP_PAIRS> held_{};
-    std::size_t held_count_{0};
+    std::size_t pending_{0};                   // pairs since the last refit
+    std::array<Pair, MAX_STEP_PAIRS> held_{};  // the newest of the pairs held, oldest first
+    std::size_t held_count_{0};                // pairs held in a row (held_ keeps the last MAX_STEP_PAIRS)
+    std::int64_t held_first_ns_{0};            // PTP time of the first pair held
 
     bool have_reference_{false};
     std::int64_t last_reference_ns_{0};  // newest pair accepted, fitted or held

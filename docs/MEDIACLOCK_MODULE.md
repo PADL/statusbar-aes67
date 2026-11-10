@@ -45,13 +45,13 @@ loss of the reference, and the next lock after it or after a source discontinuit
   - `rtp_timestamp(index, offset)` / `index_of_rtp(timestamp, offset, reference)` — RTP timestamps under `mediaclk:direct=<offset>`.
   - `avtp_timestamp(index)` — a sample's AVTP presentation time, mod 2^32 ns.
   - `samples_per_tick()` — samples per 125 µs (AVB class A) tick: 6, 12 or 24.
-- `Timebase` — 32 bytes, trivially copyable: `reference_ns`, `domain_ns`, `rate_offset`, `epoch`, `running`, `restarts`.
+- `Timebase` — 32 bytes, trivially copyable: `reference_ns`, `domain_ns`, `rate_offset`, `epoch`, `running`, `locked` (the fit locked to its source: a consumer that reads offsets against the line waits for it), `restarts`.
   - `to_domain(t_phc)` / `from_domain(t_d)` — exact within a nanosecond over a day either side of the anchor.
   - `identity()` — domain time is PTP time, not running: the map before a first lock.
 - `ClockSample` — one pair: `reference_ns` (PTP), `count` (frames since the epoch), `rate_hz`, `epoch`.
-- `TimebaseEstimatorParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `crf_follower()`, `phc_pairs()`; `absolute` makes domain time the source's own; `follow_phase` makes a media clock follower.
+- `TimebaseEstimatorParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `crf_follower()`, `phc_pairs()`; `follower(params)` makes any of them a media clock follower (`follow_phase`); `absolute` makes domain time the source's own; `window_span_ns` bounds the window in PTP time as well as in pairs.
 - `TimebaseEstimator` — `feed(sample)` per pair, `update(now_ns)` per pass (true: publish `timebase()`), `status()`;
-  `free_run(now_ns)` stops a follower following (another clock source selected).
+  `free_run(now_ns)` stops a follower following (another clock source selected); `retune(now_ns, params)` leaves its source as `free_run()` does and gives it the new source's preset, its line continuous.
 - `TimebaseEstimatorStatus` — `locked`, `holdover`, `reference_present`, `rate_offset_ppm`, `residual_ns`, `last_step_ns`, `steps`, `outliers`, `pairs`.
 
 ## Quick example
@@ -135,7 +135,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   | Preset | Pairs/s | Window | Lock after | Step | Reference timeout | Absolute |
   |---|---|---|---|---|---|---|
   | `avb_stream()` | 1000 | 2048 pairs (2 s) | 256 pairs spanning 250 ms | 3 residuals over 20 µs | 100 ms | no |
-  | `rtcp_sender_reports()` | ~1 | 16 | 4 | 2 over 20 µs | 5 s | no |
+  | `rtcp_sender_reports()` | 0.2 to 100 | 15 s (16 to 2048 pairs) | 4 spanning 2.5 s | 2 over 20 µs | 3 mean intervals, 1 to 20 s | no |
   | `crf()` | 500 | 1024 (2 s) | 128 spanning 250 ms | 3 over 20 µs | 100 ms | no |
   | `phc_pairs()` | 16 | 64 (4 s) | 16 spanning 900 ms | 3 over 2 µs | 500 ms | yes |
 
@@ -144,8 +144,20 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   5 s after the last good fit. `crf()` assumes Milan's 48 kHz CRF with `timestamp_interval`
   96; `phc_pairs()` accepts PHC-to-PHC cross-timestamps with `count` the followed PTP time in
   ns at `rate_hz` 1e9.
-- A residual over the step threshold is held; fewer than `step_pairs` in a row are dropped
-  as outliers, `step_pairs` in a row are a step and restart the window from them. A new
+- `window_span_ns` drops a pair older than the newest by more than the span, but never below
+  `MIN_SPAN_PAIRS` (16) or `lock_pairs` pairs, so one preset fits a sender at any report rate:
+  `rtcp_sender_reports()` holds 16 reports at one a second or slower and 1500 at IPMX's 100 a second
+  (VSF TR-10-1 Section 8.10.1), which predicts the line within about 2σ/√N of the reports' noise σ.
+  Feed every report; do not thin them. With `timeout_intervals` set the reference is lost after
+  that many of the window's mean intervals (within `reference_timeout_ns` and
+  `reference_timeout_max_ns`; the ceiling under two pairs): `rtcp_sender_reports()` loses an IPMX
+  sender after 1 s and follows RFC 3550's randomised 5 s interval (Section 6.3.1) without a loss.
+  `retune()` forgets the old source's window, reference time and epoch.
+- A residual over the step threshold is held; fewer than `step_pairs` in a row, or held pairs
+  spanning less than `step_span_ns`, are dropped as outliers when the residuals return; enough of
+  both are a step and restart the window from the last `MAX_STEP_PAIRS` of them.
+  `rtcp_sender_reports()` asks 2 spanning 2 s: a 20 ms hiccup in an IPMX sender's reports is two
+  outliers, not a restart. A new
   `epoch` or `rate_hz` restarts it without counting a step. Either way the domain runs on
   its last line (holdover) until the new window locks.
 - Residuals are checked once a fit spans `lock_pairs / 8` pairs (at least 3); an outlier
@@ -171,7 +183,9 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   toggles `mr` on `restarts` alone. `follow_phase` clears `absolute`.
   `free_run(now)` drops the window and, once it had locked, joins a line at PTP's rate at `now` in
   a new epoch: a restart. Pairs fed afterwards are followed afresh. On a fit that is no follower it
-  does nothing. A follower's `running` is true from construction (its outputs always send), so a
+  does nothing. `retune(now, params)` leaves the source the same way and adopts the next source's
+  preset (`follower(params)`, clamped) with the window dropped and the line continuous: one fit
+  across a domain's sources. A follower's `running` is true from construction (its outputs always send), so a
   consumer that waits for a lock reads the epoch instead.
 - A pair whose PTP time is not after the newest one is ignored: a step backwards by more
   than the pair interval loses the pairs until they pass it.
@@ -182,5 +196,6 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 - AES67-2023 — media clock and RTP timestamp requirements.
 - RFC 7273 §5 — `mediaclk:sender`, a media clock the sender asserts.
 - RFC 3550 §6.4.1 — sender reports pairing an RTP timestamp with a wall-clock time.
+- VSF TR-10-1 §8.10.1 — IPMX sender reports, one every 10 ms.
 - Milan v1.2 §7.3 — the CRF stream.
 - [`aes67`](AES67_MODULE.md) — receivers and senders that address frames by this index.
