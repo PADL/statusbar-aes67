@@ -676,10 +676,11 @@ class Parser
     /// `a=clock-domain:PTPv2 <domain>`; another clock kind, or a domain out of range, is ignored.
     auto clock_domain_attribute(std::string_view const rest) -> Status
     {
-        if (!rest.starts_with("PTPv2 ")) {
+        static constexpr std::string_view PTPV2 = "PTPv2 ";
+        if (!rest.starts_with(PTPV2)) {
             return success();
         }
-        auto const domain = parse_number<uint8_t>(rest.substr(6));
+        auto const domain = parse_number<uint8_t>(rest.substr(PTPV2.size()));
         if (domain && *domain <= 127) {
             (media_ != nullptr ? media_->clock_domain : session_.clock_domain) = domain;
         }

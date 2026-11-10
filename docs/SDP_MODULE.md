@@ -118,7 +118,8 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   naming both keeps the direct one.
 - `clock-domain:PTPv2 <n>` duplicates an IEEE 1588 `PtpReference::domain`; RAVENNA and Dante write it
   beside `ts-refclk` and some receivers look for it, so writers set both. Other clock
-  kinds in it are not kept.
+  kinds in it, and domains past 127, are not kept; a later line at the same level replaces
+  an earlier one. Nothing here reconciles it with `ts-refclk`'s domain: that is the caller's.
 - `parse()` reads at most `Session::MAX_MEDIA` (16) audio media sections and fails
   `too_many_media` past them, so a description from the network stays small; sections it
   skips (video, other protocols) are not counted.
