@@ -671,7 +671,8 @@ TEST(mediaclock_timebase, a_brief_return_that_never_locks_is_no_restart)
     EXPECT_TRUE(fit.timebase().running);
 }
 
-// A fit that is no follower counts no restarts: its joins keep domain time continuous.
+// A fit that is no follower counts no restarts: its joins keep domain time continuous, and free_run() leaves it as
+// it is.
 TEST(mediaclock_timebase, a_continuous_fit_counts_no_restarts)
 {
     TimebaseEstimator fit{TimebaseEstimatorParams::crf()};
@@ -681,7 +682,9 @@ TEST(mediaclock_timebase, a_continuous_fit_counts_no_restarts)
     run_for(fit, source, now, 1'000 * MS);
     silent_for(fit, source, now, 1'000 * MS);
     source.restart(48000, 96, 5e-6);
+    auto const before = fit.timebase();
     fit.free_run(now);
+    EXPECT_TRUE(fit.timebase() == before && !fit.update(now));
     run_for(fit, source, now, 1'000 * MS);
     EXPECT_TRUE(fit.status().locked);
     EXPECT_EQ(fit.timebase().epoch, std::uint32_t{2});
