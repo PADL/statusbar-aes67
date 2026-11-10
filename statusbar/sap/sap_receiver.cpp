@@ -18,8 +18,6 @@ namespace statusbar::sap {
 namespace {
 
 constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
-/// Copies of one announcement closer together than this are one announcement.
-constexpr int64_t DUPLICATE_NS = 1'000'000'000;
 
 /// Reads the next line from `text`, without its CR LF or LF.
 [[nodiscard]] auto next_line(std::string_view& text) noexcept -> std::string_view
@@ -55,27 +53,16 @@ constexpr int64_t DUPLICATE_NS = 1'000'000'000;
     return message.message_id_hash != 0 && entry.message_id_hash == message.message_id_hash;
 }
 
-/// Records an announcement heard `gap` after the last; a copy (another group, another path) is not an interval.
-void note_heard(SapDirectory::Entry& entry, SapMessage const& message, int64_t const gap, int64_t const now_ns) noexcept
-{
-    if (gap >= DUPLICATE_NS) {
-        entry.interval_ns = std::max(gap, entry.last_gap_ns);  // the longer of the last two: one late burst passes
-        entry.last_gap_ns = gap;
-    }
-    entry.last_seen_ns = now_ns;
-    entry.message_id_hash = message.message_id_hash;
-}
-
-/// A re-announcement of a known entry: an event when its description changed. Only from the origin that
-/// announced it; an older version is a late copy, unless it comes after the copies' window (a reboot).
+/// A re-announcement of a known entry, from the origin that announced it: an event when its description changed,
+/// whatever its version (RFC 2974 Section 5: a change is a new message id hash).
 [[nodiscard]] auto update_entry(SapDirectory::Entry& entry, SapMessage const& message, sdp::Session session, int64_t const now_ns)
     -> std::optional<SapDirectory::Event>
 {
-    int64_t const gap = now_ns - entry.last_seen_ns;
-    if (message.origin != entry.sap_origin || (session.session_version < entry.session.session_version && gap < DUPLICATE_NS)) {
+    if (message.origin != entry.sap_origin) {
         return std::nullopt;
     }
-    note_heard(entry, message, gap, now_ns);
+    entry.last_seen_ns = now_ns;
+    entry.message_id_hash = message.message_id_hash;
     if (entry.session == session) {
         return std::nullopt;  // a re-announcement
     }
@@ -226,19 +213,11 @@ auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, ip::IPv4
     return handle(*message, now_ns);
 }
 
-auto SapDirectory::entry_timeout_ns(Entry const& entry) const noexcept -> int64_t
-{
-    if (entry.interval_ns == 0) {
-        return 2 * timeout_ns_;  // heard once: its interval unknown (an RFC 2974 sender's is 300 s or more)
-    }
-    return std::clamp(10 * entry.interval_ns, timeout_ns_, std::max(timeout_ns_, MAX_TIMEOUT_NS));
-}
-
 auto SapDirectory::expire(int64_t const now_ns) -> std::vector<Event>
 {
     std::vector<Event> events;
     std::erase_if(entries_, [&](Entry& entry) {
-        if (now_ns - entry.last_seen_ns <= entry_timeout_ns(entry)) {
+        if (now_ns - entry.last_seen_ns <= timeout_ns_) {
             return false;
         }
         events.push_back(Event{.kind = Kind::timed_out, .entry = std::move(entry)});

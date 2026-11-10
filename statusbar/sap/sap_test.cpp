@@ -291,27 +291,10 @@ TEST(sap_directory, a_stale_or_foreign_deletion_is_ignored)
     EXPECT_EQ(directory.entries().size(), size_t{1});
 }
 
-TEST(sap_directory, a_slower_announcer_gets_ten_of_its_intervals)
-{
-    int64_t const s = 1'000'000'000;
-    SapDirectory directory{300 * s};
-    (void)from_origin(directory, announcement(dante_session("Slow", 1)), 0);
-    (void)from_origin(directory, announcement(dante_session("Slow", 1)), 300 * s);        // every 300 s: ten of them
-    (void)from_origin(directory, announcement(dante_session("Slow", 1)), (300 * s) + 5);  // a copy (another group)
-    EXPECT_TRUE(directory.expire((3300 * s) + 5).empty());
-    EXPECT_EQ(directory.expire((3300 * s) + 6).size(), size_t{1});
-    // ten intervals stop at the hour
-    (void)from_origin(directory, announcement(dante_session("Rare", 1)), 0);
-    (void)from_origin(directory, announcement(dante_session("Rare", 1)), 1000 * s);
-    EXPECT_TRUE(directory.expire((1000 + 3600) * s).empty());
-    EXPECT_EQ(directory.expire(((1000 + 3600) * s) + 1).size(), size_t{1});
-}
-
-TEST(sap_directory, a_late_or_foreign_reannouncement_is_ignored)
+TEST(sap_directory, a_reannouncement_from_another_origin_is_ignored)
 {
     SapDirectory directory;
     (void)from_origin(directory, announcement(dante_session("A", 2)), 0);
-    EXPECT_FALSE(from_origin(directory, announcement(dante_session("A", 1)), 1).has_value());  // a late copy of v1
     EXPECT_FALSE(from_origin(directory, announcement(dante_session("A", 3), IPv4Address{10, 10, 32, 9}), 1).has_value());
     EXPECT_EQ(directory.entries().front().session.session_version, uint64_t{2});
     EXPECT_TRUE(directory.entries().front().sap_origin == (IPv4Address{10, 10, 32, 236}));
@@ -345,37 +328,31 @@ TEST(sap_directory, times_out_sessions_not_reannounced)
     SapDirectory directory{timeout};
     EXPECT_EQ(SapDirectory::DEFAULT_TIMEOUT_NS, timeout);
     (void)from_origin(directory, announcement(dante_session("A", 1)), 0);
-    (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2")), 0);
-    (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2")), timeout / 20);  // B re-announced
-    // B, every timeout / 20: the timeout; A, heard once: twice the timeout (its interval unknown)
-    EXPECT_TRUE(directory.expire(timeout + (timeout / 20)).empty());
-    auto const expired = directory.expire(timeout + (timeout / 20) + 1);
+    (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2"), IPv4Address{10, 0, 0, 2}), 0);
+    (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2"), IPv4Address{10, 0, 0, 2}), timeout / 20);
+    EXPECT_TRUE(directory.expire(timeout).empty());
+    auto const expired = directory.expire(timeout + 1);
     EXPECT_EQ(expired.size(), size_t{1});
-    EXPECT_TRUE(!expired.empty() && expired.front().kind == SapDirectory::Kind::timed_out);
-    EXPECT_TRUE(!expired.empty() && expired.front().entry.session.name == "B");
+    for (auto const& event : expired) {
+        EXPECT_TRUE(event.kind == SapDirectory::Kind::timed_out);
+        EXPECT_EQ(event.entry.session.name, std::string{"A"});
+    }
     EXPECT_EQ(directory.entries().size(), size_t{1});
-    EXPECT_TRUE(directory.expire(2 * timeout).empty());
-    EXPECT_EQ(directory.expire((2 * timeout) + 1).size(), size_t{1});
+    EXPECT_TRUE(directory.expire(timeout + (timeout / 20)).empty());
+    EXPECT_EQ(directory.expire(timeout + (timeout / 20) + 1).size(), size_t{1});
     EXPECT_TRUE(directory.entries().empty());
 }
 
-TEST(sap_directory, a_restarted_version_counter_and_a_late_burst)
+TEST(sap_directory, a_restarted_version_counter_is_the_session_now)
 {
-    int64_t const s = 1'000'000'000;
-    SapDirectory directory{300 * s};
+    SapDirectory directory;
     (void)from_origin(directory, announcement(dante_session("A", 9)), 0);
-    // version 1 after version 9: a late copy within a second, a reboot after
-    EXPECT_FALSE(from_origin(directory, announcement(dante_session("A", 1)), s / 2).has_value());
-    auto const rebooted = from_origin(directory, announcement(dante_session("A", 1)), 30 * s);
+    // Version 1 after version 9, changed: a sender that restarted its counter (a reboot), read as the session now.
+    auto changed = dante_session("A", 1);
+    changed.information = "rebooted";
+    auto const rebooted = from_origin(directory, announcement(changed, IPv4Address{10, 10, 32, 236}, 8), 1);
     EXPECT_TRUE(rebooted.has_value() && rebooted->entry.session.session_version == 1);
-    // every 30 s, then one 240 s late: ten of the longer of the last two gaps, for two gaps only
-    (void)from_origin(directory, announcement(dante_session("A", 1)), 60 * s);
-    (void)from_origin(directory, announcement(dante_session("A", 1)), 300 * s);  // 240 s late
-    EXPECT_TRUE(directory.expire((300 + 2400) * s).empty());
-    (void)from_origin(directory, announcement(dante_session("A", 1)), 330 * s);
-    (void)from_origin(directory, announcement(dante_session("A", 1)), 360 * s);  // gaps 30, 30: the timeout again
-    EXPECT_TRUE(directory.expire((360 + 300) * s).empty());
-    EXPECT_EQ(directory.expire(((360 + 300) * s) + 1).size(), size_t{1});
+    EXPECT_EQ(directory.entries().size(), size_t{1});
 }
 
 TEST(sap_directory, ignores_compressed_encrypted_and_other_payloads)

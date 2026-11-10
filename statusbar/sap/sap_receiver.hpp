@@ -59,12 +59,9 @@ struct OriginLine
 class SapDirectory
 {
   public:
-    /// Ten AES67 announcement intervals (300 s), short of RFC 2974 §3.1's hour so a source that is
-    /// gone shows as gone within minutes; a slower announcer gets ten of its own intervals, up to
-    /// MAX_TIMEOUT_NS, and one heard only once twice the timeout.
+    /// Ten AES67 announcement intervals (300 s), short of RFC 2974 Section 3.1's hour, so a source that is gone
+    /// shows as gone within minutes.
     static constexpr int64_t DEFAULT_TIMEOUT_NS = 10 * SapAnnouncer::INTERVAL_NS;
-    /// RFC 2974's hour: the most ten of a sender's intervals stretch the timeout to.
-    static constexpr int64_t MAX_TIMEOUT_NS = 3'600'000'000'000;
     /// The most sessions kept; a new one past them evicts the one announced least recently.
     static constexpr size_t MAX_SESSIONS = 1024;
     /// The largest SAP packet read: a 1500-octet MTU's UDP payload (RFC 2974 Section 6 recommends under 1 KB).
@@ -85,8 +82,6 @@ class SapDirectory
         ip::IPv4Address sap_origin;
         uint16_t message_id_hash{0};
         int64_t last_seen_ns{0};
-        int64_t interval_ns{0};  ///< the longer of its last two announcement gaps (0: announced once)
-        int64_t last_gap_ns{0};
     };
 
     struct Event
@@ -116,12 +111,11 @@ class SapDirectory
     [[nodiscard]] auto timeout_ns() const noexcept -> int64_t { return timeout_ns_; }
 
   private:
-    [[nodiscard]] auto entry_timeout_ns(Entry const& entry) const noexcept -> int64_t;
     /// The entry a deletion names, or end(): by its o= line when it carries one that reads, else by message id hash.
     [[nodiscard]] auto deleted_entry(SapMessage const& message) -> std::vector<Entry>::iterator;
     /// A deletion: the entry it names, removed.
     [[nodiscard]] auto handle_deletion(SapMessage const& message) -> std::optional<Event>;
-    /// An announcement: a new entry, or a changed one; nothing for a copy or a late version.
+    /// An announcement: a new entry, or a changed one; nothing for a copy or another origin's.
     [[nodiscard]] auto handle_announcement(SapMessage const& message, int64_t now_ns) -> std::optional<Event>;
     /// A new session, announced; in a full directory it replaces the entry announced least recently.
     [[nodiscard]] auto add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t now_ns) -> Event;
