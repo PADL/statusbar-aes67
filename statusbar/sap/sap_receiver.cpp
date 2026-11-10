@@ -196,25 +196,34 @@ auto SapDirectory::handle_announcement(SapMessage const& message, int64_t const 
     return add_entry(std::move(key), std::move(*session), message, now_ns);
 }
 
-auto SapDirectory::add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t const now_ns)
-    -> std::optional<Event>
+auto SapDirectory::add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t const now_ns) -> Event
 {
-    if (entries_.size() >= MAX_SESSIONS) {
-        return std::nullopt;
-    }
+    std::optional<Entry> evicted = entries_.size() >= MAX_SESSIONS ? std::optional{evict_oldest()} : std::nullopt;
     entries_.push_back(Entry{
         .key = std::move(key),
         .session = std::move(session),
         .sap_origin = message.origin,
         .message_id_hash = message.message_id_hash,
         .last_seen_ns = now_ns});
-    return Event{.kind = Kind::announced, .entry = entries_.back()};
+    return Event{.kind = Kind::announced, .entry = entries_.back(), .evicted = std::move(evicted)};
 }
 
-auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, int64_t const now_ns) -> std::optional<Event>
+auto SapDirectory::evict_oldest() -> Entry
 {
-    auto const message = parse_sap_packet(packet);
-    return message ? handle(*message, now_ns) : std::nullopt;
+    auto const oldest = std::ranges::min_element(entries_, {}, &Entry::last_seen_ns);
+    Entry entry = std::move(*oldest);
+    entries_.erase(oldest);
+    return entry;
+}
+
+auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, ip::IPv4Address const& source, int64_t const now_ns)
+    -> std::optional<Event>
+{
+    auto const message = packet.size() <= MAX_PACKET ? parse_sap_packet(packet) : std::nullopt;
+    if (!message || message->origin != source) {
+        return std::nullopt;  // too long, not SAP, or another host's origin
+    }
+    return handle(*message, now_ns);
 }
 
 auto SapDirectory::entry_timeout_ns(Entry const& entry) const noexcept -> int64_t
@@ -273,20 +282,37 @@ void SapReceiver::on_ready(int64_t const now_ns)
 {
     // A bounded batch per call: a flood must not hold the reactor.
     static constexpr int MAX_BATCH = 64;
-    thread_local std::vector<uint8_t> buffer(65536);
     for (int i = 0; i < MAX_BATCH; ++i) {
-        auto const n = ::recv(fd_.get(), buffer.data(), buffer.size(), MSG_DONTWAIT);
-        if (n < 0) {
-            if (net::was_interrupted()) {
-                continue;
-            }
-            return;  // EAGAIN, or an error (recv clears it)
-        }
-        auto event = directory_.handle_packet(std::span{buffer}.first(static_cast<size_t>(n)), now_ns);
-        if (event && handler_) {
-            handler_(*event);
+        if (!receive_one(now_ns)) {
+            return;
         }
     }
+}
+
+auto SapReceiver::receive_one(int64_t const now_ns) -> bool
+{
+    sockaddr_in from{};
+    socklen_t length = sizeof(from);
+    auto const n = ::recvfrom(fd_.get(), buffer_.data(), buffer_.size(), MSG_DONTWAIT, net::sockaddr_cast(from), &length);
+    if (n < 0) {
+        return net::was_interrupted();  // else EAGAIN, or an error (recvfrom clears it)
+    }
+    ip::IPv4Address const source{ntohl(from.sin_addr.s_addr)};
+    if (auto const event = directory_.handle_packet(std::span{buffer_}.first(static_cast<size_t>(n)), source, now_ns)) {
+        deliver(*event);
+    }
+    return true;
+}
+
+void SapReceiver::deliver(SapDirectory::Event const& event)
+{
+    if (!handler_) {
+        return;
+    }
+    if (event.evicted) {
+        handler_(SapDirectory::Event{.kind = SapDirectory::Kind::evicted, .entry = *event.evicted});
+    }
+    handler_(event);
 }
 
 void SapReceiver::tick(int64_t const now_ns)

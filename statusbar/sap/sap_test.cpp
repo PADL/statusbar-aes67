@@ -214,6 +214,14 @@ auto port_of(int const fd) -> uint16_t
     return ntohs(address.sin_port);
 }
 
+/// `packet` fed to `directory` as its origin field's host sends it.
+auto from_origin(SapDirectory& directory, std::span<uint8_t const> const packet, int64_t const now_ns)
+    -> std::optional<SapDirectory::Event>
+{
+    auto const message = parse_sap_packet(packet);
+    return directory.handle_packet(packet, message ? message->origin : IPv4Address{}, now_ns);
+}
+
 auto announcement(sdp::Session const& s, IPv4Address const& origin = IPv4Address{10, 10, 32, 236}, uint16_t const hash = 7)
     -> std::vector<uint8_t>
 {
@@ -225,59 +233,58 @@ auto announcement(sdp::Session const& s, IPv4Address const& origin = IPv4Address
 TEST(sap_directory, announce_refresh_newer_version_delete)
 {
     SapDirectory directory;
-    auto const first = directory.handle_packet(announcement(dante_session("AVIOUSBC-1 : 1", 1)), 0);
+    auto const first = from_origin(directory, announcement(dante_session("AVIOUSBC-1 : 1", 1)), 0);
     EXPECT_TRUE(first.has_value() && first->kind == SapDirectory::Kind::announced);
     EXPECT_TRUE(first && first->entry.session.name == "AVIOUSBC-1 : 1");
     EXPECT_TRUE(first && first->entry.sap_origin == (IPv4Address{10, 10, 32, 236}));
     EXPECT_EQ(directory.entries().size(), size_t{1});
 
     // the same again only refreshes
-    EXPECT_FALSE(directory.handle_packet(announcement(dante_session("AVIOUSBC-1 : 1", 1)), 1).has_value());
+    EXPECT_FALSE(from_origin(directory, announcement(dante_session("AVIOUSBC-1 : 1", 1)), 1).has_value());
     // a new version is announced again, the same session (key) kept
-    auto const newer =
-        directory.handle_packet(announcement(dante_session("AVIOUSBC-1 : 1", 2), IPv4Address{10, 10, 32, 236}, 8), 2);
+    auto const newer = from_origin(directory, announcement(dante_session("AVIOUSBC-1 : 1", 2), IPv4Address{10, 10, 32, 236}, 8), 2);
     EXPECT_TRUE(newer.has_value() && newer->kind == SapDirectory::Kind::announced);
     EXPECT_TRUE(newer && newer->entry.session.session_version == 2);
     EXPECT_EQ(directory.entries().size(), size_t{1});
 
     // another device's session of the same name is another session
-    EXPECT_TRUE(directory.handle_packet(announcement(dante_session("AVIOUSBC-1 : 1", 1, "10.10.32.248")), 3).has_value());
+    EXPECT_TRUE(from_origin(directory, announcement(dante_session("AVIOUSBC-1 : 1", 1, "10.10.32.248")), 3).has_value());
     EXPECT_EQ(directory.entries().size(), size_t{2});
 
     // a deletion carrying only the o= line (as SapAnnouncer sends)
     auto const deletion = make_sap_packet(true, 8, IPv4Address{10, 10, 32, 236}, "o=- 1234 2 IN IP4 10.10.32.236\r\n");
-    auto const deleted = directory.handle_packet(deletion, 4);
+    auto const deleted = from_origin(directory, deletion, 4);
     EXPECT_TRUE(deleted.has_value() && deleted->kind == SapDirectory::Kind::deleted);
     EXPECT_TRUE(deleted && deleted->entry.session.name == "AVIOUSBC-1 : 1");
     EXPECT_TRUE(deleted && deleted->entry.session.origin_address == "10.10.32.236");
     EXPECT_EQ(directory.entries().size(), size_t{1});
-    EXPECT_FALSE(directory.handle_packet(deletion, 5).has_value());  // already gone
+    EXPECT_FALSE(from_origin(directory, deletion, 5).has_value());  // already gone
 }
 
 TEST(sap_directory, a_stale_or_foreign_deletion_is_ignored)
 {
     SapDirectory directory;
-    (void)directory.handle_packet(announcement(dante_session("A", 2)), 0);
+    (void)from_origin(directory, announcement(dante_session("A", 2)), 0);
     // a late copy of the deletion of version 1, which the sender sent before announcing 2
     EXPECT_FALSE(
-        directory.handle_packet(make_sap_packet(true, 7, IPv4Address{10, 10, 32, 236}, "o=- 1234 1 IN IP4 10.10.32.236\r\n"), 1)
+        from_origin(directory, make_sap_packet(true, 7, IPv4Address{10, 10, 32, 236}, "o=- 1234 1 IN IP4 10.10.32.236\r\n"), 1)
             .has_value());
     // from another origin
     EXPECT_FALSE(
-        directory.handle_packet(make_sap_packet(true, 7, IPv4Address{10, 10, 32, 9}, "o=- 1234 2 IN IP4 10.10.32.236\r\n"), 1)
+        from_origin(directory, make_sap_packet(true, 7, IPv4Address{10, 10, 32, 9}, "o=- 1234 2 IN IP4 10.10.32.236\r\n"), 1)
             .has_value());
     EXPECT_EQ(directory.entries().size(), size_t{1});
     // without a payload type: the o= line straight after the header (RFC 2974: optional)
     std::vector<uint8_t> bare{0x24, 0, 0, 7, 10, 10, 32, 236};
     std::string const line = "o=- 1234 2 IN IP4 10.10.32.236\r\n";
     bare.insert(bare.end(), line.begin(), line.end());
-    auto const deleted = directory.handle_packet(bare, 2);
+    auto const deleted = from_origin(directory, bare, 2);
     EXPECT_TRUE(deleted.has_value() && deleted->kind == SapDirectory::Kind::deleted);
     EXPECT_TRUE(directory.entries().empty());
 
     // a hash of 0 names nothing
-    (void)directory.handle_packet(announcement(dante_session("B", 1), IPv4Address{10, 10, 32, 236}, 0), 3);
-    EXPECT_FALSE(directory.handle_packet(make_sap_packet(true, 0, IPv4Address{10, 10, 32, 236}, ""), 4).has_value());
+    (void)from_origin(directory, announcement(dante_session("B", 1), IPv4Address{10, 10, 32, 236}, 0), 3);
+    EXPECT_FALSE(from_origin(directory, make_sap_packet(true, 0, IPv4Address{10, 10, 32, 236}, ""), 4).has_value());
     EXPECT_EQ(directory.entries().size(), size_t{1});
 }
 
@@ -285,14 +292,14 @@ TEST(sap_directory, a_slower_announcer_gets_ten_of_its_intervals)
 {
     int64_t const s = 1'000'000'000;
     SapDirectory directory{300 * s};
-    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), 0);
-    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), 300 * s);        // every 300 s: ten of them
-    (void)directory.handle_packet(announcement(dante_session("Slow", 1)), (300 * s) + 5);  // a copy (another group)
+    (void)from_origin(directory, announcement(dante_session("Slow", 1)), 0);
+    (void)from_origin(directory, announcement(dante_session("Slow", 1)), 300 * s);        // every 300 s: ten of them
+    (void)from_origin(directory, announcement(dante_session("Slow", 1)), (300 * s) + 5);  // a copy (another group)
     EXPECT_TRUE(directory.expire((3300 * s) + 5).empty());
     EXPECT_EQ(directory.expire((3300 * s) + 6).size(), size_t{1});
     // ten intervals stop at the hour
-    (void)directory.handle_packet(announcement(dante_session("Rare", 1)), 0);
-    (void)directory.handle_packet(announcement(dante_session("Rare", 1)), 1000 * s);
+    (void)from_origin(directory, announcement(dante_session("Rare", 1)), 0);
+    (void)from_origin(directory, announcement(dante_session("Rare", 1)), 1000 * s);
     EXPECT_TRUE(directory.expire((1000 + 3600) * s).empty());
     EXPECT_EQ(directory.expire(((1000 + 3600) * s) + 1).size(), size_t{1});
 }
@@ -300,9 +307,9 @@ TEST(sap_directory, a_slower_announcer_gets_ten_of_its_intervals)
 TEST(sap_directory, a_late_or_foreign_reannouncement_is_ignored)
 {
     SapDirectory directory;
-    (void)directory.handle_packet(announcement(dante_session("A", 2)), 0);
-    EXPECT_FALSE(directory.handle_packet(announcement(dante_session("A", 1)), 1).has_value());  // a late copy of v1
-    EXPECT_FALSE(directory.handle_packet(announcement(dante_session("A", 3), IPv4Address{10, 10, 32, 9}), 1).has_value());
+    (void)from_origin(directory, announcement(dante_session("A", 2)), 0);
+    EXPECT_FALSE(from_origin(directory, announcement(dante_session("A", 1)), 1).has_value());  // a late copy of v1
+    EXPECT_FALSE(from_origin(directory, announcement(dante_session("A", 3), IPv4Address{10, 10, 32, 9}), 1).has_value());
     EXPECT_EQ(directory.entries().front().session.session_version, uint64_t{2});
     EXPECT_TRUE(directory.entries().front().sap_origin == (IPv4Address{10, 10, 32, 236}));
 
@@ -313,18 +320,18 @@ TEST(sap_directory, a_late_or_foreign_reannouncement_is_ignored)
     packet.insert(packet.end(), type.begin(), type.end());
     packet.push_back(0);
     packet.insert(packet.end(), text.begin(), text.end());
-    EXPECT_TRUE(directory.handle_packet(packet, 2).has_value());
+    EXPECT_TRUE(from_origin(directory, packet, 2).has_value());
     // a deletion whose o= line does not read names nothing, whatever its hash
     EXPECT_FALSE(
-        directory.handle_packet(make_sap_packet(true, 1, IPv4Address{10, 0, 0, 2}, "o=- x 1 IN IP4 10.0.0.2\r\n"), 3).has_value());
+        from_origin(directory, make_sap_packet(true, 1, IPv4Address{10, 0, 0, 2}, "o=- x 1 IN IP4 10.0.0.2\r\n"), 3).has_value());
     EXPECT_EQ(directory.entries().size(), size_t{2});
 }
 
 TEST(sap_directory, deletion_by_origin_and_hash)
 {
     SapDirectory directory;
-    (void)directory.handle_packet(announcement(dante_session("A", 1), IPv4Address{10, 0, 0, 1}, 0x1234), 0);
-    auto const deleted = directory.handle_packet(make_sap_packet(true, 0x1234, IPv4Address{10, 0, 0, 1}, ""), 1);
+    (void)from_origin(directory, announcement(dante_session("A", 1), IPv4Address{10, 0, 0, 1}, 0x1234), 0);
+    auto const deleted = from_origin(directory, make_sap_packet(true, 0x1234, IPv4Address{10, 0, 0, 1}, ""), 1);
     EXPECT_TRUE(deleted.has_value() && deleted->kind == SapDirectory::Kind::deleted);
     EXPECT_TRUE(directory.entries().empty());
 }
@@ -334,9 +341,9 @@ TEST(sap_directory, times_out_sessions_not_reannounced)
     int64_t const timeout = 10 * SapAnnouncer::INTERVAL_NS;
     SapDirectory directory{timeout};
     EXPECT_EQ(SapDirectory::DEFAULT_TIMEOUT_NS, timeout);
-    (void)directory.handle_packet(announcement(dante_session("A", 1)), 0);
-    (void)directory.handle_packet(announcement(dante_session("B", 1, "10.0.0.2")), 0);
-    (void)directory.handle_packet(announcement(dante_session("B", 1, "10.0.0.2")), timeout / 20);  // B re-announced
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 0);
+    (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2")), 0);
+    (void)from_origin(directory, announcement(dante_session("B", 1, "10.0.0.2")), timeout / 20);  // B re-announced
     // B, every timeout / 20: the timeout; A, heard once: twice the timeout (its interval unknown)
     EXPECT_TRUE(directory.expire(timeout + (timeout / 20)).empty());
     auto const expired = directory.expire(timeout + (timeout / 20) + 1);
@@ -353,17 +360,17 @@ TEST(sap_directory, a_restarted_version_counter_and_a_late_burst)
 {
     int64_t const s = 1'000'000'000;
     SapDirectory directory{300 * s};
-    (void)directory.handle_packet(announcement(dante_session("A", 9)), 0);
+    (void)from_origin(directory, announcement(dante_session("A", 9)), 0);
     // version 1 after version 9: a late copy within a second, a reboot after
-    EXPECT_FALSE(directory.handle_packet(announcement(dante_session("A", 1)), s / 2).has_value());
-    auto const rebooted = directory.handle_packet(announcement(dante_session("A", 1)), 30 * s);
+    EXPECT_FALSE(from_origin(directory, announcement(dante_session("A", 1)), s / 2).has_value());
+    auto const rebooted = from_origin(directory, announcement(dante_session("A", 1)), 30 * s);
     EXPECT_TRUE(rebooted.has_value() && rebooted->entry.session.session_version == 1);
     // every 30 s, then one 240 s late: ten of the longer of the last two gaps, for two gaps only
-    (void)directory.handle_packet(announcement(dante_session("A", 1)), 60 * s);
-    (void)directory.handle_packet(announcement(dante_session("A", 1)), 300 * s);  // 240 s late
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 60 * s);
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 300 * s);  // 240 s late
     EXPECT_TRUE(directory.expire((300 + 2400) * s).empty());
-    (void)directory.handle_packet(announcement(dante_session("A", 1)), 330 * s);
-    (void)directory.handle_packet(announcement(dante_session("A", 1)), 360 * s);  // gaps 30, 30: the timeout again
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 330 * s);
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 360 * s);  // gaps 30, 30: the timeout again
     EXPECT_TRUE(directory.expire((360 + 300) * s).empty());
     EXPECT_EQ(directory.expire(((360 + 300) * s) + 1).size(), size_t{1});
 }
@@ -376,8 +383,8 @@ TEST(sap_directory, ignores_compressed_encrypted_and_other_payloads)
     compressed[0] |= 0x01U;
     auto encrypted = packet;
     encrypted[0] |= 0x02U;
-    EXPECT_FALSE(directory.handle_packet(compressed, 0).has_value());
-    EXPECT_FALSE(directory.handle_packet(encrypted, 0).has_value());
+    EXPECT_FALSE(from_origin(directory, compressed, 0).has_value());
+    EXPECT_FALSE(from_origin(directory, encrypted, 0).has_value());
 
     // another payload type
     std::string const text = sdp::to_string(dante_session("A", 1));
@@ -386,34 +393,32 @@ TEST(sap_directory, ignores_compressed_encrypted_and_other_payloads)
     other.insert(other.end(), type.begin(), type.end());
     other.push_back(0);
     other.insert(other.end(), text.begin(), text.end());
-    EXPECT_FALSE(directory.handle_packet(other, 0).has_value());
+    EXPECT_FALSE(from_origin(directory, other, 0).has_value());
     // SDP the parser refuses
-    EXPECT_FALSE(directory.handle_packet(make_sap_packet(false, 1, IPv4Address{10, 0, 0, 1}, "v=0\r\nbogus\r\n"), 0).has_value());
+    EXPECT_FALSE(from_origin(directory, make_sap_packet(false, 1, IPv4Address{10, 0, 0, 1}, "v=0\r\nbogus\r\n"), 0).has_value());
     EXPECT_TRUE(directory.entries().empty());
 
     // no payload type at all is SDP (RFC 2974: optional)
     std::vector<uint8_t> bare{0x20, 0, 0, 1, 10, 0, 0, 1};
     bare.insert(bare.end(), text.begin(), text.end());
-    EXPECT_TRUE(directory.handle_packet(bare, 0).has_value());
+    EXPECT_TRUE(from_origin(directory, bare, 0).has_value());
     // authentication data is skipped
     std::vector<uint8_t> authenticated{0x20, 1, 0, 2, 10, 0, 0, 2, 0xDE, 0xAD, 0xBE, 0xEF};
     std::string const text2 = sdp::to_string(dante_session("B", 1, "10.0.0.2"));
     authenticated.insert(authenticated.end(), SAP_PAYLOAD_TYPE.begin(), SAP_PAYLOAD_TYPE.end());
     authenticated.push_back(0);
     authenticated.insert(authenticated.end(), text2.begin(), text2.end());
-    EXPECT_TRUE(directory.handle_packet(authenticated, 0).has_value());
+    EXPECT_TRUE(from_origin(directory, authenticated, 0).has_value());
     EXPECT_EQ(directory.entries().size(), size_t{2});
 }
 
 TEST(sap_directory, finds_by_name_and_origin)
 {
     SapDirectory directory;
-    (void)directory.handle_packet(
-        announcement(dante_session("AVIOUSBC-1 : 1", 1, "10.10.32.248"), IPv4Address{10, 10, 32, 248}), 0);
-    (void)directory.handle_packet(
-        announcement(dante_session("AVIOUSBC-1 : 1", 1, "10.10.32.236"), IPv4Address{10, 10, 32, 236}), 0);
+    (void)from_origin(directory, announcement(dante_session("AVIOUSBC-1 : 1", 1, "10.10.32.248"), IPv4Address{10, 10, 32, 248}), 0);
+    (void)from_origin(directory, announcement(dante_session("AVIOUSBC-1 : 1", 1, "10.10.32.236"), IPv4Address{10, 10, 32, 236}), 0);
     // a host name in o= is matched by the SAP origin
-    (void)directory.handle_packet(announcement(dante_session("Named", 1, "avio.local"), IPv4Address{10, 10, 32, 9}), 0);
+    (void)from_origin(directory, announcement(dante_session("Named", 1, "avio.local"), IPv4Address{10, 10, 32, 9}), 0);
     auto const* any = directory.find("AVIOUSBC-1 : 1", "");
     EXPECT_TRUE(any != nullptr && any->session.origin_address == "10.10.32.248");
     auto const* pinned = directory.find("AVIOUSBC-1 : 1", "10.10.32.236");
@@ -431,7 +436,66 @@ TEST(sap_directory, finds_by_name_and_origin)
     EXPECT_FALSE(origin_line_of("s=nothing\n").has_value());
 }
 
-TEST(sap_receiver, hears_announcements_and_deletions)
+TEST(sap_directory, a_forged_origin_announcement_or_deletion_is_ignored)
+{
+    SapDirectory directory;
+    IPv4Address const origin{10, 10, 32, 236};
+    IPv4Address const forger{10, 10, 32, 9};
+    EXPECT_FALSE(directory.handle_packet(announcement(dante_session("A", 1), origin), forger, 0).has_value());
+    EXPECT_TRUE(directory.entries().empty());
+    EXPECT_TRUE(directory.handle_packet(announcement(dante_session("A", 1), origin), origin, 1).has_value());
+    auto const deletion = make_sap_packet(true, 7, origin, "o=- 1234 1 IN IP4 10.10.32.236\r\n");
+    EXPECT_FALSE(directory.handle_packet(deletion, forger, 2).has_value());
+    EXPECT_EQ(directory.entries().size(), size_t{1});
+    auto const changed = announcement(dante_session("A", 2), origin, 8);
+    EXPECT_FALSE(directory.handle_packet(changed, forger, 3).has_value());
+    EXPECT_EQ(directory.entries().front().session.session_version, uint64_t{1});
+    EXPECT_TRUE(directory.handle_packet(deletion, origin, 4).has_value());
+}
+
+TEST(sap_directory, a_packet_longer_than_max_packet_is_ignored)
+{
+    SapDirectory directory;
+    auto s = dante_session("Long", 1);
+    auto const fits = announcement(s);
+    s.information = std::string(SapDirectory::MAX_PACKET + 1 - fits.size() + 1, 'x');  // one octet over, after "i="
+    auto const long_packet = announcement(s);
+    EXPECT_TRUE(long_packet.size() > SapDirectory::MAX_PACKET);
+    EXPECT_FALSE(from_origin(directory, long_packet, 0).has_value());
+    s.information.resize(s.information.size() - (long_packet.size() - SapDirectory::MAX_PACKET));
+    auto const at_limit = announcement(s);
+    EXPECT_EQ(at_limit.size(), SapDirectory::MAX_PACKET);
+    EXPECT_TRUE(from_origin(directory, at_limit, 1).has_value());
+}
+
+TEST(sap_directory, a_full_directory_evicts_the_session_announced_least_recently)
+{
+    SapDirectory directory;
+    for (size_t i = 0; i < SapDirectory::MAX_SESSIONS; ++i) {
+        auto s = dante_session("S" + std::to_string(i), 1);
+        s.session_id = 1000 + i;
+        (void)from_origin(directory, announcement(s), static_cast<int64_t>(i));
+    }
+    // S0 re-announced: S1 is now the least recent.
+    auto first = dante_session("S0", 1);
+    first.session_id = 1000;
+    (void)from_origin(directory, announcement(first), 5000);
+    auto next = dante_session("New", 1);
+    next.session_id = 9999;
+    auto const event = from_origin(directory, announcement(next), 5001);
+    EXPECT_TRUE(event.has_value());
+    if (!event) {
+        return;
+    }
+    EXPECT_TRUE(event->kind == SapDirectory::Kind::announced);
+    EXPECT_EQ(event->evicted.value_or(SapDirectory::Entry{}).session.name, std::string{"S1"});
+    EXPECT_EQ(directory.entries().size(), SapDirectory::MAX_SESSIONS);
+    EXPECT_TRUE(directory.find("New", "") != nullptr);
+    EXPECT_TRUE(directory.find("S0", "") != nullptr);
+    EXPECT_TRUE(directory.find("S1", "") == nullptr);
+}
+
+TEST(sap_receiver, receives_announcements_and_deletions)
 {
     auto receiver = SapReceiver::open(0, {}, 0);
     EXPECT_TRUE(receiver.has_value());
@@ -465,6 +529,32 @@ TEST(sap_receiver, hears_announcements_and_deletions)
     EXPECT_TRUE(events.size() == 2 && events.back().kind == SapDirectory::Kind::deleted);
     EXPECT_TRUE(sap.directory().entries().empty());
     EXPECT_FALSE(sap.finished());
+}
+
+TEST(sap_receiver, an_announcement_whose_origin_is_not_its_source_is_ignored)
+{
+    auto receiver = SapReceiver::open(0, {}, 0);
+    EXPECT_TRUE(receiver.has_value());
+    if (!receiver) {
+        return;
+    }
+    auto& sap = **receiver;
+    std::vector<SapDirectory::Event> events;
+    sap.set_handler([&events](SapDirectory::Event const& event) { events.push_back(event); });
+    // Sent from 127.0.0.1, naming another host as its origin.
+    auto announcer = SapAnnouncer::open(0, IPv4Address{10, 0, 0, 9}, IPv4Address{127, 0, 0, 1}, port_of(sap.fd()));
+    EXPECT_TRUE(announcer.has_value());
+    if (!announcer) {
+        return;
+    }
+    (*announcer)->announce("out", session("Forged"));
+    (*announcer)->tick(0);
+    for (int tries = 0; tries < 20; ++tries) {
+        sap.on_ready(0);
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    EXPECT_TRUE(events.empty());
+    EXPECT_TRUE(sap.directory().entries().empty());
 }
 
 TEST(sap_receiver, expires_on_tick)

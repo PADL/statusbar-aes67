@@ -65,14 +65,17 @@ class SapDirectory
     static constexpr int64_t DEFAULT_TIMEOUT_NS = 10 * SapAnnouncer::INTERVAL_NS;
     /// RFC 2974's hour: the most ten of a sender's intervals stretch the timeout to.
     static constexpr int64_t MAX_TIMEOUT_NS = 3'600'000'000'000;
-    /// The most sessions kept; announcements of more are ignored.
+    /// The most sessions kept; a new one past them evicts the one announced least recently.
     static constexpr size_t MAX_SESSIONS = 1024;
+    /// The largest SAP packet read: a 1500-octet MTU's UDP payload (RFC 2974 Section 6 recommends under 1 KB).
+    static constexpr size_t MAX_PACKET = 1472;
 
     enum class Kind : uint8_t
     {
         announced,  ///< new, or changed
         deleted,    ///< a SAP deletion
         timed_out,  ///< not re-announced within the timeout
+        evicted,    ///< removed from a full directory for a new session
     };
 
     struct Entry
@@ -89,17 +92,20 @@ class SapDirectory
     struct Event
     {
         Kind kind{Kind::announced};
-        Entry entry;  ///< for deleted and timed_out, as it was last announced
+        Entry entry;                   ///< for deleted, timed_out and evicted, as it was last announced
+        std::optional<Entry> evicted;  ///< announced into a full directory: the entry it replaced (Kind::evicted)
     };
 
     explicit SapDirectory(int64_t const timeout_ns = DEFAULT_TIMEOUT_NS) noexcept
         : timeout_ns_{timeout_ns}
     {}
 
-    /// A parsed SAP packet at `now_ns`: the event it makes, if any.
+    /// A parsed SAP packet at `now_ns`: the event it makes, if any. Trusts `message.origin`.
     [[nodiscard]] auto handle(SapMessage const& message, int64_t now_ns) -> std::optional<Event>;
-    /// parse_sap_packet() and handle().
-    [[nodiscard]] auto handle_packet(std::span<uint8_t const> packet, int64_t now_ns) -> std::optional<Event>;
+    /// parse_sap_packet() and handle() for a packet from `source`, its IP source address: nothing for one longer than
+    /// MAX_PACKET or whose origin field is another address (RFC 2974 Section 6: the originating source).
+    [[nodiscard]] auto handle_packet(std::span<uint8_t const> packet, ip::IPv4Address const& source, int64_t now_ns)
+        -> std::optional<Event>;
     /// The sessions not re-announced within the timeout at `now_ns`, removed.
     [[nodiscard]] auto expire(int64_t now_ns) -> std::vector<Event>;
 
@@ -115,11 +121,12 @@ class SapDirectory
     [[nodiscard]] auto deleted_entry(SapMessage const& message) -> std::vector<Entry>::iterator;
     /// A deletion: the entry it names, removed.
     [[nodiscard]] auto handle_deletion(SapMessage const& message) -> std::optional<Event>;
-    /// An announcement: a new entry, or a changed one; nothing for a copy, a late version or a full directory.
+    /// An announcement: a new entry, or a changed one; nothing for a copy or a late version.
     [[nodiscard]] auto handle_announcement(SapMessage const& message, int64_t now_ns) -> std::optional<Event>;
-    /// A new session, announced; nothing once the directory holds MAX_SESSIONS.
-    [[nodiscard]] auto add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t now_ns)
-        -> std::optional<Event>;
+    /// A new session, announced; in a full directory it replaces the entry announced least recently.
+    [[nodiscard]] auto add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t now_ns) -> Event;
+    /// The entry announced least recently, removed.
+    [[nodiscard]] auto evict_oldest() -> Entry;
 
     int64_t timeout_ns_;
     std::vector<Entry> entries_;
@@ -140,7 +147,7 @@ class SapReceiver final : public net::Pollable
 
     /// Listen on `port` for the SAP groups joined on `interface_index` (0:
     /// the kernel's choice). The first group must join; the others are best
-    /// effort. With no groups (tests), it hears unicast to `port` only.
+    /// effort. With no groups (tests), it receives unicast to `port` only.
     [[nodiscard]] static auto open(
         unsigned int interface_index,
         std::span<ip::IPv4Address const> groups = GROUPS,
@@ -149,8 +156,8 @@ class SapReceiver final : public net::Pollable
 
     SapReceiver(net::FileDescriptor fd, int64_t timeout_ns) noexcept;
 
-    /// Where events go (nothing: they are dropped, the directory still kept).
-    /// The handler runs inside on_ready() and tick(): it may read
+    /// Where events go (nothing: they are dropped, the directory still kept); an eviction goes as its own event
+    /// before the announcement that caused it. The handler runs inside on_ready() and tick(): it may read
     /// directory(), but must not destroy the receiver or replace the handler.
     void set_handler(Handler handler) { handler_ = std::move(handler); }
     [[nodiscard]] auto directory() const noexcept -> SapDirectory const& { return directory_; }
@@ -161,8 +168,14 @@ class SapReceiver final : public net::Pollable
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
   private:
+    /// Reads one datagram into the directory; false when none is waiting.
+    [[nodiscard]] auto receive_one(int64_t now_ns) -> bool;
+    /// The handler's events for `event`: its eviction, then itself.
+    void deliver(SapDirectory::Event const& event);
+
     net::FileDescriptor fd_;
     SapDirectory directory_;
+    std::array<uint8_t, SapDirectory::MAX_PACKET + 1> buffer_{};  ///< one octet over: a longer packet reads as too long
     Handler handler_;
     int64_t next_expiry_ns_{0};
 };
