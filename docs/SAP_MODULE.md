@@ -70,10 +70,12 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
   §5.2's globally unique identifier). An announcement of a new session, or of a known one
   whose SDP changed (a new o= version, say), is `announced`; an unchanged
   re-announcement only refreshes it.
-- `handle_packet()` takes the packet's IP source address and ignores a packet whose SAP
-  origin field names another host (RFC 2974 §6: the originating source), or one longer
-  than `MAX_PACKET` (1472 octets, a 1500-octet MTU's UDP payload; RFC 2974 §6 recommends
-  under 1 KB). `SapReceiver` reads with `recvfrom()` into a buffer one octet longer.
+- `handle_packet()` is given the packet's IP source address, and `admit()` refuses a packet
+  whose SAP origin field names another host (RFC 2974 §6: the originating source), one
+  longer than `MAX_PACKET` (4096 octets: room for a large ST 2110-30 or ST 2022-7
+  description sent fragmented; RFC 2974 §6 only recommends under 1 KB), or one that is not
+  SAP. `SapReceiver` reads with `recvfrom()` into a buffer one octet longer and counts what
+  `admit()` refuses in `dropped()`, so an announcement from the wrong host shows.
 - A deletion counts only from the SAP origin that announced the session, and not for an
   older version than the one announced: a sender that deleted a session before
   announcing its change, and a late copy of that deletion, must not remove it. A deletion

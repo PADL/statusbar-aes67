@@ -555,7 +555,7 @@ TEST(sap_receiver, receives_announcements_and_deletions)
     EXPECT_FALSE(sap.finished());
 }
 
-TEST(sap_receiver, an_announcement_whose_origin_is_not_its_source_is_ignored)
+TEST(sap_receiver, a_forged_long_or_malformed_datagram_is_dropped_and_counted)
 {
     auto receiver = SapReceiver::open(0, {}, 0);
     EXPECT_TRUE(receiver.has_value());
@@ -573,12 +573,19 @@ TEST(sap_receiver, an_announcement_whose_origin_is_not_its_source_is_ignored)
     to.sin_port = htons(port_of(sap.fd()));
     to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     EXPECT_TRUE(::sendto(sender.get(), packet.data(), packet.size(), 0, net::sockaddr_cast(to), sizeof(to)) > 0);
-    for (int tries = 0; tries < 20; ++tries) {
+    // One octet past MAX_PACKET from its origin, and a datagram that is not SAP.
+    auto const long_packet = make_sap_packet(false, 2, IPv4Address{127, 0, 0, 1}, std::string(SapDirectory::MAX_PACKET, 'x'));
+    std::array<uint8_t, 3> const junk{0x20, 0, 0};
+    for (auto const datagram : {std::span<uint8_t const>{long_packet}, std::span<uint8_t const>{junk}}) {
+        EXPECT_TRUE(::sendto(sender.get(), datagram.data(), datagram.size(), 0, net::sockaddr_cast(to), sizeof(to)) > 0);
+    }
+    for (int tries = 0; tries < 200 && sap.dropped() < 3; ++tries) {
         sap.on_ready(0);
         std::this_thread::sleep_for(std::chrono::milliseconds{1});
     }
     EXPECT_TRUE(events.empty());
     EXPECT_TRUE(sap.directory().entries().empty());
+    EXPECT_EQ(sap.dropped(), uint64_t{3});  // refusals are counted, so a forged origin can be seen
 }
 
 TEST(sap, an_announcer_sends_from_its_origin)

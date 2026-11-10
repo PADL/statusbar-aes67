@@ -234,14 +234,17 @@ auto SapDirectory::remove_entry(std::vector<Entry>::iterator const it) -> Entry
     return entry;
 }
 
+auto SapDirectory::admit(std::span<uint8_t const> const packet, ip::IPv4Address const& source) -> std::optional<SapMessage>
+{
+    auto message = packet.size() <= MAX_PACKET ? parse_sap_packet(packet) : std::nullopt;
+    return message && message->origin == source ? message : std::nullopt;
+}
+
 auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, ip::IPv4Address const& source, int64_t const now_ns)
     -> std::optional<Event>
 {
-    auto const message = packet.size() <= MAX_PACKET ? parse_sap_packet(packet) : std::nullopt;
-    if (!message || message->origin != source) {
-        return std::nullopt;  // too long, not SAP, or another host's origin
-    }
-    return handle(*message, now_ns);
+    auto const message = admit(packet, source);
+    return message ? handle(*message, now_ns) : std::nullopt;
 }
 
 auto SapDirectory::expire(int64_t const now_ns) -> std::vector<Event>
@@ -305,7 +308,12 @@ auto SapReceiver::receive_one(int64_t const now_ns) -> bool
     if (!received) {
         return received.error() == std::errc::interrupted;  // else EAGAIN, or an error (recvfrom clears it)
     }
-    deliver(directory_.handle_packet(std::span{buffer_}.first(received->length), received->source, now_ns));
+    auto const message = SapDirectory::admit(std::span{buffer_}.first(received->length), received->source);
+    if (!message) {
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    deliver(directory_.handle(*message, now_ns));
     return true;
 }
 

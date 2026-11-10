@@ -15,6 +15,7 @@
 #include "statusbar/status/status.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -66,8 +67,9 @@ class SapDirectory
     static constexpr size_t MAX_SESSIONS = 1024;
     /// The most sessions one origin keeps; a new one past them evicts that origin's least recent.
     static constexpr size_t MAX_SESSIONS_PER_ORIGIN = 128;
-    /// The largest SAP packet read: a 1500-octet MTU's UDP payload (RFC 2974 Section 6 recommends under 1 KB).
-    static constexpr size_t MAX_PACKET = 1472;
+    /// The largest SAP packet read: room for a large ST 2110-30 or ST 2022-7 description, sent fragmented (RFC 2974
+    /// Section 6 only recommends under 1 KB); Session::MAX_MEDIA bounds what its SDP parses to.
+    static constexpr size_t MAX_PACKET = 4096;
 
     enum class Kind : uint8_t
     {
@@ -99,8 +101,10 @@ class SapDirectory
 
     /// A parsed SAP packet at `now_ns`: the event it makes, if any. Trusts `message.origin`.
     [[nodiscard]] auto handle(SapMessage const& message, int64_t now_ns) -> std::optional<Event>;
-    /// parse_sap_packet() and handle() for a packet from `source`, its IP source address: nothing for one longer than
-    /// MAX_PACKET or whose origin field is another address (RFC 2974 Section 6: the originating source).
+    /// The SAP message in `packet` from `source`, its IP source address, or nullopt: longer than MAX_PACKET, not a
+    /// packet parse_sap_packet() reads, or an origin field naming another host (RFC 2974 Section 6).
+    [[nodiscard]] static auto admit(std::span<uint8_t const> packet, ip::IPv4Address const& source) -> std::optional<SapMessage>;
+    /// admit() and handle(): nothing for a packet admit() refuses.
     [[nodiscard]] auto handle_packet(std::span<uint8_t const> packet, ip::IPv4Address const& source, int64_t now_ns)
         -> std::optional<Event>;
     /// The sessions not re-announced within the timeout at `now_ns`, removed.
@@ -160,6 +164,8 @@ class SapReceiver final : public net::Pollable
     /// directory(), but must not destroy the receiver or replace the handler.
     void set_handler(Handler handler) { handler_ = std::move(handler); }
     [[nodiscard]] auto directory() const noexcept -> SapDirectory const& { return directory_; }
+    /// Datagrams SapDirectory::admit() refused: too long, not SAP, or from another host than their origin. Any thread.
+    [[nodiscard]] auto dropped() const noexcept -> uint64_t { return dropped_.load(std::memory_order_relaxed); }
 
     [[nodiscard]] auto fd() const noexcept -> int override { return fd_.get(); }
     void on_ready(int64_t now_ns) override;
@@ -174,7 +180,8 @@ class SapReceiver final : public net::Pollable
 
     net::FileDescriptor fd_;
     SapDirectory directory_;
-    std::array<uint8_t, SapDirectory::MAX_PACKET + 1> buffer_{};  ///< one octet over: a longer packet reads as too long
+    std::array<uint8_t, SapDirectory::MAX_PACKET + 1> buffer_{};
+    std::atomic<uint64_t> dropped_{0};  ///< one octet over: a longer packet reads as too long
     Handler handler_;
     int64_t next_expiry_ns_{0};
 };
