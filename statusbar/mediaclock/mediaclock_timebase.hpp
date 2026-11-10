@@ -88,7 +88,7 @@ struct TimebaseEstimatorParams
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
-    /// RTCP sender reports (RFC 3550 Section 6.4.1), every one fed, one a second to one every 10 ms (VSF TR-10-1
+    /// RTCP sender reports (RFC 3550 Section 6.4.1), every one fed, one every 4 s to one every 10 ms (VSF TR-10-1
     /// Section 8.10.1): a 15 s window, locked after 4 reports spanning 2.5 s. 5 s outlasts a gap with one SR lost.
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
@@ -108,10 +108,9 @@ struct TimebaseEstimatorParams
         return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128};
     }
 
-    /// `params` as a media clock follower: follow_phase set, absolute cleared.
+    /// `params` as a media clock follower: follow_phase set (a fit then ignores `absolute`).
     [[nodiscard]] static constexpr auto follower(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams
     {
-        params.absolute = false;
         params.follow_phase = true;
         return params;
     }
@@ -184,7 +183,7 @@ class TimebaseEstimator
     auto free_run(std::int64_t now_ns) noexcept -> void;
 
     /// A follow_phase fit (else nothing) adopts another source kind's preset, clamped as constructed and kept a
-    /// follower: the window dropped, the published line, its epoch and its restarts kept. Call it after free_run().
+    /// follower: the old source forgotten (window, reference, epoch), the published line, its epoch and restarts kept.
     auto retune(TimebaseEstimatorParams const& params) noexcept -> void;
 
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
