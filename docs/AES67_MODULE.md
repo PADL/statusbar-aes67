@@ -120,7 +120,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### Sender
 
-- Packet times (AES67-2023 Clause 7.2.0): a sender sends any whole number of frames per
+- Packet times (AES67-2023 Clause 7.2): a sender sends any whole number of frames per
   packet whose payload fits `MAX_PAYLOAD`, 1440 octets (Clause 6.3); larger fails
   `packet_too_large`. That covers 125 us, 250 us, 333 us, 1 ms and 4 ms (Clauses 7.2.1 and
   7.2.2; 6, 12, 16, 48 and 192 frames at 48 kHz), 4 ms only for few channels (2 of L24 at
@@ -215,8 +215,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   prefers the offered format with the receiver's encoding (`Media::prefer()`), else the
   primary one; the encoding must be the receiver's (`encoding_mismatch`), and channels and
   rate too (`format_mismatch`). The receiver's ptime need not match the SDP's: each
-  packet's frames are counted from its payload (AES67-2023 Clause 7.2.0), up to the SDP's
-  ptime, or its maxptime when longer (`max_frames()`); a longer packet fails `size`. A stream without a direct media clock is
+  packet's frames are counted from its payload (AES67-2023 Clause 7.2), up to the SDP's
+  ptime, or its maxptime when longer (`max_frames()`); a longer packet fails `size`. Clause 7.2 says a receiver
+  should not rely on the SDP's packet time; a dedicated device bounds what one packet hands its sink by it all the same. A stream without a direct media clock is
   refused (`not_ptp_locked`): its timestamps are not PTP time.
 - Where it receives (`receive_endpoint()`, AES67-2023 Clauses 6.1.1 and 8.5.2, RFC 8866
   Clause 5.7): a group's `c=` is joined; a unicast `c=` that is this host's address (a
