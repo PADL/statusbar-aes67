@@ -69,7 +69,8 @@ struct SenderReportTime
     auto operator==(SenderReportTime const&) const noexcept -> bool = default;
 };
 
-/// Called on the reactor with each of the stream's sender reports that carries the pair.
+/// Called on the reactor with each of the stream's sender reports that carries the pair, from inside
+/// RtcpSession::on_ready(); it must not close or destroy its session.
 using SenderReportHandler = sg14::inplace_function<void(SenderReportTime const&), 32>;
 
 /// The RTP offset of a sender-clocked stream (RFC 7273 Section 5) from one of its reports: the RTP
