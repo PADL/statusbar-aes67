@@ -79,8 +79,8 @@ struct TimebaseEstimatorParams
     std::int64_t holdover_ns{5'000'000'000};         ///< run on the last line this long after the last good fit, ns
     bool absolute{false};                            ///< domain time is the source's own time: each lock re-anchors, not joins
     /// A media clock follower (clears `absolute`): runs from the start, holds over without end, each lock landing the
-    /// source's frames on its frame grid; a loss of the reference, and the next lock after it or after a source
-    /// discontinuity, each count a restart (IEEE 1722-2016 Clause 4.4.4.3).
+    /// source's frames on its frame grid; a loss of the reference, and a lock after it, after a source discontinuity or
+    /// moving domain time by over RESTART_NS, each count a restart (IEEE 1722-2016 Clause 4.4.4.3).
     bool follow_phase{false};
 
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
@@ -144,6 +144,8 @@ class TimebaseEstimator
   public:
     /// The largest window_pairs a preset may ask for (the window is a fixed array).
     static constexpr std::size_t MAX_WINDOW_PAIRS = 2048;
+    /// A follower's lock that moves domain time by more than this is a restart, whatever came before it, ns.
+    static constexpr std::int64_t RESTART_NS = 1'000;
     /// The largest step_pairs a preset may ask for.
     static constexpr std::size_t MAX_STEP_PAIRS = 8;
 
@@ -218,8 +220,8 @@ class TimebaseEstimator
     auto forget_source() noexcept -> void;
     /// free_run()'s new line: the one in use at `now_ns`, at the reference's rate, in a new epoch; a restart.
     auto leave_line(std::int64_t now_ns) noexcept -> void;
-    /// A follower's lock: a restart unless it regains the source it was following.
-    auto note_follow_lock() noexcept -> void;
+    /// A follower's lock at `now_ns`: a restart unless it regains the source it was following in place.
+    auto note_follow_lock(std::int64_t now_ns) noexcept -> void;
     [[nodiscard]] auto pair_at(std::size_t i) const noexcept -> Pair const&;
     [[nodiscard]] auto newest() const noexcept -> Pair const& { return pair_at(size_ - 1); }
     [[nodiscard]] auto residual(Pair const& p) const noexcept -> double;

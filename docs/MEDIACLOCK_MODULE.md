@@ -166,7 +166,9 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   nanosecond: both rounding rules). `restarts` counts each loss of the reference while locked, and
   the next lock after a loss or a source discontinuity (a step, a new epoch: a toggled `mr`, a
   rebind), so a new epoch while the source keeps coming is one restart; a lock regained on the same
-  source (a residual over the threshold for a pass) is none. `follow_phase` clears `absolute`.
+  source (a residual over the threshold for a pass) is none unless its grid snap moves domain time by
+  over `RESTART_NS` (1 us). So a follower's line restarts exactly when its time moves: a consumer
+  toggles `mr` on `restarts` alone. `follow_phase` clears `absolute`.
   `free_run(now)` drops the window and, once it had locked, joins a line at PTP's rate at `now` in
   a new epoch: a restart. Pairs fed afterwards are followed afresh. On a fit that is no follower it
   does nothing. A follower's `running` is true from construction (its outputs always send), so a
