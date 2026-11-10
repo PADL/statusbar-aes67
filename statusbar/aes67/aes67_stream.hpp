@@ -45,7 +45,7 @@ struct StreamFormat
 };
 
 //
-// Streams under SRP - AES67-2018 Annex C.1.1
+// Streams under SRP - AES67-2023 Annex C.1.1
 //
 
 /// An SRP traffic class; its measurement interval is IEEE 802.1Q-2022 Clause 34.4's.
@@ -71,7 +71,7 @@ enum class SrClass : uint8_t
 struct SrpTSpec
 {
     /// MaxFrameSize past the payload. Clause 35.2.2.8.4 a): IPv4 (20), UDP (8) and RTP headers, no
-    /// Ethernet overhead (AES67-2018 Annex C.1.1.1), and one spare octet as Milan v1.2 Section 4.3.3.2 reserves.
+    /// Ethernet overhead (AES67-2023 Annex C.1.1.1), and one spare octet as Milan v1.2 Section 4.3.3.2 reserves.
     static constexpr uint32_t FRAME_OVERHEAD = static_cast<uint32_t>(20 + 8 + rtp::RtpHeader::LENGTH + 1);
 
     uint16_t max_frame_size{0};       ///< MaxFrameSize: octets from the IPv4 header on
@@ -90,7 +90,7 @@ struct SrpTSpec
     return frames == 0 ? 1 : static_cast<uint32_t>(frames);
 }
 
-/// The TSpec of `format` sent in `sr_class` (AES67-2018 Annex C.1.1.1): MaxIntervalFrames is the packets that
+/// The TSpec of `format` sent in `sr_class` (AES67-2023 Annex C.1.1.1): MaxIntervalFrames is the packets that
 /// can start in one interval (1 at srp_frames_per_packet()); zero for an empty format.
 [[nodiscard]] constexpr auto srp_tspec(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> SrpTSpec
 {

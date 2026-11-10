@@ -280,7 +280,7 @@ TEST(aes67_xdp, renders_the_payload_into_the_pooled_frame)
         .destination_port = 5004,
         .ttl = 32,
     };
-    // L16, L24 and L32 stereo, L16 and L24 8 channels, 48 frames: the bridge's AES67 payloads.
+    // L16, L24 and L32 stereo, L16 and L24 8 channels, 48 frames: common AES67 payloads.
     for (size_t const length : {size_t{192}, size_t{288}, size_t{384}, size_t{768}, size_t{1152}}) {
         std::vector<uint8_t> payload(length);
         for (size_t i = 0; i < length; ++i) {

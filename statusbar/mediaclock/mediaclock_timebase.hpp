@@ -122,10 +122,9 @@ struct TimebaseEstimatorStatus
     std::uint32_t pairs{0};         ///< pairs in the window
 };
 
-/// Least-squares fit of a domain's time against PTP time over a window of pairs. Control-thread
-/// only, no allocation: feed() each pair, then update() once per pass and publish timebase()
-/// when it returns true. Domain time never jumps: each lock joins the new line to the old. An
-/// absolute fit instead re-anchors on the source's time at each lock and stops running on a step.
+/// Least-squares fit of a domain's time against PTP time over a window of pairs; control thread only, no allocation.
+/// feed() each pair, update() once per pass, and publish timebase() when it returns true. Each lock joins the new line
+/// to the old, so domain time never jumps; an absolute fit re-anchors on the source's time and stops on a step.
 class TimebaseEstimator
 {
   public:

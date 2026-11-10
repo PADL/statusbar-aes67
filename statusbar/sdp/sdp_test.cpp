@@ -642,7 +642,8 @@ TEST(sdp_ts_refclk, an_802_1as_reference_is_written_without_a_domain)
 {
     auto const gm = ieee::eui64_from_string("39-A7-94-FF-FE-07-CB-D0");
     PtpReference const gptp{.version = PtpVersion::ieee802_1as, .grandmaster = gm};
-    EXPECT_EQ(ts_refclk_value(gptp), std::string{"ptp=IEEE802.1AS-2011:39-A7-94-FF-FE-07-CB-D0"});  // AES67-2018 8.2 Example 2
+    EXPECT_EQ(
+        ts_refclk_value(gptp), std::string{"ptp=IEEE802.1AS-2011:39-A7-94-FF-FE-07-CB-D0"});  // AES67-2023 Clause 8.2, Example 3
     EXPECT_EQ(
         ts_refclk_value(PtpReference{.version = PtpVersion::ieee802_1as, .traceable = true}),
         std::string{"ptp=IEEE802.1AS-2011:traceable"});
@@ -683,7 +684,7 @@ TEST(sdp_ts_refclk, the_same_grandmaster_in_the_same_domain_is_the_same_clock)
     PtpReference const ours{.grandmaster = gm};
     EXPECT_TRUE(ours.same_clock(PtpReference{.grandmaster = gm}));
     EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = other}));
-    EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = gm, .domain = 1}));  // AES67-2018 8.2: another domain
+    EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = gm, .domain = 1}));  // AES67-2023 Clause 8.2: another domain
     EXPECT_FALSE(ours.same_clock(PtpReference{.traceable = true}));
     EXPECT_FALSE(ours.same_clock(PtpReference{}));
 }

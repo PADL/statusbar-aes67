@@ -478,7 +478,7 @@ TEST(aes67_sender, payloads_are_at_most_1440_octets)
 {
     LoopTransport transport;
     PatternSource source{6};
-    // AES67-2018 Section 6.3: 60 x L24 x 8 frames is 1440 octets, 2 x L16 x 361 is 1444.
+    // AES67-2023 Clause 6.3: 60 x L24 x 8 frames is 1440 octets, 2 x L16 x 361 is 1444.
     StreamFormat format{.encoding = sdp::Encoding::l24, .channels = 60, .sample_rate = 48000, .frames_per_packet = 8};
     Sender fits{format, source.provider(), transport, "Test"};
     EXPECT_TRUE(fits.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}).has_value());

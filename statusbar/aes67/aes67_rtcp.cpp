@@ -569,7 +569,7 @@ auto RtcpSession::round_trip_ns(rtp::ReportBlock const& block, uint64_t const no
 {
     uint32_t const lsr = block.lsr.get();
     if (lsr == 0) {
-        return std::nullopt;  // the receiver has heard no SR yet
+        return std::nullopt;  // the receiver has received no SR yet
     }
     for (auto const& sent : sent_) {
         if (sent.sent_ns != 0 && sent.lsr == lsr) {

@@ -30,7 +30,7 @@ class Sender
   public:
     /// Packets one tick sends at most; further behind, the sender skips ahead.
     static constexpr uint32_t MAX_BURST = 8;
-    /// The largest RTP payload sent: 1440 octets, AES67-2018 Section 6.3 (no fragmentation in a
+    /// The largest RTP payload sent: 1440 octets, AES67-2023 Clause 6.3 (no fragmentation in a
     /// 1500-octet MTU, over IPv4 or IPv6).
     static constexpr uint32_t MAX_PAYLOAD = 1440;
     /// Session ids and versions are kept to 63 bits: positive in any signed reading.

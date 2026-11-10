@@ -1191,9 +1191,9 @@ TEST(aes67_rtcp, sr_rr_and_bye_round_trip_over_udp_loopback)
         std::println("  skipped: the host does not route multicast on lo");
         return;
     }
-    auto const& heard = (*listener)->stats();
-    EXPECT_EQ(heard.remote_cname, std::string{"talker@127.0.0.1"});
-    EXPECT_EQ(heard.remote_ssrc, sender.ssrc());
+    auto const& received = (*listener)->stats();
+    EXPECT_EQ(received.remote_cname, std::string{"talker@127.0.0.1"});
+    EXPECT_EQ(received.remote_ssrc, sender.ssrc());
     EXPECT_TRUE((*listener)->stats().rr_sent > 0);
     auto const& reported = (*talker)->stats();
     EXPECT_TRUE(reported.sr_sent > 0);
@@ -1204,7 +1204,7 @@ TEST(aes67_rtcp, sr_rr_and_bye_round_trip_over_udp_loopback)
     EXPECT_TRUE(reported.rtt_ns.has_value());
     EXPECT_TRUE(*reported.rtt_ns < 50 * MS);
 
-    // The listener leaves: the talker hears its BYE.
+    // The listener leaves: the talker receives its BYE.
     (*listener)->close();
     for (int tries = 0; tries < 100 && (*talker)->stats().bye_received == 0; ++tries) {
         (*talker)->on_ready(ptp_now());

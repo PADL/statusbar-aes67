@@ -336,10 +336,9 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto launch_time() const noexcept -> bool { return context_.tx_launch_time(); }
     /// Why open() went on without the launch time it was asked for (empty: it did not).
     [[nodiscard]] auto launch_time_error() const noexcept -> std::error_code { return launch_time_error_; }
-    /// Launch times in force: each RTP packet leaves at its departure plus @p ns; before this, and after
-    /// clear_launch_lead(), every frame goes at now (sent at once in launch-time mode). The host sets it
-    /// while the NIC's PHC is locked to the domain (on stock igc, also followed by the system clock) and
-    /// the queue's etf is on. Any thread.
+    /// Launch times in force: each RTP packet leaves at its departure plus @p ns; before this and after
+    /// clear_launch_lead(), every frame goes at once. Set while the NIC's PHC is locked to the domain (on stock
+    /// igc, with the system clock following it) and the queue's etf is on. Any thread.
     void set_launch_lead_ns(uint64_t const ns) noexcept { launch_clock_.set_lead_ns(ns); }
     void clear_launch_lead() noexcept { launch_clock_.clear_lead(); }
     /// The launch lead in force (nullopt: not yet); the ordering's counters. Any thread.

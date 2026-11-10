@@ -204,10 +204,9 @@ class UdpRtcpPort final : public RtcpPort
     };
 }
 
-/// A send socket's route and marking: a group out of `interface` with `ttl` and loopback, a unicast destination out
-/// of `interface` with `ttl` (IP_UNICAST_IF) and from its address when `bind_source`; then `dscp`, and to a unicast
-/// destination socket priority 0 after it, so the DSCP's priority never puts the socket in an SR class's queue
-/// (AES67-2023 Annex C.1.2).
+/// A send socket's route and marking: out of `interface` with `ttl` (a group with loopback, a unicast destination by
+/// IP_UNICAST_IF and from its address when `bind_source`), then `dscp`; a unicast socket then gets priority 0, so its
+/// DSCP never puts it in an SR class's queue (AES67-2023 Annex C.1.2).
 [[nodiscard]] auto prepare_send(
     int const fd,
     InterfaceInfo const& interface,

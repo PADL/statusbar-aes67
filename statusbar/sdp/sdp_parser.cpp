@@ -172,7 +172,7 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 }
 
 /// The text after `ptp=`: `<version>[:<gmid>|:traceable][:<domain>]`; IEEE 802.1AS's domain is 0 whatever is
-/// written (AES67-2018 Clause 8.2). Another version is kept unparsed, and a bare one as read: neither fails.
+/// written (AES67-2023 Clause 8.2). Another version is kept unparsed, and a bare one as read: neither fails.
 [[nodiscard]] auto parse_ptp_reference(std::string_view const value) -> StatusValue<PtpReference>
 {
     auto rest = value.substr(4);
@@ -207,7 +207,7 @@ void keep_reference(ReferenceClocks& clocks, PtpReference clock)
 }
 
 /// Whether PTP versions `a` and `b` can name one clock: PTPv1 only itself, and IEEE 1588-2008, 1588-2019 and 802.1AS
-/// one another (one PTPv2 domain across a boundary clock, AES67-2018 Annex D.1); never another token.
+/// one another (one PTPv2 domain across a boundary clock, AES67-2023 Annex D.1); never another token.
 [[nodiscard]] auto same_protocol(PtpVersion const a, PtpVersion const b) noexcept -> bool
 {
     if (a == PtpVersion::other || b == PtpVersion::other) {
