@@ -24,6 +24,7 @@ struct Timebase
     double rate_offset{0.0};       ///< r: domain ns per PTP ns, minus one (1e-6 is 1 ppm)
     std::uint32_t epoch{0};        ///< bumped at each lock: a join (continuous), or for an absolute fit a re-anchor (may jump)
     bool running{false};           ///< locked or in holdover: outputs in the domain send
+    std::uint16_t restarts{0};     ///< a follow_phase fit's media clock restarts: a talker toggles mr on each change
 
     /// The provisional map before a first lock: domain time is PTP time; not running.
     [[nodiscard]] static constexpr auto identity() noexcept -> Timebase { return Timebase{}; }
@@ -47,6 +48,7 @@ struct Timebase
 };
 
 static_assert(sizeof(Timebase) == 32);
+static_assert(offsetof(Timebase, restarts) == 30);
 static_assert(std::is_trivially_copyable_v<Timebase>);
 
 /// One pair from a domain's source: PTP time, frames since the source's epoch began, the
@@ -74,6 +76,10 @@ struct TimebaseEstimatorParams
     std::int64_t reference_timeout_ns{100'000'000};  ///< no pair for this long: reference absent, ns
     std::int64_t holdover_ns{5'000'000'000};         ///< run on the last line this long after the last good fit, ns
     bool absolute{false};                            ///< domain time is the source's own time: each lock re-anchors, not joins
+    /// A media clock follower (clears `absolute`): runs from the start, holds over without end, each lock landing the
+    /// source's frames on its frame grid; a loss of the reference, and the next lock after it or after a source
+    /// discontinuity, each count a restart (IEEE 1722-2016 Clause 4.4.4.3).
+    bool follow_phase{false};
 
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
@@ -90,6 +96,12 @@ struct TimebaseEstimatorParams
     [[nodiscard]] static constexpr auto crf() noexcept -> TimebaseEstimatorParams
     {
         return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128};
+    }
+
+    /// A CRF stream a talker follows: crf(), its rate and phase followed (follow_phase).
+    [[nodiscard]] static constexpr auto crf_follower() noexcept -> TimebaseEstimatorParams
+    {
+        return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128, .follow_phase = true};
     }
 
     /// PHC-to-PHC cross-timestamps against a followed PTP instance, 16 a second; count is that
@@ -146,8 +158,13 @@ class TimebaseEstimator
     /// no pair for reference_timeout_ns resets the window. True when timebase() should be published.
     [[nodiscard]] auto update(std::int64_t now_ns) noexcept -> bool;
 
-    /// The current line: identity() before the first lock, running while locked or in holdover.
+    /// The current line: identity() before the first lock, running while locked or in holdover (a follow_phase fit's
+    /// always).
     [[nodiscard]] auto timebase() const noexcept -> Timebase { return published_; }
+
+    /// A follow_phase fit stops following at PTP time now_ns: the line runs on at the reference's rate, continuous, in
+    /// a new epoch, a restart unless it had never locked; the window is dropped. update() then publishes it.
+    auto free_run(std::int64_t now_ns) noexcept -> void;
 
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
     [[nodiscard]] auto status() const noexcept -> TimebaseEstimatorStatus;
@@ -189,8 +206,18 @@ class TimebaseEstimator
     auto check_reference(std::int64_t now_ns) noexcept -> void;
     /// Publishes the locked line, joining it to the one in use when the lock is new; true when published.
     [[nodiscard]] auto publish_locked(std::int64_t now_ns, bool refitted) noexcept -> bool;
-    /// Goes to holdover, then unlocked once the holdover runs out; true when the line stopped running.
+    /// Goes to holdover, then unlocked once the holdover runs out (a follow_phase fit never); true when the line stopped.
     [[nodiscard]] auto lose_lock(std::int64_t now_ns) noexcept -> bool;
+    /// The domain constant joining the new line to the one in use at `now_ns`: on the source's frame grid when follow_phase.
+    [[nodiscard]] auto join_constant(std::int64_t now_ns) const noexcept -> std::int64_t;
+    /// A media clock restart: counted in the published line, which update() publishes.
+    auto restart() noexcept -> void;
+    /// Drops the window: the fit is unlocked until its source locks afresh.
+    auto forget_source() noexcept -> void;
+    /// free_run()'s new line: the one in use at `now_ns`, at the reference's rate, in a new epoch; a restart.
+    auto leave_line(std::int64_t now_ns) noexcept -> void;
+    /// A follower's lock: a restart unless it regains the source it was following.
+    auto note_follow_lock() noexcept -> void;
     [[nodiscard]] auto pair_at(std::size_t i) const noexcept -> Pair const&;
     [[nodiscard]] auto newest() const noexcept -> Pair const& { return pair_at(size_ - 1); }
     [[nodiscard]] auto residual(Pair const& p) const noexcept -> double;
@@ -228,7 +255,9 @@ class TimebaseEstimator
     std::int64_t domain_constant_ns_{0};  // the epoch's constant: domain_ns = source_ns + this; 0 when absolute
     std::int64_t last_good_ns_{0};
     bool reference_present_{false};
-    bool stop_pending_{false};  // an absolute fit stopped running since the last update()
+    bool publish_pending_{false};   // the line changed outside a lock since the last update()
+    bool following_{false};         // a follower locked to its source and has not lost it since
+    bool source_restarted_{false};  // a step or new epoch of the source since the last lock
     Timebase published_{Timebase::identity()};
     std::int64_t last_step_ns_{0};
     std::uint32_t steps_{0};
