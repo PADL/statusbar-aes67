@@ -4,8 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 /// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection, L16/L24/L32/AM824 audio
-/// media, ptime, RFC 7273 clocks, RAVENNA clock-domain (written only), RFC 4570 source filters, the RFC 3605 RTCP port,
-/// maxptime and fmtp's channel-order and IPMX. Session- or media-level values resolve through the effective_*() accessors.
+/// media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source filters, the RFC 3605 RTCP port, maxptime and
+/// fmtp's channel-order and IPMX. Session- or media-level values resolve through the effective_*() accessors.
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -247,7 +247,7 @@ struct Media
     ReferenceClocks clocks;  ///< a=ts-refclk
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
-    std::optional<uint8_t> clock_domain;  ///< a=clock-domain:PTPv2, written beside ts-refclk; never read
+    std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see Session::effective_clock_domain())
     std::optional<RtcpAttribute> rtcp;    ///< a=rtcp
     bool rtcp_mux{false};                 ///< a=rtcp-mux (RFC 5761) was given; read, never written
     /// The primary format's `a=fmtp:<pt> channel-order=` (ST 2110-30 Section 6.2.2), e.g. "SMPTE2110.(ST)": read and
@@ -335,7 +335,7 @@ struct Session
     ReferenceClocks clocks;  ///< a=ts-refclk
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
-    std::optional<uint8_t> clock_domain;  ///< a=clock-domain:PTPv2, written beside ts-refclk; never read
+    std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see effective_clock_domain())
     std::vector<Media> media;
 
     [[nodiscard]] auto effective_direction(Media const& m) const noexcept -> Direction
@@ -365,6 +365,12 @@ struct Session
     [[nodiscard]] auto effective_source_filter(Media const& m) const noexcept -> std::optional<SourceFilter>
     {
         return m.source_filter ? m.source_filter : source_filter;
+    }
+    /// `a=clock-domain:PTPv2 <domain>` in force for `m` (media level over session level), as
+    /// RAVENNA and Dante write beside ts-refclk; it duplicates PtpReference::domain, and writers set both.
+    [[nodiscard]] auto effective_clock_domain(Media const& m) const noexcept -> std::optional<uint8_t>
+    {
+        return m.clock_domain ? m.clock_domain : clock_domain;
     }
     /// The media clock in force for `m` (media level over session level), nullopt when none is given.
     [[nodiscard]] auto effective_media_clock(Media const& m) const noexcept -> std::optional<MediaClock>

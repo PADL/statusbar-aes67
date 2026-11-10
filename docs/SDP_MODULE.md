@@ -10,11 +10,11 @@ RFC 8866 session descriptions for AES67 audio streams: `parse()` into a `Session
 The module reads and writes an origin, a session name, IPv4 connection data (multicast
 TTL included), and audio media over RTP/AVP with L16, L24, L32 and AM824 rtpmaps, ptime,
 the RFC 7273 reference clock and media clock (`ts-refclk:ptp=...`,
-`mediaclk:direct=<offset>`), RAVENNA's `clock-domain:PTPv2 <n>` (written, not read), RFC 4570 source
+`mediaclk:direct=<offset>`), RAVENNA's `clock-domain:PTPv2 <n>`, RFC 4570 source
 filters, the RFC 3605 RTCP port (`a=rtcp:`), `a=maxptime` (RFC 8866 Section 6.5) and the ST 2110-30
 Section 6.2.2 channel order (`a=fmtp:<pt> channel-order=SMPTE2110.(...)`) with VSF TR-10-1's `IPMX` declaration beside it. A session may hold several audio media (ST 2022-7 sends the same stream twice);
 other media are skipped, and attributes nothing here uses are ignored. Connection, clock,
-media clock, source filter and direction may be given at session or media
+media clock, source filter, clock domain and direction may be given at session or media
 level; the `Session::effective_*()` accessors resolve them (media level wins).
 
 ## Key types
@@ -117,8 +117,8 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   (`effective_media_clock()` gives the clock in force); `other` is written as `sender`. A media-level clock of either kind overrides a session-level one; a level
   naming both keeps the direct one.
 - `clock-domain:PTPv2 <n>` duplicates an IEEE 1588 `PtpReference::domain`; RAVENNA and Dante write it
-  beside `ts-refclk` and some receivers look for it, so writers set both. `parse()` skips
-  it: `ts-refclk` names the domain receivers check.
+  beside `ts-refclk` and some receivers look for it, so writers set both. Other clock
+  kinds in it are not kept.
 - `parse()` reads at most `Session::MAX_MEDIA` (16) audio media sections and fails
   `too_many_media` past them, so a description from the network stays small; sections it
   skips (video, other protocols) are not counted.

@@ -360,6 +360,7 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n") != std::string::npos);
     EXPECT_TRUE(text.find("a=mediaclk:direct=0\r\n") != std::string::npos);
     EXPECT_TRUE(text.find("a=clock-domain:PTPv2 0\r\n") != std::string::npos);
+    EXPECT_TRUE(parsed->effective_clock_domain(media) == uint8_t{0});
 
     // Reconfiguring bumps the version and keeps the session id.
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 3}, .port = 5004}));
