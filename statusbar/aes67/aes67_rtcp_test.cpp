@@ -153,7 +153,7 @@ class FakeTransport final : public Transport
             while (n < out.size() && !transport.rtcp_in.empty()) {
                 held.push_back(std::move(transport.rtcp_in.front()));
                 transport.rtcp_in.pop_front();
-                out[n++] = {.payload = held.back(), .source = {}};
+                out[n++] = {.payload = held.back(), .source = {.address = transport.rtcp_source, .port = 5005}};
             }
             return n;
         }
@@ -196,7 +196,8 @@ class FakeTransport final : public Transport
     std::vector<std::vector<uint8_t>> rtcp_out;
     std::vector<RtcpOptions> opened;
     std::vector<SendOptions> sends;
-    bool refuse_rtcp{false};  ///< the RTCP port refuses every send
+    bool refuse_rtcp{false};               ///< the RTCP port refuses every send
+    IPv4Address rtcp_source{10, 0, 0, 1};  ///< where received RTCP comes from: the stream's sender
     /// An RTP packet or SR sent, by its RTP timestamp, in the order sent.
     struct Sent
     {
@@ -829,6 +830,59 @@ TEST(aes67_rtcp, a_receiver_reports_loss_jitter_and_the_last_sr)
     EXPECT_TRUE(session->stats().sr_received == 0 && session->stats().rr_sent == 0 && session->stats().bye_received == 0);
     EXPECT_EQ(session->stats().remote_cname, std::string{"talker@10.0.0.1"});
     EXPECT_TRUE(session->stats().remote_bye && session->stats().remote_ssrc == 0x5EED);
+}
+
+TEST(aes67_rtcp, a_receiver_reads_rtcp_from_its_streams_source_alone)
+{
+    FakeTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    EXPECT_TRUE(receiver.configure(stream_session(GROUP)).has_value());
+    std::vector<SenderReportTime> reports;
+    auto opts = options("bridge@10.0.0.2", 5 * MS);
+    opts.on_sender_report = [&](SenderReportTime const& report) { reports.push_back(report); };
+    auto session = std::move(*RtcpSession::open_receiver(receiver, transport, std::move(opts)));
+    uint64_t const base = index_at(T0);
+
+    // Before the stream's first packet, with no source filter, no host's SR is the sender's.
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, T0, static_cast<uint32_t>(base)));
+    session->tick(T0);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{0});
+
+    // Once the stream's packets come from 10.0.0.1, an SR from another host naming its SSRC is ignored.
+    transport.rtp_in.push_back(rtp_packet(0, base));
+    receiver.drain(base + 48);
+    EXPECT_TRUE(receiver.receive_state().source == (IPv4Address{10, 0, 0, 1}));
+    transport.rtcp_source = IPv4Address{10, 0, 0, 66};
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, T0 + MS, static_cast<uint32_t>(base)));
+    session->tick(T0 + MS);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{0});
+    EXPECT_TRUE(reports.empty());
+    EXPECT_FALSE(session->stats().remote_sr.has_value());
+
+    // The sender's own is read.
+    transport.rtcp_source = IPv4Address{10, 0, 0, 1};
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, T0 + (2 * MS), static_cast<uint32_t>(base)));
+    session->tick(T0 + (2 * MS));
+    EXPECT_EQ(session->stats().sr_received, uint64_t{1});
+    EXPECT_EQ(reports.size(), size_t{1});
+}
+
+TEST(aes67_rtcp, a_receiver_with_a_source_filter_reads_its_sources_rtcp_before_the_stream)
+{
+    FakeTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    auto described = stream_session(GROUP);
+    described.source_filter = sdp::SourceFilter{.destination = std::nullopt, .source = IPv4Address{10, 0, 0, 7}};
+    EXPECT_TRUE(receiver.configure(described).has_value());
+    EXPECT_TRUE(receiver.receive_state().source == (IPv4Address{10, 0, 0, 7}));
+    auto session = std::move(*RtcpSession::open_receiver(receiver, transport, options("bridge@10.0.0.2", 5 * MS)));
+    transport.rtcp_in.push_back(make_sr(0x5EED, T0));  // from 10.0.0.1: not the filter's
+    session->tick(T0);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{0});
+    transport.rtcp_source = IPv4Address{10, 0, 0, 7};
+    transport.rtcp_in.push_back(make_sr(0x5EED, T0 + MS));
+    session->tick(T0 + MS);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{1});
 }
 
 TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)

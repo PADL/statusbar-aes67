@@ -164,7 +164,7 @@ class RtcpSession
 
     /// The port's descriptor to poll, or -1: tick() then receives.
     [[nodiscard]] auto fd() const noexcept -> int;
-    /// Read and parse what has arrived; `now_ns` is the PTP time.
+    /// Read and parse what has arrived; `now_ns` is the PTP time. A receiver reads only its stream's source's RTCP.
     void on_ready(uint64_t now_ns) noexcept;
     /// Send the report that is due by `now_ns` (PTP), and receive when fd() is -1. A sender's SR goes once the packet
     /// before its own on the grid has left; one whose packet left first is passed over. A sender's SSRC last seen
@@ -251,6 +251,9 @@ class RtcpSession
     void note_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
     /// The remote's CNAME and BYE.
     void note_remote(rtp::RtcpCompound const& compound, uint32_t remote);
+    /// Whether a datagram from `source` is the session's to read: a sender's from anyone, a receiver's only from its
+    /// stream's source (ReceiveState::source), since its SRs drive the stream's clock.
+    [[nodiscard]] auto from_peer(ip::IPv4Address const& source) const noexcept -> bool;
     void handle(std::span<uint8_t const> datagram, uint64_t now_ns) noexcept;
     /// The Info Block for the sender's current inputs (rebuilt when its version or the rate changes).
     void refresh_info_block(uint32_t measured_sample_rate);

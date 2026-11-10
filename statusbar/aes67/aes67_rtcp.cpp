@@ -490,12 +490,23 @@ void RtcpSession::on_ready(uint64_t const now_ns) noexcept
     for (size_t round = 0; round < 4; ++round) {
         size_t const n = port_->receive(batch);
         for (size_t i = 0; i < n; ++i) {
-            handle(batch[i].payload, now_ns);
+            if (from_peer(batch[i].source.address)) {
+                handle(batch[i].payload, now_ns);
+            }
         }
         if (n < batch.size()) {
             break;
         }
     }
+}
+
+auto RtcpSession::from_peer(ip::IPv4Address const& source) const noexcept -> bool
+{
+    if (role_ == Role::sender) {
+        return true;  // any receiver of the stream may report on it
+    }
+    ip::IPv4Address const stream_source = receiver_->receive_state().source;
+    return !stream_source.is_unspecified() && source == stream_source;
 }
 
 void RtcpSession::handle(std::span<uint8_t const> const datagram, uint64_t const now_ns) noexcept
@@ -571,7 +582,7 @@ auto RtcpSession::round_trip_ns(rtp::ReportBlock const& block, uint64_t const no
 void RtcpSession::handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t const now_ns) noexcept
 {
     ReceiveState const state = receiver_->receive_state();
-    // Before the stream's first packet any SR on its RTCP endpoint is the sender's.
+    // Before the stream's first packet an SR from its source filter's address is the sender's.
     if (compound.sr && (!state.valid || compound.sr->ssrc == state.ssrc)) {
         note_stream_sr(*compound.sr, now_ns);
     }
