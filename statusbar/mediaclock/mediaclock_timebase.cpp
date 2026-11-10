@@ -25,6 +25,21 @@ constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
     return static_cast<std::int64_t>((seconds * NS_PER_SECOND) + (((frames * NS_PER_SECOND) + (rate_hz / 2)) / rate_hz));
 }
 
+/// `ns` rounded to the nearest whole frame at `rate_hz`, without overflow: a domain constant on the frame grid.
+[[nodiscard]] constexpr auto on_frame_grid(std::int64_t const ns, std::uint32_t const rate_hz) noexcept -> std::int64_t
+{
+    if (rate_hz == 0) {
+        return ns;
+    }
+    if (ns < 0) {
+        return -on_frame_grid(-ns, rate_hz);
+    }
+    auto const whole = static_cast<std::uint64_t>(ns);
+    std::uint64_t const frames =
+        ((whole / NS_PER_SECOND) * rate_hz) + ((((whole % NS_PER_SECOND) * rate_hz) + (NS_PER_SECOND / 2)) / NS_PER_SECOND);
+    return source_ns_of(frames, rate_hz);
+}
+
 }  // namespace
 
 TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept
@@ -33,6 +48,10 @@ TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noex
     params_.window_pairs = std::clamp<std::uint32_t>(params_.window_pairs, 2, MAX_WINDOW_PAIRS);
     params_.step_pairs = std::clamp<std::uint32_t>(params_.step_pairs, 1, MAX_STEP_PAIRS);
     params_.lock_pairs = std::clamp<std::uint32_t>(params_.lock_pairs, 2, params_.window_pairs);
+    params_.absolute = params_.absolute && !params_.follow_phase;  // a follower joins, it never re-anchors
+    // A follower runs from the start, on the identity line: the first update() publishes it.
+    published_.running = params_.follow_phase;
+    publish_pending_ = params_.follow_phase;
 }
 
 auto TimebaseEstimator::pair_at(std::size_t i) const noexcept -> Pair const&
@@ -85,10 +104,11 @@ auto TimebaseEstimator::reset_window() noexcept -> void
 auto TimebaseEstimator::source_discontinuity() noexcept -> void
 {
     reset_window();
+    source_restarted_ = true;  // a follower's next lock is a restart even where it lands
     if (params_.absolute && state_ != State::unlocked) {
         state_ = State::unlocked;  // the last line is no longer the source's time
         published_.running = false;
-        stop_pending_ = true;
+        publish_pending_ = true;
     }
 }
 
@@ -234,25 +254,60 @@ auto TimebaseEstimator::line() const noexcept -> Timebase
         .rate_offset = slope_ - 1.0,
         .epoch = published_.epoch,
         .running = true,
+        .restarts = published_.restarts,
     };
+}
+
+auto TimebaseEstimator::restart() noexcept -> void
+{
+    ++published_.restarts;
+    publish_pending_ = true;
 }
 
 auto TimebaseEstimator::check_reference(std::int64_t const now_ns) noexcept -> void
 {
+    bool const was_present = reference_present_;
     reference_present_ = have_reference_ && (now_ns - last_reference_ns_) <= params_.reference_timeout_ns;
     if (!reference_present_ && size_ != 0) {
         reset_window();
     }
+    // A follower that loses the reference it followed restarts its media clock (on the line it holds).
+    if (was_present && !reference_present_ && std::exchange(following_, false)) {
+        restart();
+    }
+}
+
+auto TimebaseEstimator::note_follow_lock(std::int64_t const now_ns) noexcept -> void
+{
+    // The first lock after a loss or a source discontinuity restarts, as does one whose grid snap moves domain time
+    // by over RESTART_NS; a lock regained on the same source in place does not.
+    std::int64_t const moved = domain_constant_ns_ - (published_.to_domain(now_ns) - fitted_source_ns(now_ns));
+    bool const stepped = moved > RESTART_NS || moved < -RESTART_NS;
+    if (params_.follow_phase && (!following_ || source_restarted_ || stepped)) {
+        restart();
+    }
+    following_ = params_.follow_phase;
+    source_restarted_ = false;
+}
+
+auto TimebaseEstimator::join_constant(std::int64_t const now_ns) const noexcept -> std::int64_t
+{
+    if (params_.absolute) {
+        return 0;  // the source's own time
+    }
+    std::int64_t const joined = published_.to_domain(now_ns) - fitted_source_ns(now_ns);
+    return params_.follow_phase ? on_frame_grid(joined, source_rate_hz_) : joined;
 }
 
 auto TimebaseEstimator::publish_locked(std::int64_t const now_ns, bool const refitted) noexcept -> bool
 {
     bool const joined = state_ != State::locked;
     if (joined) {
-        // Join the new line to the one in use at now_ns (only the slope changes), or adopt the
-        // source's own time when absolute.
-        domain_constant_ns_ = params_.absolute ? 0 : published_.to_domain(now_ns) - fitted_source_ns(now_ns);
+        // Join the new line to the one in use at now_ns (only the slope changes; a follower's phase by under half
+        // a frame), or adopt the source's own time when absolute.
+        domain_constant_ns_ = join_constant(now_ns);
         ++published_.epoch;
+        note_follow_lock(now_ns);
         state_ = State::locked;
     }
     if (!joined && !refitted) {
@@ -268,7 +323,7 @@ auto TimebaseEstimator::lose_lock(std::int64_t const now_ns) noexcept -> bool
     if (state_ == State::locked) {
         state_ = State::holdover;
     }
-    if (state_ == State::holdover && (now_ns - last_good_ns_) > params_.holdover_ns) {
+    if (state_ == State::holdover && !params_.follow_phase && (now_ns - last_good_ns_) > params_.holdover_ns) {
         state_ = State::unlocked;
         published_.running = false;
         return true;
@@ -278,16 +333,47 @@ auto TimebaseEstimator::lose_lock(std::int64_t const now_ns) noexcept -> bool
 
 auto TimebaseEstimator::update(std::int64_t now_ns) noexcept -> bool
 {
-    bool const stopped = std::exchange(stop_pending_, false);
     bool const refitted = pending_ != 0;
     if (refitted) {
         refit();
     }
     check_reference(now_ns);
-    if (reference_present_ && meets_lock()) {
-        return publish_locked(now_ns, refitted);
+    bool const changed = reference_present_ && meets_lock() ? publish_locked(now_ns, refitted) : lose_lock(now_ns);
+    return std::exchange(publish_pending_, false) || changed;
+}
+
+auto TimebaseEstimator::free_run(std::int64_t const now_ns) noexcept -> void
+{
+    if (!params_.follow_phase) {
+        return;  // only a follower leaves its source: another fit's line stays the fit's
     }
-    return lose_lock(now_ns) || stopped;
+    bool const left = state_ != State::unlocked;
+    forget_source();
+    if (left) {
+        leave_line(now_ns);
+    }
+}
+
+auto TimebaseEstimator::leave_line(std::int64_t const now_ns) noexcept -> void
+{
+    // The line in use at now_ns, on at the reference's own rate in a new epoch; the source must lock afresh.
+    published_ = Timebase{
+        .reference_ns = now_ns,
+        .domain_ns = published_.to_domain(now_ns),
+        .epoch = published_.epoch + 1,
+        .running = true,
+        .restarts = published_.restarts,
+    };
+    restart();
+}
+
+auto TimebaseEstimator::forget_source() noexcept -> void
+{
+    // The newest reference stays: a pair from before this is still refused (accept_reference).
+    reset_window();
+    state_ = State::unlocked;
+    reference_present_ = false;
+    following_ = false;
 }
 
 auto TimebaseEstimator::status() const noexcept -> TimebaseEstimatorStatus
