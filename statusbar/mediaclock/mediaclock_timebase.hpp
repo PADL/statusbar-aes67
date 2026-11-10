@@ -69,7 +69,7 @@ static_assert(sizeof(ClockSample) == 24);
 struct TimebaseEstimatorParams
 {
     std::uint32_t window_pairs{2048};  ///< pairs fitted, at most TimebaseEstimator::MAX_WINDOW_PAIRS
-    /// A pair older than the newest by more than this leaves the window while it holds over lock_pairs, ns; 0: no limit.
+    /// A pair older than the newest by more than this leaves a window of over MIN_SPAN_PAIRS and lock_pairs, ns; 0: no limit.
     std::int64_t window_span_ns{0};
     std::uint32_t lock_pairs{256};                   ///< pairs needed before the fit may lock
     std::int64_t lock_span_ns{250'000'000};          ///< PTP time those pairs must span, ns
@@ -78,8 +78,12 @@ struct TimebaseEstimatorParams
     std::int64_t step_threshold_ns{20'000};          ///< a residual over this is held, not fitted, ns
     std::uint32_t step_pairs{3};                     ///< this many held in a row is a step (at most 8)
     std::int64_t reference_timeout_ns{100'000'000};  ///< no pair for this long: reference absent, ns
-    std::int64_t holdover_ns{5'000'000'000};         ///< run on the last line this long after the last good fit, ns
-    bool absolute{false};                            ///< domain time is the source's own time: each lock re-anchors, not joins
+    /// Nonzero: the timeout is this many of the window's mean pair intervals, within [reference_timeout_ns,
+    /// reference_timeout_max_ns], and the ceiling while under two pairs are held: a sender's own cadence sets it.
+    std::uint32_t timeout_intervals{0};
+    std::int64_t reference_timeout_max_ns{0};  ///< the ceiling of a cadence-derived timeout, ns
+    std::int64_t holdover_ns{5'000'000'000};   ///< run on the last line this long after the last good fit, ns
+    bool absolute{false};                      ///< domain time is the source's own time: each lock re-anchors, not joins
     /// A media clock follower (clears `absolute`): runs from the start, holds over without end, each lock landing the
     /// source's frames on its frame grid; a loss of the reference, and a lock after it, after a source discontinuity or
     /// moving domain time by over RESTART_NS, each count a restart (IEEE 1722-2016 Clause 4.4.4.3).
@@ -88,8 +92,8 @@ struct TimebaseEstimatorParams
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
-    /// RTCP sender reports (RFC 3550 Section 6.4.1), every one fed, one every 4 s to one every 10 ms (VSF TR-10-1
-    /// Section 8.10.1): a 15 s window, locked after 4 reports spanning 2.5 s. 5 s outlasts a gap with one SR lost.
+    /// RTCP sender reports (RFC 3550 Section 6.4.1), every one fed, from RFC 3550's randomised 5 s to IPMX's 10 ms (VSF
+    /// TR-10-1 Section 8.10.1): 15 s of them (16 at least), locked on 4 spanning 2.5 s, lost after 3 mean intervals (1 to 20 s).
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
         return TimebaseEstimatorParams{
@@ -98,7 +102,9 @@ struct TimebaseEstimatorParams
             .lock_pairs = 4,
             .lock_span_ns = 2'500'000'000,
             .step_pairs = 2,
-            .reference_timeout_ns = 5'000'000'000,
+            .reference_timeout_ns = 1'000'000'000,
+            .timeout_intervals = 3,
+            .reference_timeout_max_ns = 20'000'000'000,
         };
     }
 
@@ -160,6 +166,8 @@ class TimebaseEstimator
     static constexpr std::int64_t RESTART_NS = 1'000;
     /// The largest step_pairs a preset may ask for.
     static constexpr std::size_t MAX_STEP_PAIRS = 8;
+    /// window_span_ns never trims a window to fewer pairs than this: a slow sender's fit keeps its averaging.
+    static constexpr std::size_t MIN_SPAN_PAIRS = 16;
 
     /// A fit with the given preset: window_pairs clamped to [2, MAX_WINDOW_PAIRS], step_pairs to
     /// [1, MAX_STEP_PAIRS], lock_pairs to [2, window_pairs].
@@ -207,7 +215,7 @@ class TimebaseEstimator
     };
 
     auto push(Pair const& p) noexcept -> void;
-    /// Drops the oldest pairs past window_span_ns of the newest, keeping more than lock_pairs.
+    /// Drops the oldest pairs past window_span_ns of the newest, keeping MIN_SPAN_PAIRS and lock_pairs.
     auto trim_span() noexcept -> void;
     /// window_pairs, step_pairs and lock_pairs clamped to their ranges; absolute cleared on a follower.
     [[nodiscard]] static auto clamped(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams;
@@ -226,6 +234,8 @@ class TimebaseEstimator
     [[nodiscard]] auto screen_step(Pair const& p) noexcept -> bool;
     /// Holds a step candidate; enough in a row restart the window from them (a step, once the fit was long).
     auto hold(Pair const& p) noexcept -> void;
+    /// The time without a pair after which the reference is absent: fixed, or from the window's cadence.
+    [[nodiscard]] auto reference_timeout() const noexcept -> std::int64_t;
     /// Notes whether the reference is present at `now_ns`; pairs from before a silence are dropped.
     auto check_reference(std::int64_t now_ns) noexcept -> void;
     /// Publishes the locked line, joining it to the one in use when the lock is new; true when published.
