@@ -42,13 +42,18 @@ constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
 }  // namespace
 
-TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept
-    : params_{params}
+auto TimebaseEstimator::clamped(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams
 {
-    params_.window_pairs = std::clamp<std::uint32_t>(params_.window_pairs, 2, MAX_WINDOW_PAIRS);
-    params_.step_pairs = std::clamp<std::uint32_t>(params_.step_pairs, 1, MAX_STEP_PAIRS);
-    params_.lock_pairs = std::clamp<std::uint32_t>(params_.lock_pairs, 2, params_.window_pairs);
-    params_.absolute = params_.absolute && !params_.follow_phase;  // a follower joins, it never re-anchors
+    params.window_pairs = std::clamp<std::uint32_t>(params.window_pairs, 2, MAX_WINDOW_PAIRS);
+    params.step_pairs = std::clamp<std::uint32_t>(params.step_pairs, 1, MAX_STEP_PAIRS);
+    params.lock_pairs = std::clamp<std::uint32_t>(params.lock_pairs, 2, params.window_pairs);
+    params.absolute = params.absolute && !params.follow_phase;  // a follower joins, it never re-anchors
+    return params;
+}
+
+TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept
+    : params_{clamped(params)}
+{
     // A follower runs from the start, on the identity line: the first update() publishes it.
     published_.running = params_.follow_phase;
     publish_pending_ = params_.follow_phase;
@@ -86,6 +91,18 @@ auto TimebaseEstimator::push(Pair const& p) noexcept -> void
     window_[(head_ + size_) % params_.window_pairs] = p;
     ++size_;
     ++pending_;
+    trim_span();
+}
+
+auto TimebaseEstimator::trim_span() noexcept -> void
+{
+    if (params_.window_span_ns <= 0) {
+        return;
+    }
+    while (size_ > params_.lock_pairs && (newest().reference_ns - pair_at(0).reference_ns) > params_.window_span_ns) {
+        head_ = (head_ + 1) % params_.window_pairs;
+        --size_;
+    }
 }
 
 auto TimebaseEstimator::reset_window() noexcept -> void
@@ -352,6 +369,15 @@ auto TimebaseEstimator::free_run(std::int64_t const now_ns) noexcept -> void
     if (left) {
         leave_line(now_ns);
     }
+}
+
+auto TimebaseEstimator::retune(TimebaseEstimatorParams const& params) noexcept -> void
+{
+    if (!params_.follow_phase) {
+        return;  // only a follower changes source kind without a new fit
+    }
+    reset_window();
+    params_ = clamped(TimebaseEstimatorParams::follower(params));
 }
 
 auto TimebaseEstimator::leave_line(std::int64_t const now_ns) noexcept -> void
