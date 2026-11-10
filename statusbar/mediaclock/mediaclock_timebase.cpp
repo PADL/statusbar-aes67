@@ -99,7 +99,8 @@ auto TimebaseEstimator::trim_span() noexcept -> void
     if (params_.window_span_ns <= 0) {
         return;
     }
-    while (size_ > params_.lock_pairs && (newest().reference_ns - pair_at(0).reference_ns) > params_.window_span_ns) {
+    std::size_t const floor = std::max<std::size_t>(params_.lock_pairs, MIN_SPAN_PAIRS);
+    while (size_ > floor && (newest().reference_ns - pair_at(0).reference_ns) > params_.window_span_ns) {
         head_ = (head_ + 1) % params_.window_pairs;
         --size_;
     }
@@ -281,10 +282,23 @@ auto TimebaseEstimator::restart() noexcept -> void
     publish_pending_ = true;
 }
 
+auto TimebaseEstimator::reference_timeout() const noexcept -> std::int64_t
+{
+    if (params_.timeout_intervals == 0) {
+        return params_.reference_timeout_ns;
+    }
+    if (size_ < 2) {
+        return params_.reference_timeout_max_ns;
+    }
+    std::int64_t const mean = (newest().reference_ns - pair_at(0).reference_ns) / static_cast<std::int64_t>(size_ - 1);
+    std::int64_t const ceiling = std::max(params_.reference_timeout_max_ns, params_.reference_timeout_ns);
+    return std::clamp(mean * params_.timeout_intervals, params_.reference_timeout_ns, ceiling);
+}
+
 auto TimebaseEstimator::check_reference(std::int64_t const now_ns) noexcept -> void
 {
     bool const was_present = reference_present_;
-    reference_present_ = have_reference_ && (now_ns - last_reference_ns_) <= params_.reference_timeout_ns;
+    reference_present_ = have_reference_ && (now_ns - last_reference_ns_) <= reference_timeout();
     if (!reference_present_ && size_ != 0) {
         reset_window();
     }
