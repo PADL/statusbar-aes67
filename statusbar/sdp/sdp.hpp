@@ -321,6 +321,9 @@ struct Media
 /// A session description
 struct Session
 {
+    /// The most audio media sections parse() reads; a description with more fails too_many_media.
+    static constexpr size_t MAX_MEDIA = 16;
+
     std::string username{"-"};
     uint64_t session_id{0};
     uint64_t session_version{0};

@@ -482,7 +482,7 @@ class Parser
             case 'a':
                 return attribute(value);
             default:
-                return success();  // b=, k=, r=, z=, ...: nothing the bridge needs
+                return success();  // b=, k=, r=, z=, ...: nothing a receiver of AES67 needs
         }
     }
 
@@ -545,11 +545,20 @@ class Parser
         if (!parse_offered(rest) || !port || offered_.empty()) {
             return failure(SdpError::malformed_line);
         }
-        media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = offered_.front()});
+        if (session_.media.size() >= Session::MAX_MEDIA) {
+            return failure(SdpError::too_many_media);
+        }
+        open_media(*port);
+        return success();
+    }
+
+    /// A new audio media section at `port`, its primary payload type the first offered.
+    void open_media(uint16_t const port)
+    {
+        media_ = &session_.media.emplace_back(Media{.port = port, .payload_type = offered_.front()});
         rtpmap_ = RtpmapResult::other_payload_type;
         formats_.clear();
         parameters_.clear();
-        return success();
     }
 
     /// The payload types an `m=` line offers, in order of preference (RFC 8866 Section 5.14), into `offered_`;

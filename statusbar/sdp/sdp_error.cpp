@@ -21,6 +21,8 @@ auto SdpErrorCategory::message(int ev) const -> std::string
             return "unsupported network or address type";
         case SdpError::unsupported_encoding:
             return "unsupported encoding";
+        case SdpError::too_many_media:
+            return "too many audio media sections";
     }
     return "unknown SDP error";
 }

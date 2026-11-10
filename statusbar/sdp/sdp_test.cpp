@@ -154,7 +154,7 @@ TEST(sdp, parses_a_2022_7_pair_and_skips_other_media)
     EXPECT_FALSE(session->effective_media_clock_offset(session->media[1]).has_value());
 }
 
-TEST(sdp, refuses_what_the_bridge_cannot_use)
+TEST(sdp, refuses_what_a_receiver_cannot_use)
 {
     auto changed = [](std::string_view from, std::string_view to) {
         std::string text{DANTE};
@@ -903,6 +903,20 @@ TEST(sdp_ts_refclk, a_reference_without_a_domain_names_domain_zero_alone)
     auto const grandmaster = *ieee::eui64_from_string("08-00-11-FF-FE-21-E1-B0");
     EXPECT_FALSE(session->names_clock(media, PtpReference::naming(grandmaster, 127)));
     EXPECT_TRUE(session->names_clock(media, PtpReference::naming(grandmaster, 0)));
+}
+
+TEST(sdp, at_most_max_media_audio_sections_are_read)
+{
+    std::string text = "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=x\r\nc=IN IP4 239.69.1.1/32\r\nt=0 0\r\n";
+    for (size_t i = 0; i < Session::MAX_MEDIA; ++i) {
+        text += "m=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n";
+    }
+    auto const full = parse(text);
+    EXPECT_EQ(full.transform([](Session const& s) { return s.media.size(); }).value_or(0), Session::MAX_MEDIA);
+    text += "m=video 5006 RTP/AVP 98\r\n";  // skipped: not counted
+    EXPECT_TRUE(parse(text).has_value());
+    text += "m=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n";
+    EXPECT_TRUE(parse(text).error() == SdpError::too_many_media);
 }
 
 TEST(sdp, long_text_fields_are_written_whole)
