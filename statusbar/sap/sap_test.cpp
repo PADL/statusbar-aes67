@@ -573,7 +573,7 @@ TEST(sap_receiver, a_forged_long_or_malformed_datagram_is_dropped_and_counted)
     to.sin_port = htons(port_of(sap.fd()));
     to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     EXPECT_TRUE(::sendto(sender.get(), packet.data(), packet.size(), 0, net::sockaddr_cast(to), sizeof(to)) > 0);
-    // One octet past MAX_PACKET from its origin, and a datagram that is not SAP.
+    // A packet longer than MAX_PACKET from its origin (cut at MAX_PACKET + 1 on reading), and one that is not SAP.
     auto const long_packet = make_sap_packet(false, 2, IPv4Address{127, 0, 0, 1}, std::string(SapDirectory::MAX_PACKET, 'x'));
     std::array<uint8_t, 3> const junk{0x20, 0, 0};
     for (auto const datagram : {std::span<uint8_t const>{long_packet}, std::span<uint8_t const>{junk}}) {

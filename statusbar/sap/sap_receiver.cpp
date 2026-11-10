@@ -237,7 +237,10 @@ auto SapDirectory::remove_entry(std::vector<Entry>::iterator const it) -> Entry
 auto SapDirectory::admit(std::span<uint8_t const> const packet, ip::IPv4Address const& source) -> std::optional<SapMessage>
 {
     auto message = packet.size() <= MAX_PACKET ? parse_sap_packet(packet) : std::nullopt;
-    return message && message->origin == source ? message : std::nullopt;
+    if (!message || message->origin != source) {
+        return std::nullopt;
+    }
+    return std::move(message);
 }
 
 auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, ip::IPv4Address const& source, int64_t const now_ns)

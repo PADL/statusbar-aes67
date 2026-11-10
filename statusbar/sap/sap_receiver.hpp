@@ -180,8 +180,8 @@ class SapReceiver final : public net::Pollable
 
     net::FileDescriptor fd_;
     SapDirectory directory_;
-    std::array<uint8_t, SapDirectory::MAX_PACKET + 1> buffer_{};
-    std::atomic<uint64_t> dropped_{0};  ///< one octet over: a longer packet reads as too long
+    std::array<uint8_t, SapDirectory::MAX_PACKET + 1> buffer_{};  ///< one octet over: a longer packet reads as too long
+    std::atomic<uint64_t> dropped_{0};                            ///< dropped(): datagrams admit() refused
     Handler handler_;
     int64_t next_expiry_ns_{0};
 };
