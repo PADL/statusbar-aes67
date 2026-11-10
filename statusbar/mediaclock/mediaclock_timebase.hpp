@@ -68,7 +68,9 @@ static_assert(sizeof(ClockSample) == 24);
 /// Starting values for one kind of source (window, lock, step, holdover); tuned on the bench.
 struct TimebaseEstimatorParams
 {
-    std::uint32_t window_pairs{2048};                ///< pairs fitted, at most TimebaseEstimator::MAX_WINDOW_PAIRS
+    std::uint32_t window_pairs{2048};  ///< pairs fitted, at most TimebaseEstimator::MAX_WINDOW_PAIRS
+    /// A pair older than the newest by more than this leaves the window while it holds over lock_pairs, ns; 0: no limit.
+    std::int64_t window_span_ns{0};
     std::uint32_t lock_pairs{256};                   ///< pairs needed before the fit may lock
     std::int64_t lock_span_ns{250'000'000};          ///< PTP time those pairs must span, ns
     std::int64_t lock_rms_ns{2'000};                 ///< locked while the RMS residual is under this, ns
@@ -86,12 +88,18 @@ struct TimebaseEstimatorParams
     /// An AVB stream, one pair per millisecond (every 8th class A packet).
     [[nodiscard]] static constexpr auto avb_stream() noexcept -> TimebaseEstimatorParams { return TimebaseEstimatorParams{}; }
 
-    /// RTCP sender reports (RFC 3550 Section 6.4.1), fed about one a second: a faster sender's (VSF TR-10-1
-    /// Section 8.10.1: one every 10 ms) thinned to that. 5 s outlasts an RFC 3550 sender's gap with one SR lost.
+    /// RTCP sender reports (RFC 3550 Section 6.4.1), every one fed, one a second to one every 10 ms (VSF TR-10-1
+    /// Section 8.10.1): a 15 s window, locked after 4 reports spanning 2.5 s. 5 s outlasts a gap with one SR lost.
     [[nodiscard]] static constexpr auto rtcp_sender_reports() noexcept -> TimebaseEstimatorParams
     {
         return TimebaseEstimatorParams{
-            .window_pairs = 16, .lock_pairs = 4, .lock_span_ns = 0, .step_pairs = 2, .reference_timeout_ns = 5'000'000'000};
+            .window_pairs = 2048,
+            .window_span_ns = 15'000'000'000,
+            .lock_pairs = 4,
+            .lock_span_ns = 2'500'000'000,
+            .step_pairs = 2,
+            .reference_timeout_ns = 5'000'000'000,
+        };
     }
 
     /// A CRF stream (Milan v1.2 Section 7.3), 500 timestamps a second (48 kHz, timestamp_interval 96).
@@ -100,11 +108,16 @@ struct TimebaseEstimatorParams
         return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128};
     }
 
-    /// A CRF stream a talker follows: crf(), its rate and phase followed (follow_phase).
-    [[nodiscard]] static constexpr auto crf_follower() noexcept -> TimebaseEstimatorParams
+    /// `params` as a media clock follower: follow_phase set, absolute cleared.
+    [[nodiscard]] static constexpr auto follower(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams
     {
-        return TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128, .follow_phase = true};
+        params.absolute = false;
+        params.follow_phase = true;
+        return params;
     }
+
+    /// A CRF stream a talker follows: follower(crf()).
+    [[nodiscard]] static constexpr auto crf_follower() noexcept -> TimebaseEstimatorParams { return follower(crf()); }
 
     /// PHC-to-PHC cross-timestamps against a followed PTP instance, 16 a second; count is that
     /// PTP's time in ns at rate_hz 1e9, and domain time is that PTP's time (absolute).
@@ -170,6 +183,10 @@ class TimebaseEstimator
     /// in a new epoch, a restart once it had locked; the window dropped. Pairs fed afterwards are followed afresh.
     auto free_run(std::int64_t now_ns) noexcept -> void;
 
+    /// A follow_phase fit (else nothing) adopts another source kind's preset, clamped as constructed and kept a
+    /// follower: the window dropped, the published line, its epoch and its restarts kept. Call it after free_run().
+    auto retune(TimebaseEstimatorParams const& params) noexcept -> void;
+
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
     [[nodiscard]] auto status() const noexcept -> TimebaseEstimatorStatus;
 
@@ -191,6 +208,10 @@ class TimebaseEstimator
     };
 
     auto push(Pair const& p) noexcept -> void;
+    /// Drops the oldest pairs past window_span_ns of the newest, keeping more than lock_pairs.
+    auto trim_span() noexcept -> void;
+    /// window_pairs, step_pairs and lock_pairs clamped to their ranges; absolute cleared on a follower.
+    [[nodiscard]] static auto clamped(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams;
     auto reset_window() noexcept -> void;
     auto source_discontinuity() noexcept -> void;
     auto refit() noexcept -> void;
