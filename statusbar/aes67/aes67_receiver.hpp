@@ -85,6 +85,8 @@ class Receiver
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     /// The SSRC learnt from the stream's first packet.
     [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t> { return ssrc_; }
+    /// The most frames a packet may hold: the SDP's ptime, or its maxptime when longer; larger ones fail size.
+    [[nodiscard]] auto max_frames() const noexcept -> uint32_t { return max_frames_; }
 
     /// Where this stream's RTCP goes and arrives (the SDP's a=rtcp, else port + 1), marked `dscp`:
     /// the DSCP this host would send a similar stream with (AES67-2023 Clause 6.2). Fails
@@ -105,8 +107,12 @@ class Receiver
     /// the SDP; on failure State::error and error().
     [[nodiscard]] auto open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
         -> Status;
-    /// The stream's payload type, offset, source filter and RTCP endpoints, from the SDP, received at `endpoint`.
+    /// The stream's payload type, packet size, offset, source filter and RTCP endpoints, from the SDP, received at
+    /// `endpoint`.
     void apply_media(
+        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
+    /// The source filter (RFC 4570, or an offer's sender), published as ReceiveState::source until a source is learnt.
+    void set_source_filter(
         sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
     /// clear(), then open the transport for `destination`, joined for `source` alone when it is a source-specific
     /// group (RFC 4607) and a source is given; on failure State::error and error().
@@ -139,8 +145,10 @@ class Receiver
     /// Why the packet's payload type, size or source is not this stream's; nullopt when it is.
     [[nodiscard]] auto check_payload(rtp::RtpPacket const& packet, ip::IPv4Address const& source) const noexcept
         -> std::optional<DropReason>;
-    /// Learns the SSRC, or adopts a new one after the learnt source fell silent; else why the packet is dropped.
-    [[nodiscard]] auto admit_source(uint32_t ssrc, uint64_t now_index) noexcept -> std::expected<void, DropReason>;
+    /// Learns the SSRC and its address, or adopts a new pair after the learnt source fell silent; else why the packet
+    /// is dropped.
+    [[nodiscard]] auto admit_source(uint32_t ssrc, ip::IPv4Address const& source, uint64_t now_index) noexcept
+        -> std::expected<void, DropReason>;
     /// Validates the sequence number (RFC 3550 Appendix A.1) and places it; false to drop the packet.
     [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames) noexcept -> bool;
     /// Notes an accepted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.
@@ -163,13 +171,15 @@ class Receiver
 
     std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet
     uint8_t payload_type_{0};
+    uint32_t max_frames_{0};
     bool sender_clock_{false};
     std::optional<ip::IPv4Address> source_filter_;
     std::optional<RtcpOptions> rtcp_;  ///< from configure(), without the DSCP
     std::error_code rtcp_error_;       ///< why there is none
 
     std::optional<uint32_t> ssrc_;
-    uint64_t last_index_{0};  ///< now_index when the learnt source was last heard
+    ip::IPv4Address source_;  ///< the address ssrc_ was learnt from
+    uint64_t last_index_{0};  ///< now_index when the learnt source last sent a packet accepted
     rtp::RtpSequence sequence_;
     bool have_max_{false};
     uint16_t max_seq_{0};
@@ -190,7 +200,7 @@ class Receiver
     {
         uint64_t newest_end{0};     ///< the newest packet's end index
         uint32_t newest_frames{0};  ///< and its frames (0: none placed)
-        bool heard{false};          ///< a packet of the learnt source was accepted
+        bool accepted{false};       ///< a packet of the learnt source was accepted
     };
     DrainState this_drain_{};
 

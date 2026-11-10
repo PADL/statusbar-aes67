@@ -29,7 +29,7 @@ nanoseconds and injects the random generator.
 
 - `RtpHeader` — the 12-byte RFC 3550 Figure 1 fixed header, packed, network order, with bit accessors and `init()` for the header AES67 senders emit.
 - `RtpPacket` — a parsed header and a view of its payload (CSRCs, extension and padding removed).
-- `RtpSequence` — one source's sequence state (RFC 3550 Appendix A.1) and loss figures (Appendix A.3, §6.4.1 `report()`).
+- `RtpSequence` — one source's sequence state (RFC 3550 Appendix A.1) and its counts (Appendix A.3: `expected()`, `received()`).
 - `FrameAddressing` — the MACs, optional VLAN tag, IPv4 addresses, UDP ports, TTL and DSCP around a packet in a frame.
 - `RtpFrame` — a parsed frame: its addressing, its UDP payload and the RTP packet; `UdpFrame` — the same without the RTP parse (`parse_udp_frame()`, for RTCP).
 - `multicast_mac()` — an IPv4 group's Ethernet address (RFC 1112 §6.4); `rtp_frame_overhead()` — 42 or 46 bytes.
@@ -95,8 +95,9 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 - `RtpSequence` keeps a new source on probation until `MIN_SEQUENTIAL` packets arrive in
   order; gaps below `MAX_DROPOUT` are losses; a larger jump is believed only when the next
   packet follows it (the sender restarted); late and duplicate packets are accepted but
-  do not move the high-water mark. `lost()` goes negative when duplicates outnumber
-  losses, as RFC 3550 counts them.
+  do not move the high-water mark. Duplicates count in `received()`, so `expected()` less
+  `received()` goes negative when they outnumber losses, as RFC 3550 counts them; the RTCP
+  session forms its loss figures from the two.
 - `parse_rtcp()` applies RFC 3550 Appendix A.2: version 2 throughout, an SR or RR first
   and unpadded, padding only on the last sub-packet, lengths summing to the datagram. A bare SR (what
   IPMX sends) passes; APP, XR and other types are skipped, as TR-10-1 §8.7 asks IPMX
@@ -116,6 +117,9 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
   minimum (§6.2); every interval is randomised in [0.5, 1.5) and divided by e − 3/2.
 - `serialize_ipmx_info_block()` NUL-pads `ts-refclk` to 64 bytes and `mediaclk` to 12; a
   string that fills its field has no NUL. The channel-order string is padded to 32 bits.
+- Fuzzing: `rtp_parse_fuzzer` (`parse_rtp()`), `rtcp_parse_fuzzer` (`parse_rtcp()` and the IPMX
+  Info Block) and `rtp_frame_parse_fuzzer`; seeds for the first two, an SR with an Info Block
+  among them, are in `fuzz/seeds/<fuzzer>/`.
 
 ## Further reading
 

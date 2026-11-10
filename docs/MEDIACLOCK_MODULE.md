@@ -117,7 +117,8 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   125 µs tick a whole number of samples. Check a rate read from an SDP with
   `supports()` or `make()`; do not assume it.
 - `unwrap()` is unambiguous within ±2^31 samples of the reference, about 12 hours at
-  48 kHz.
+  48 kHz. A timestamp naming an index before the epoch unwraps to 0: near the epoch (a
+  grandmaster on the 1970 timescale) a crafted timestamp cannot give an index near 2^64.
 - Subtract the stream's direct offset before unwrapping (`index_of_rtp()` does).
 - `TimebaseEstimator` runs on a control thread: `update()` refits the whole window (2048 pairs,
   a few microseconds) once per pass in which pairs arrived. It never allocates; the
@@ -160,7 +161,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 ## Further reading
 
 - RFC 7273 §5.2 — the `direct` media clock.
-- AES67-2018 — media clock and RTP timestamp requirements.
+- AES67-2023 — media clock and RTP timestamp requirements.
 - RFC 7273 §5 — `mediaclk:sender`, a media clock the sender asserts.
 - RFC 3550 §6.4.1 — sender reports pairing an RTP timestamp with a wall-clock time.
 - Milan v1.2 §7.3 — the CRF stream.

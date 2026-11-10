@@ -15,3 +15,6 @@ statusbar_add_module(
   statusbar::status
   TESTS
   sap_test.cpp)
+
+# Fuzz harness (built only when -DENABLE_FUZZING=ON).
+add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/sap_directory_fuzzer.cpp)

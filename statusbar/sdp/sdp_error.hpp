@@ -19,6 +19,7 @@ enum class SdpError
     missing_field,         ///< a required line or attribute is absent
     unsupported_network,   ///< a network or address type other than IN IP4
     unsupported_encoding,  ///< an rtpmap other than L16, L24, L32 or AM824
+    too_many_media,        ///< more audio media sections than Session::MAX_MEDIA
 };
 
 /// Error category for SDP errors

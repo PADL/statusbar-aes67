@@ -41,14 +41,15 @@ void check_references(std::span<sdp::PtpReference const> const references)
     }
 }
 
-/// A kept channel order counts its channels, and `media`'s order, IPMX declaration and maxptime are `again`'s.
+/// A kept channel order counts its channels, and `media`'s order, IPMX declaration, maxptime and clock domain are
+/// `again`'s.
 void check_written(sdp::Media const& media, sdp::Media const& again)
 {
     if (!media.channel_order.empty() && !sdp::channel_order_channels(media.channel_order)) {
         std::abort();
     }
     bool const same_fmtp = again.channel_order == media.channel_order && again.ipmx == media.ipmx;
-    if (!same_fmtp || again.max_packet_time_us != media.max_packet_time_us) {
+    if (!same_fmtp || again.max_packet_time_us != media.max_packet_time_us || again.clock_domain != media.clock_domain) {
         std::abort();
     }
 }
@@ -59,6 +60,9 @@ void check_round_trip(sdp::Session const& session)
     auto const again = sdp::parse(sdp::to_string(session));
     if (!again || again->media.size() != session.media.size()) {
         return;  // a session the writer sanitises differently is not this check's
+    }
+    if (again->clock_domain != session.clock_domain) {
+        std::abort();
     }
     for (size_t i = 0; i < session.media.size(); ++i) {
         check_written(session.media[i], again->media[i]);

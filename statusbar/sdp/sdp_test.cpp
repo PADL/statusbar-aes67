@@ -154,7 +154,7 @@ TEST(sdp, parses_a_2022_7_pair_and_skips_other_media)
     EXPECT_FALSE(session->effective_media_clock_offset(session->media[1]).has_value());
 }
 
-TEST(sdp, refuses_what_the_bridge_cannot_use)
+TEST(sdp, refuses_what_a_receiver_cannot_use)
 {
     auto changed = [](std::string_view from, std::string_view to) {
         std::string text{DANTE};
@@ -487,17 +487,26 @@ TEST(sdp, carries_the_ravenna_clock_domain)
     EXPECT_EQ(session->effective_clock_domain(m), std::optional<uint8_t>{3});
     auto const written = to_string(*session);
     EXPECT_TRUE(written.find("a=mediaclk:direct=1266592257\r\na=clock-domain:PTPv2 3\r\n") != std::string::npos);
-    EXPECT_TRUE(*parse(written) == *session);
+    EXPECT_TRUE(parse(written) == session);
 
-    // Session level applies to every media; other kinds and bad domains are ignored.
-    Session level;
-    level.clock_domain = 1;
-    Media media{};
-    level.media.push_back(media);
-    EXPECT_EQ(level.effective_clock_domain(level.media[0]), std::optional<uint8_t>{1});
+    // Session level, read before the first m=, applies to every media.
+    std::string level{DANTE};
+    level.insert(level.find("m=audio"), "a=clock-domain:PTPv2 1\r\n");
+    auto const at_session = parse(level);
+    EXPECT_TRUE(at_session.has_value());
+    if (!at_session) {
+        return;
+    }
+    EXPECT_EQ(at_session->clock_domain, std::optional<uint8_t>{1});
+    EXPECT_FALSE(at_session->media.at(0).clock_domain.has_value());
+    EXPECT_EQ(at_session->effective_clock_domain(at_session->media.at(0)), std::optional<uint8_t>{1});
+
+    // Other kinds and domains past 127 are ignored.
     std::string other{DANTE};
     other += "a=clock-domain:IEEE1588-2002 _DFLT\r\na=clock-domain:PTPv2 200\r\n";
-    EXPECT_FALSE(parse(other)->media.at(0).clock_domain.has_value());
+    auto const ignored = parse(other);
+    EXPECT_TRUE(ignored.has_value());
+    EXPECT_FALSE(ignored.transform([](Session const& s) { return s.media.at(0).clock_domain.has_value(); }).value_or(true));
 }
 
 TEST(sdp, reads_and_writes_the_rtcp_port)
@@ -654,7 +663,8 @@ TEST(sdp_ts_refclk, an_802_1as_reference_is_written_without_a_domain)
 {
     auto const gm = ieee::eui64_from_string("39-A7-94-FF-FE-07-CB-D0");
     PtpReference const gptp{.version = PtpVersion::ieee802_1as, .grandmaster = gm};
-    EXPECT_EQ(ts_refclk_value(gptp), std::string{"ptp=IEEE802.1AS-2011:39-A7-94-FF-FE-07-CB-D0"});  // AES67-2018 8.2 Example 2
+    EXPECT_EQ(
+        ts_refclk_value(gptp), std::string{"ptp=IEEE802.1AS-2011:39-A7-94-FF-FE-07-CB-D0"});  // AES67-2023 Clause 8.2, Example 3
     EXPECT_EQ(
         ts_refclk_value(PtpReference{.version = PtpVersion::ieee802_1as, .traceable = true}),
         std::string{"ptp=IEEE802.1AS-2011:traceable"});
@@ -695,7 +705,7 @@ TEST(sdp_ts_refclk, the_same_grandmaster_in_the_same_domain_is_the_same_clock)
     PtpReference const ours{.grandmaster = gm};
     EXPECT_TRUE(ours.same_clock(PtpReference{.grandmaster = gm}));
     EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = other}));
-    EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = gm, .domain = 1}));  // AES67-2018 8.2: another domain
+    EXPECT_FALSE(ours.same_clock(PtpReference{.grandmaster = gm, .domain = 1}));  // AES67-2023 Clause 8.2: another domain
     EXPECT_FALSE(ours.same_clock(PtpReference{.traceable = true}));
     EXPECT_FALSE(ours.same_clock(PtpReference{}));
 }
@@ -903,6 +913,20 @@ TEST(sdp_ts_refclk, a_reference_without_a_domain_names_domain_zero_alone)
     auto const grandmaster = *ieee::eui64_from_string("08-00-11-FF-FE-21-E1-B0");
     EXPECT_FALSE(session->names_clock(media, PtpReference::naming(grandmaster, 127)));
     EXPECT_TRUE(session->names_clock(media, PtpReference::naming(grandmaster, 0)));
+}
+
+TEST(sdp, at_most_max_media_audio_sections_are_read)
+{
+    std::string text = "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=x\r\nc=IN IP4 239.69.1.1/32\r\nt=0 0\r\n";
+    for (size_t i = 0; i < Session::MAX_MEDIA; ++i) {
+        text += "m=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n";
+    }
+    auto const full = parse(text);
+    EXPECT_EQ(full.transform([](Session const& s) { return s.media.size(); }).value_or(0), Session::MAX_MEDIA);
+    text += "m=video 5006 RTP/AVP 98\r\n";  // skipped: not counted
+    EXPECT_TRUE(parse(text).has_value());
+    text += "m=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n";
+    EXPECT_TRUE(parse(text).error() == SdpError::too_many_media);
 }
 
 TEST(sdp, long_text_fields_are_written_whole)

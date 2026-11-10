@@ -21,7 +21,7 @@ thread.
 
 - `make_sap_packet()` / `parse_sap_packet()` and `SapMessage` — the RFC 2974 §3 packet: version 1, IPv4 origin, no authentication, encryption or compression.
 - `SapAnnouncer` — announces sessions under caller-chosen keys; `announce()`, `withdraw()`, `withdraw_all()`.
-- `SapDirectory` — the announced sessions, keyed by `SessionKey`; `handle()` / `handle_packet()` yield `Event`s (`announced`, `deleted`, `timed_out`), `expire()`, `find(name, origin)`.
+- `SapDirectory` — the announced sessions, keyed by `SessionKey`; `handle()` / `handle_packet()` yield `Event`s (`announced`, `deleted`, `timed_out`, `evicted`), `expire()`, `find(name, origin)`.
 - `SapReceiver` — the socket and the directory on a reactor; `set_handler()`.
 - `SessionKey`, `session_key()`, `origin_line_of()`, `subscription_matches()` — a session's identity and the subscription rule.
 
@@ -59,37 +59,51 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 
 ## Notes & caveats
 
-- A changed session gets a new message id hash, so listeners read it as new; a hash is
-  never 0, which RFC 2974 reserves for "no hash".
+- A changed session is announced again under a new message id hash, with no deletion
+  first (RFC 2974 §5); the new hash always differs from the old, and is never 0, which
+  RFC 2974 reserves for "no hash".
+- `SapAnnouncer::open()` binds its socket to the origin, so its packets leave from the
+  address their origin field names, which listeners require.
 - `withdraw()` sends the deletion at once, not at the next tick, so a caller shutting
   down may withdraw and close straight away. A deletion carries only the o= line.
 - A session is known by its SDP origin (o= username, session id and address: RFC 8866
   §5.2's globally unique identifier). An announcement of a new session, or of a known one
   whose SDP changed (a new o= version, say), is `announced`; an unchanged
   re-announcement only refreshes it.
+- `handle_packet()` is given the packet's IP source address, and `admit()` refuses a packet
+  whose SAP origin field names another host (RFC 2974 §6: the originating source), one
+  longer than `MAX_PACKET` (4096 octets: room for a large ST 2110-30 or ST 2022-7
+  description sent fragmented; RFC 2974 §6 only recommends under 1 KB), or one that is not
+  SAP. `SapReceiver` reads with `recvfrom()` into a buffer one octet longer and counts what
+  `admit()` refuses in `dropped()`, so an announcement from the wrong host shows.
 - A deletion counts only from the SAP origin that announced the session, and not for an
-  older version than the one announced: a sender that changes a session deletes the old
-  one first, and a late copy of that deletion must not remove the new one. A deletion
+  older version than the one announced: a sender that deleted a session before
+  announcing its change, and a late copy of that deletion, must not remove it. A deletion
   without an o= line names the announcement by origin and message id hash (RFC 2974 §5);
   an o= line that does not read names nothing.
-- A re-announcement likewise counts only from the announcing origin, and an older version
-  only after a second (a device whose version counter restarted, not a late copy).
+- A re-announcement likewise counts only from the announcing origin, whatever its
+  version: a device whose version counter restarted is read at once.
 - Timeout: RFC 2974 §3.1 says ten of the sender's intervals or an hour, whichever is
-  more. AES67 devices announce far more often than the RFC's 300 s minimum and a source
-  that is gone should show as gone within minutes, so the default is ten 30 s intervals.
-  A session re-announced at longer intervals gets ten of those (the longer of its last
-  two gaps), up to the hour (`MAX_TIMEOUT_NS`); one heard only once gets twice the
-  timeout.
+  more. A source that is gone should show as gone within minutes, so the timeout is fixed,
+  by default 15 minutes: two of the RFC's slowest starting intervals (300 s, plus up to a
+  third of jitter), and thirty of AES67 devices' usual 30 s.
 - Compressed and encrypted packets, payload types other than `application/sdp` (compared
-  case-insensitively), and SDP the parser refuses are ignored. Once `MAX_SESSIONS` are
-  known, new ones are ignored until some time out.
+  case-insensitively), and SDP the parser refuses are ignored (`sdp::parse()` reads at most
+  `Session::MAX_MEDIA` audio sections). Once `MAX_SESSIONS` are known, a new session
+  evicts the one announced least recently, and an origin holding `MAX_SESSIONS_PER_ORIGIN`
+  (128) evicts its own, so one host cannot flood out the others' sessions. The announced
+  `Event` carries the evicted entry in `evicted`, and `SapReceiver` hands it to its handler
+  first as a `Kind::evicted` event.
 - `SapReceiver` joins the administratively scoped group (AES67's) first and must succeed
   there; the organisation-local and global groups are best effort. The handler runs
   inside `on_ready()` and `tick()`: it may read `directory()` but must not destroy the
   receiver or replace the handler.
+- Fuzzing: `sap_directory_fuzzer` feeds packets through `SapDirectory::handle_packet()` (with
+  `sdp::parse()`, `origin_line_of()` and `sdp::to_string()` on what parses); its seeds are in
+  `fuzz/seeds/sap_directory_fuzzer/` (`sap_directory_fuzzer fuzz/seeds/sap_directory_fuzzer`).
 
 ## Further reading
 
-- RFC 2974 §3, §3.1, §5.
-- AES67-2018 §9 — discovery.
+- RFC 2974 §3, §3.1, §5, §6.
+- AES67-2023 §9 — discovery.
 - [`sdp`](SDP_MODULE.md) — the payload.

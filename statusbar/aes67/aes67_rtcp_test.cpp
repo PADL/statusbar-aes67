@@ -127,7 +127,6 @@ class FakeTransport final : public Transport
         explicit Tx(FakeTransport& t)
             : transport{t}
         {}
-        auto send(rtp::RtpHeader const&, std::span<uint8_t const>) noexcept -> bool override { return true; }
         auto send_rendered(rtp::RtpHeader const& header, size_t const length, PayloadRenderer const& render) noexcept
             -> bool override
         {
@@ -153,7 +152,7 @@ class FakeTransport final : public Transport
             while (n < out.size() && !transport.rtcp_in.empty()) {
                 held.push_back(std::move(transport.rtcp_in.front()));
                 transport.rtcp_in.pop_front();
-                out[n++] = {.payload = held.back(), .source = {}};
+                out[n++] = {.payload = held.back(), .source = {.address = transport.rtcp_source, .port = 5005}};
             }
             return n;
         }
@@ -196,7 +195,8 @@ class FakeTransport final : public Transport
     std::vector<std::vector<uint8_t>> rtcp_out;
     std::vector<RtcpOptions> opened;
     std::vector<SendOptions> sends;
-    bool refuse_rtcp{false};  ///< the RTCP port refuses every send
+    bool refuse_rtcp{false};               ///< the RTCP port refuses every send
+    IPv4Address rtcp_source{10, 0, 0, 1};  ///< where received RTCP comes from: the stream's sender
     /// An RTP packet or SR sent, by its RTP timestamp, in the order sent.
     struct Sent
     {
@@ -680,6 +680,23 @@ TEST(aes67_rtcp, a_paused_sender_says_bye_once_and_reports_again_when_it_sends)
     EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{1});
 }
 
+TEST(aes67_rtcp, a_large_clock_step_back_onto_the_runs_first_packet_says_no_bye)
+{
+    SenderRig rig;
+    rig.run(T0, 40);
+    SendState const before = rig.sender.send_state();
+    EXPECT_TRUE(before.sent);
+    EXPECT_TRUE(before.next_index > before.first_index + (uint64_t{Sender::MAX_BURST} * 48));
+    // PTP steps back so far that the sender resynchronises to the packet before the run's first: the one it sends
+    // leaves next_index on first_index, and the run is still sending.
+    uint64_t const first = before.first_index;
+    rig.sender.tick(first, 0);
+    rig.session->tick(time_of(first));
+    EXPECT_EQ(rig.sender.send_state().next_index, first);
+    EXPECT_TRUE(rig.sender.send_state().sent);
+    EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{0});
+}
+
 TEST(aes67_rtcp, a_pause_and_resume_between_two_ticks_still_says_bye_for_the_old_ssrc)
 {
     SenderRig rig;
@@ -829,6 +846,59 @@ TEST(aes67_rtcp, a_receiver_reports_loss_jitter_and_the_last_sr)
     EXPECT_TRUE(session->stats().sr_received == 0 && session->stats().rr_sent == 0 && session->stats().bye_received == 0);
     EXPECT_EQ(session->stats().remote_cname, std::string{"talker@10.0.0.1"});
     EXPECT_TRUE(session->stats().remote_bye && session->stats().remote_ssrc == 0x5EED);
+}
+
+TEST(aes67_rtcp, a_receiver_reads_rtcp_from_its_streams_source_alone)
+{
+    FakeTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    EXPECT_TRUE(receiver.configure(stream_session(GROUP)).has_value());
+    std::vector<SenderReportTime> reports;
+    auto opts = options("bridge@10.0.0.2", 5 * MS);
+    opts.on_sender_report = [&](SenderReportTime const& report) { reports.push_back(report); };
+    auto session = std::move(*RtcpSession::open_receiver(receiver, transport, std::move(opts)));
+    uint64_t const base = index_at(T0);
+
+    // Before the stream's first packet, with no source filter, no host's SR is the sender's.
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, T0, static_cast<uint32_t>(base)));
+    session->tick(T0);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{0});
+
+    // Once the stream's packets come from 10.0.0.1, an SR from another host naming its SSRC is ignored.
+    transport.rtp_in.push_back(rtp_packet(0, base));
+    receiver.drain(base + 48);
+    EXPECT_TRUE(receiver.receive_state().source == (IPv4Address{10, 0, 0, 1}));
+    transport.rtcp_source = IPv4Address{10, 0, 0, 66};
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, T0 + MS, static_cast<uint32_t>(base)));
+    session->tick(T0 + MS);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{0});
+    EXPECT_TRUE(reports.empty());
+    EXPECT_FALSE(session->stats().remote_sr.has_value());
+
+    // The sender's own is read.
+    transport.rtcp_source = IPv4Address{10, 0, 0, 1};
+    transport.rtcp_in.push_back(make_ipmx_sr(0x5EED, T0 + (2 * MS), static_cast<uint32_t>(base)));
+    session->tick(T0 + (2 * MS));
+    EXPECT_EQ(session->stats().sr_received, uint64_t{1});
+    EXPECT_EQ(reports.size(), size_t{1});
+}
+
+TEST(aes67_rtcp, a_receiver_with_a_source_filter_reads_its_sources_rtcp_before_the_stream)
+{
+    FakeTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    auto described = stream_session(GROUP);
+    described.source_filter = sdp::SourceFilter{.destination = std::nullopt, .source = IPv4Address{10, 0, 0, 7}};
+    EXPECT_TRUE(receiver.configure(described).has_value());
+    EXPECT_TRUE(receiver.receive_state().source == (IPv4Address{10, 0, 0, 7}));
+    auto session = std::move(*RtcpSession::open_receiver(receiver, transport, options("bridge@10.0.0.2", 5 * MS)));
+    transport.rtcp_in.push_back(make_sr(0x5EED, T0));  // from 10.0.0.1: not the filter's
+    session->tick(T0);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{0});
+    transport.rtcp_source = IPv4Address{10, 0, 0, 7};
+    transport.rtcp_in.push_back(make_sr(0x5EED, T0 + MS));
+    session->tick(T0 + MS);
+    EXPECT_EQ(session->stats().sr_received, uint64_t{1});
 }
 
 TEST(aes67_rtcp, a_sender_report_pairs_a_domain_index_with_its_ptp_time)
@@ -1121,9 +1191,9 @@ TEST(aes67_rtcp, sr_rr_and_bye_round_trip_over_udp_loopback)
         std::println("  skipped: the host does not route multicast on lo");
         return;
     }
-    auto const& heard = (*listener)->stats();
-    EXPECT_EQ(heard.remote_cname, std::string{"talker@127.0.0.1"});
-    EXPECT_EQ(heard.remote_ssrc, sender.ssrc());
+    auto const& received = (*listener)->stats();
+    EXPECT_EQ(received.remote_cname, std::string{"talker@127.0.0.1"});
+    EXPECT_EQ(received.remote_ssrc, sender.ssrc());
     EXPECT_TRUE((*listener)->stats().rr_sent > 0);
     auto const& reported = (*talker)->stats();
     EXPECT_TRUE(reported.sr_sent > 0);
@@ -1134,7 +1204,7 @@ TEST(aes67_rtcp, sr_rr_and_bye_round_trip_over_udp_loopback)
     EXPECT_TRUE(reported.rtt_ns.has_value());
     EXPECT_TRUE(*reported.rtt_ns < 50 * MS);
 
-    // The listener leaves: the talker hears its BYE.
+    // The listener leaves: the talker receives its BYE.
     (*listener)->close();
     for (int tries = 0; tries < 100 && (*talker)->stats().bye_received == 0; ++tries) {
         (*talker)->on_ready(ptp_now());

@@ -241,7 +241,7 @@ auto ts_refclk_value(PtpReference const& clock) -> std::string
     }
     std::string value = std::format("ptp={}:{}", version, canonical_eui64(*clock.grandmaster));
     if (clock.version != PtpVersion::ieee802_1as) {
-        value += std::format(":{}", clock.domain);  // AES67-2018 Clause 8.2: none for 802.1AS
+        value += std::format(":{}", clock.domain);  // AES67-2023 Clause 8.2: none for 802.1AS
     }
     return value;
 }

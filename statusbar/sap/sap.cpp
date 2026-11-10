@@ -40,11 +40,14 @@ auto origin_line(std::string_view const sdp) -> std::string_view
     return line;
 }
 
-auto hash_of(std::string_view const sdp) noexcept -> uint16_t
+/// The message id hash of `sdp`, never `previous` (RFC 2974 Section 5: a modified session has a new one) nor 0,
+/// which means "no hash".
+auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -> uint16_t
 {
     auto const h = std::hash<std::string_view>{}(sdp);
     auto value = static_cast<uint16_t>(h ^ (h >> 16U) ^ (h >> 32U) ^ (h >> 48U));
-    return value == 0 ? uint16_t{1} : value;  // 0 means "no hash"
+    value = value == previous ? static_cast<uint16_t>(previous + 1) : value;
+    return value == 0 ? uint16_t{1} : value;
 }
 
 /// A version 1 header with no IPv6 origin, encryption or compression, and room for its authentication data.
@@ -74,14 +77,24 @@ auto hash_of(std::string_view const sdp) noexcept -> uint16_t
     return true;
 }
 
-/// Connects `fd` to `destination`:`port`, so send() needs no address.
-[[nodiscard]] auto connect_to(int const fd, ip::IPv4Address const& destination, uint16_t const port) noexcept -> Status
+/// An IPv4 socket address.
+[[nodiscard]] auto socket_address(ip::IPv4Address const& address, uint16_t const port) noexcept -> sockaddr_in
 {
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(destination.to_uint32());
-    if (::connect(fd, net::sockaddr_cast(address), sizeof(address)) != 0) {
+    sockaddr_in socket{};
+    socket.sin_family = AF_INET;
+    socket.sin_port = htons(port);
+    socket.sin_addr.s_addr = htonl(address.to_uint32());
+    return socket;
+}
+
+/// Binds `fd` to `origin`, so packets leave from the address their origin field names (RFC 2974 Section 6), and
+/// connects it to `destination`:`port`, so send() needs no address.
+[[nodiscard]] auto connect_from(
+    int const fd, ip::IPv4Address const& origin, ip::IPv4Address const& destination, uint16_t const port) noexcept -> Status
+{
+    auto const from = socket_address(origin, 0);
+    auto const to = socket_address(destination, port);
+    if (::bind(fd, net::sockaddr_cast(from), sizeof(from)) != 0 || ::connect(fd, net::sockaddr_cast(to), sizeof(to)) != 0) {
         return failure(net::errno_code());
     }
     return success();
@@ -141,7 +154,7 @@ auto SapAnnouncer::open(
             return failure(set.error());
         }
     }
-    if (auto connected = connect_to(fd->get(), destination, port); !connected) {
+    if (auto connected = connect_from(fd->get(), origin, destination, port); !connected) {
         return failure(connected.error());
     }
     return std::make_unique<SapAnnouncer>(std::move(*fd), origin);
@@ -160,9 +173,8 @@ void SapAnnouncer::announce(std::string const& key, sdp::Session const& session)
         if (it->sdp == text) {
             return;
         }
-        (void)send(true, *it);  // the old description goes before the new one comes
-        it->sdp = std::move(text);
-        it->hash = hash_of(it->sdp);
+        it->sdp = std::move(text);  // RFC 2974 Section 5: re-announced under a new hash, no deletion
+        it->hash = hash_of(it->sdp, it->hash);
         it->due = true;
         return;
     }

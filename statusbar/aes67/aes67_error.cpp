@@ -15,7 +15,7 @@ auto Aes67ErrorCategory::message(int const ev) const -> std::string
         case Aes67Error::not_ptp_locked:
             return "stream has no direct (PTP) media clock";
         case Aes67Error::format_mismatch:
-            return "stream format differs from the slot's";
+            return "stream channels or sample rate differ from the configured format";
         case Aes67Error::unsupported_format:
             return "unsupported encoding or sample rate";
         case Aes67Error::packet_too_large:
@@ -27,7 +27,7 @@ auto Aes67ErrorCategory::message(int const ev) const -> std::string
         case Aes67Error::interface_not_found:
             return "interface not found or has no IPv4 address";
         case Aes67Error::encoding_mismatch:
-            return "stream encoding (sample width) differs from the slot's";
+            return "stream encoding (sample width) differs from the configured format";
         case Aes67Error::rtcp_multiplexed:
             return "RTCP multiplexed on the RTP port is not supported";
         case Aes67Error::no_rtcp_peer:

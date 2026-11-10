@@ -25,17 +25,12 @@
 
 namespace statusbar::aes67 {
 
-/// A grandmaster written `<EUI-64>[:<domain>]` (the EUI-64 with '-' or ':'
-/// separators, or none; the domain 0-127), as a command line or configuration
-/// gives it; nullopt if it is not one.
-[[nodiscard]] auto parse_grandmaster(std::string_view text) -> std::optional<Grandmaster>;
-
 class Sender
 {
   public:
     /// Packets one tick sends at most; further behind, the sender skips ahead.
     static constexpr uint32_t MAX_BURST = 8;
-    /// The largest RTP payload sent: 1440 octets, AES67-2018 Section 6.3 (no fragmentation in a
+    /// The largest RTP payload sent: 1440 octets, AES67-2023 Clause 6.3 (no fragmentation in a
     /// 1500-octet MTU, over IPv4 or IPv6).
     static constexpr uint32_t MAX_PAYLOAD = 1440;
     /// Session ids and versions are kept to 63 bits: positive in any signed reading.
@@ -58,18 +53,10 @@ class Sender
     /// behind now. Default: default_send_offset(). Any thread, real-time safe; the next tick adopts it.
     void set_send_offset(uint32_t const frames) noexcept { send_offset_.store(frames, std::memory_order_relaxed); }
     [[nodiscard]] auto send_offset() const noexcept -> uint32_t { return send_offset_.load(std::memory_order_relaxed); }
-    /// One 125 us tick, rounded up (6 frames at 48 kHz): for a provider whose frames are there by
-    /// their index; a provider fed from the network wants relay_send_offset().
+    /// One 125 us tick, rounded up (6 frames at 48 kHz): for a provider whose frames are there by their index.
     [[nodiscard]] static constexpr auto default_send_offset(StreamFormat const& format) noexcept -> uint32_t
     {
         return (format.sample_rate + 7999) / 8000;
-    }
-    /// One packet of this stream plus two 125 us ticks: for a provider whose
-    /// frames arrive over a network (an AES67 receiver's), a packet time plus
-    /// arrival jitter after their index.
-    [[nodiscard]] static constexpr auto relay_send_offset(StreamFormat const& format) noexcept -> uint32_t
-    {
-        return format.frames_per_packet + (format.sample_rate / 4000);
     }
 
     /// Where the packet grid starts, in frames (modulo frames_per_packet):
@@ -292,6 +279,7 @@ class Sender
     {
         uint32_t packets{0};
         uint32_t octets{0};
+        bool sent{false};  ///< a packet of the run has gone (SendState::sent)
     };
     RtcpCounts rtcp_counts_{};
     itc::SeqlockValue<SendState> send_state_;  ///< real-time -> RTCP session

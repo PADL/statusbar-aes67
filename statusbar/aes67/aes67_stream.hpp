@@ -45,7 +45,7 @@ struct StreamFormat
 };
 
 //
-// Streams under SRP - AES67-2018 Annex C.1.1
+// Streams under SRP - AES67-2023 Annex C.1.1
 //
 
 /// An SRP traffic class; its measurement interval is IEEE 802.1Q-2022 Clause 34.4's.
@@ -71,7 +71,7 @@ enum class SrClass : uint8_t
 struct SrpTSpec
 {
     /// MaxFrameSize past the payload. Clause 35.2.2.8.4 a): IPv4 (20), UDP (8) and RTP headers, no
-    /// Ethernet overhead (AES67-2018 Annex C.1.1.1), and one spare octet as Milan v1.2 Section 4.3.3.2 reserves.
+    /// Ethernet overhead (AES67-2023 Annex C.1.1.1), and one spare octet as Milan v1.2 Section 4.3.3.2 reserves.
     static constexpr uint32_t FRAME_OVERHEAD = static_cast<uint32_t>(20 + 8 + rtp::RtpHeader::LENGTH + 1);
 
     uint16_t max_frame_size{0};       ///< MaxFrameSize: octets from the IPv4 header on
@@ -90,7 +90,7 @@ struct SrpTSpec
     return frames == 0 ? 1 : static_cast<uint32_t>(frames);
 }
 
-/// The TSpec of `format` sent in `sr_class` (AES67-2018 Annex C.1.1.1): MaxIntervalFrames is the packets that
+/// The TSpec of `format` sent in `sr_class` (AES67-2023 Annex C.1.1.1): MaxIntervalFrames is the packets that
 /// can start in one interval (1 at srp_frames_per_packet()); zero for an empty format.
 [[nodiscard]] constexpr auto srp_tspec(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> SrpTSpec
 {
@@ -225,8 +225,8 @@ enum class DropReason : uint8_t
 {
     not_rtp,       ///< not an RTP packet (RFC 3550 Section 5.1)
     payload_type,  ///< not the SDP's payload type
-    size,          ///< an empty payload, or not whole frames of the format
-    source,        ///< not from the source the SDP's source filter names (RFC 4570)
+    size,          ///< an empty payload, not whole frames of the format, or more frames than the SDP's ptime
+    source,        ///< not from the SDP's source filter (RFC 4570), or another address with the live source's SSRC
     ssrc,          ///< another SSRC while the learnt one is live
     sequence,      ///< a duplicate, or a sequence jump not yet confirmed (RFC 3550 Appendix A.1)
     no_offset,     ///< a sender-clocked stream's, before its offset is known
@@ -288,6 +288,7 @@ struct SendState
     uint32_t octets{0};       ///< payload octets sent since configure(), mod 2^32
     uint64_t first_index{0};  ///< the run's first packet (its first frame's index), sent or held for its first SR
     uint64_t next_index{0};   ///< the next packet to send: first_index while that is held
+    bool sent{false};         ///< a packet of the run has gone: false while its first is held for its SR
 
     auto operator==(SendState const&) const noexcept -> bool = default;
 };
@@ -297,7 +298,8 @@ struct SendState
 struct ReceiveState
 {
     uint32_t ssrc{0};
-    bool valid{false};           ///< a source has been heard
+    bool valid{false};           ///< a source has been learnt
+    ip::IPv4Address source;      ///< its address, or before one the SDP's source filter (0.0.0.0: neither)
     uint32_t extended_max{0};    ///< rtp::RtpSequence::extended_max()
     uint32_t expected{0};        ///< rtp::RtpSequence::expected()
     uint32_t received{0};        ///< rtp::RtpSequence::received()

@@ -26,7 +26,7 @@
 namespace statusbar::sdp {
 
 /// The encodings carried: AES67 linear PCM (RFC 3551 L16, RFC 3190 L24), L32
-/// (32-bit big-endian PCM, a RAVENNA extension: AES67-2018 mandates only L16/L24)
+/// (32-bit big-endian PCM, a RAVENNA extension: AES67-2023 mandates only L16/L24)
 /// and RAVENNA's AES3 transport, AM824 (IEC 61883-6 32-bit subframes, as ST 2110-31).
 enum class Encoding : uint8_t
 {
@@ -79,7 +79,7 @@ struct Connection
 };
 
 /// The PTP versions RFC 7273 Section 4.8 registers, IEEE1588-2019 (as SMPTE ST 2110-10 writes it), and any
-/// other `ptp-version-ext` token; IEEE 802.1AS-2011 and -2020 are one gPTP, domain 0 (AES67-2018 Clause 8.2).
+/// other `ptp-version-ext` token; IEEE 802.1AS-2011 and -2020 are one gPTP, domain 0 (AES67-2023 Clause 8.2).
 enum class PtpVersion : uint8_t
 {
     ieee1588_2002,
@@ -109,7 +109,7 @@ enum class PtpVersion : uint8_t
 
 /// `a=ts-refclk:ptp=<version>:<grandmaster>[:<domain>]` or `ptp=<version>:traceable` (RFC 7273 Section 4.8).
 /// The domain is read bare, as `domain-nmbr=`, or absent (0), and written bare, except for IEEE 802.1AS,
-/// which has none (AES67-2018 Clause 8.2); another version, or a bare one, is kept and written as read (`text`).
+/// which has none (AES67-2023 Clause 8.2); another version, or a bare one, is kept and written as read (`text`).
 struct PtpReference
 {
     PtpVersion version{PtpVersion::ieee1588_2008};
@@ -126,7 +126,7 @@ struct PtpReference
     }
 
     /// Whether this names the clock `other` does: one grandmaster in one domain, an IEEE 802.1AS reference and an
-    /// IEEE 1588-2008/2019 one in domain 0 being the same (AES67-2018 Clause 8.2, Annex D.1). Never for traceable.
+    /// IEEE 1588-2008/2019 one in domain 0 being the same (AES67-2023 Clause 8.2, Annex D.1). Never for traceable.
     [[nodiscard]] auto same_clock(PtpReference const& other) const noexcept -> bool;
 
     auto operator==(PtpReference const&) const noexcept -> bool = default;
@@ -247,7 +247,7 @@ struct Media
     ReferenceClocks clocks;  ///< a=ts-refclk
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
-    std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see ClockDomain below)
+    std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see Session::effective_clock_domain())
     std::optional<RtcpAttribute> rtcp;    ///< a=rtcp
     bool rtcp_mux{false};                 ///< a=rtcp-mux (RFC 5761) was given; read, never written
     /// The primary format's `a=fmtp:<pt> channel-order=` (ST 2110-30 Section 6.2.2), e.g. "SMPTE2110.(ST)": read and
@@ -321,6 +321,9 @@ struct Media
 /// A session description
 struct Session
 {
+    /// The most audio media sections parse() reads; a description with more fails too_many_media.
+    static constexpr size_t MAX_MEDIA = 16;
+
     std::string username{"-"};
     uint64_t session_id{0};
     uint64_t session_version{0};

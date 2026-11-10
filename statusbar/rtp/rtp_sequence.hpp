@@ -3,10 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RTP sequence number validation (RFC 3550 Appendix A.1) with the loss accounting of Appendix
-/// A.3: a new source on probation, gaps as losses, a large jump believed only when confirmed.
+/// RTP sequence number validation (RFC 3550 Appendix A.1) with the counts of Appendix A.3: a new source on
+/// probation, gaps as losses, a large jump believed only when confirmed.
 
-#include <algorithm>
 #include <cstdint>
 
 namespace statusbar::rtp {
@@ -76,48 +75,8 @@ class RtpSequence
     /// Packets accounted for, duplicates included (as RFC 3550 counts them).
     [[nodiscard]] constexpr auto received() const noexcept -> uint32_t { return received_; }
 
-    /// Cumulative loss; negative when duplicates outnumber losses.
-    [[nodiscard]] constexpr auto lost() const noexcept -> int64_t
-    {
-        return static_cast<int64_t>(expected()) - static_cast<int64_t>(received_);
-    }
-
-    /// RFC 3550 §6.4.1 reception figures, as a receiver report carries them.
-    struct LossReport
-    {
-        uint8_t fraction_lost;    // over the interval since the last report, in 1/256ths
-        int32_t cumulative_lost;  // clamped to the report's 24-bit signed field
-    };
-
-    /// The figures for the interval since the previous call (or since validation).
-    constexpr auto report() noexcept -> LossReport
-    {
-        auto const interval = next_interval();
-        auto const lost_interval = static_cast<int64_t>(interval.expected) - static_cast<int64_t>(interval.received);
-        uint8_t const fraction =
-            (interval.expected == 0 || lost_interval <= 0) ? 0 : static_cast<uint8_t>((lost_interval << 8) / interval.expected);
-        return {
-            .fraction_lost = fraction, .cumulative_lost = static_cast<int32_t>(std::clamp<int64_t>(lost(), -0x800000, 0x7FFFFF))};
-    }
-
   private:
     static constexpr uint32_t SEQ_MOD = 1U << 16U;
-
-    /// Packets expected and received, as running totals or over an interval.
-    struct Counts
-    {
-        uint32_t expected{0};
-        uint32_t received{0};
-    };
-
-    /// The counts since the previous call, and starts the next interval (RFC 3550 Appendix A.3).
-    [[nodiscard]] constexpr auto next_interval() noexcept -> Counts
-    {
-        Counts const now{.expected = expected(), .received = received_};
-        Counts const interval{.expected = now.expected - prior_.expected, .received = now.received - prior_.received};
-        prior_ = now;
-        return interval;
-    }
 
     constexpr void restart(uint16_t const seq) noexcept
     {
@@ -126,7 +85,6 @@ class RtpSequence
         bad_seq_ = SEQ_MOD + 1;  // matches no sequence number
         cycles_ = 0;
         received_ = 0;
-        prior_ = {};
     }
 
     bool started_{false};
@@ -136,7 +94,6 @@ class RtpSequence
     uint32_t base_seq_{0};
     uint32_t bad_seq_{SEQ_MOD + 1};
     uint32_t received_{0};
-    Counts prior_{};  ///< the totals at the previous report
 };
 
 }  // namespace statusbar::rtp

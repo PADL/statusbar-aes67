@@ -40,7 +40,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `RtcpCadence` — when a receiver's next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
 - `SrClass`, `SrpTSpec`, `srp_frames_per_packet()`, `srp_tspec()`, `multicast_mac_aliases()` — a stream
-  under SRP (AES67-2018 Annex C.1.1): the framing of its class's interval, its MSRP TSpec, and
+  under SRP (AES67-2023 Annex C.1.1): the framing of its class's interval, its MSRP TSpec, and
   whether two groups share an Ethernet address. `SendOptions::vlan`, `SendPort::set_vlan()` and
   `Sender::set_vlan()` tag a stream; `XdpTransport::set_receive_vid()` receives tagged ones.
 - `Aes67Error` — `enum class`, category `statusbar.aes67`.
@@ -74,7 +74,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 - `statusbar/aes67/aes67_stream.hpp` — `StreamFormat`, callbacks, `Destination`, `Grandmaster`, `State`, `Counters`.
 - `statusbar/aes67/aes67_receiver.hpp` — `Receiver`.
-- `statusbar/aes67/aes67_sender.hpp` — `Sender`, `parse_grandmaster()`.
+- `statusbar/aes67/aes67_sender.hpp` — `Sender`.
 - `statusbar/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
 - `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
@@ -93,7 +93,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 - The control thread (one thread) calls `open_receive()` / `open_send()` and destroys
   ports; these may allocate and make syscalls. The real-time thread calls
-  `ReceivePort::receive()`, `SendPort::send()`, `send_rendered()`, `flush()`,
+  `ReceivePort::receive()`, `SendPort::send_rendered()`, `flush()`,
   `begin_tick()` and `end_tick()`: no allocation, no blocking, no logging.
 - Opening and destroying ports is safe while the real-time thread ticks the transport. A
   transport that shares state between ports (XDP) hands port changes to the real-time
@@ -104,8 +104,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   destructor), and the real-time thread stops ticking it before it is destroyed.
 - A datagram's `payload` is the transport's until the next `receive()` on the port or the
   next `begin_tick()`, whichever is first.
-- `send_rendered()` reserves the buffer first; when it cannot (as `send()` would fail),
-  `render` is not called. When `render` returns false, or the packet is refused after it
+- `send_rendered()` reserves the buffer first; when it cannot, `render` is not called. When `render` returns false, or the packet is refused after it
   ran (the XDP TX ring is full), the buffer is released unsent: a batch slot is not
   counted, a UMEM frame goes back to the pool, or, refused by the ring, is freed. A
   transport calls `render` at most once per packet, because the sender pulls its frames
@@ -121,7 +120,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### Sender
 
-- Packet times (AES67-2023 Clause 7.2.0): a sender sends any whole number of frames per
+- Packet times (AES67-2023 Clause 7.2): a sender sends any whole number of frames per
   packet whose payload fits `MAX_PAYLOAD`, 1440 octets (Clause 6.3); larger fails
   `packet_too_large`. That covers 125 us, 250 us, 333 us, 1 ms and 4 ms (Clauses 7.2.1 and
   7.2.2; 6, 12, 16, 48 and 192 frames at 48 kHz), 4 ms only for few channels (2 of L24 at
@@ -139,8 +138,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   after its RTP timestamp (1.125 ms for 1 ms packets at 48 kHz). The lower the send offset, the
   more of a receiver's latency budget is left (a Dante receiver at its 1 ms setting is
   already late with 1 ms packets), but a provider whose frames land later than that has
-  them counted lost. `relay_send_offset()`, a packet plus two ticks, is for a provider fed
-  from the network (an AES67 receiver's frames). A changed send offset applies from the next
+  them counted lost; one fed from the network (an AES67 receiver's frames) wants about a
+  packet plus two ticks. A changed send offset applies from the next
   tick: a longer one waits, a shorter one catches up, up to `MAX_BURST` packets.
 - Send phase stagger: with every 1 ms output on phase 0, all of them send on the same
   tick in eight, and that burst, not the mean load, sets the ceiling. Give the kth sender
@@ -215,9 +214,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   rate, an RFC 4570 source filter if any, and the RFC 7273 direct media clock offset. It
   prefers the offered format with the receiver's encoding (`Media::prefer()`), else the
   primary one; the encoding must be the receiver's (`encoding_mismatch`), and channels and
-  rate too (`format_mismatch`). The ptime need not match: any packet time is received,
-  each packet's frames counted from its payload (AES67-2023 Clause 7.2.0), up to the
-  transport's largest datagram (1500 octets). A stream without a direct media clock is
+  rate too (`format_mismatch`). The receiver's ptime need not match the SDP's: each
+  packet's frames are counted from its payload (AES67-2023 Clause 7.2), up to the SDP's
+  ptime, or its maxptime when longer (`max_frames()`); a longer packet fails `size`. Clause 7.2 says a receiver
+  should not rely on the SDP's packet time; a dedicated device bounds what one packet hands its sink by it all the same. A stream without a direct media clock is
   refused (`not_ptp_locked`): its timestamps are not PTP time.
 - Where it receives (`receive_endpoint()`, AES67-2023 Clauses 6.1.1 and 8.5.2, RFC 8866
   Clause 5.7): a group's `c=` is joined; a unicast `c=` that is this host's address (a
@@ -235,14 +235,16 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `set_sender_clock(true)` before `configure()` accepts only `mediaclk:sender` streams (any
   other fails `not_sender_clocked`, `direct` included, as a direct stream would drift in a
   foreign domain). Such a stream has no offset until `set_offset()`: `drain()` learns its
-  SSRC and sequence (so its session accepts only that source's reports) but drops its
+  SSRC, address and sequence (so its session reads only that source's reports) but drops its
   packets (counted) until then, and a new source clears the offset. The offset comes from the stream's first IPMX-form SR:
   `sender_clock_offset(report, timebase, fs)` is the RTP timestamp less the domain's index
   at the PTP time named, rounded to the nearest sample. `set_offset()` is an atomic store,
   safe from the reactor while the real-time thread drains; checking later reports against
   it (a stream not in the domain moves) is the caller's.
-- Packets of the stream's payload type are accepted. The first one's SSRC is learnt and
-  other sources dropped until the learnt one has been silent for a second. The sequence is
+- Packets of the stream's payload type are accepted. The first one's SSRC and source
+  address are learnt, and another SSRC, or the same SSRC from another address, is dropped
+  until the learnt source has been silent for a second; a host copying the SSRC cannot
+  reset the sequence. The sequence is
   tracked with `rtp::RtpSequence`; a new source's probation packets are handed on too, and
   only an unconfirmed jump of a validated source is dropped. The payload goes to the
   `FrameHandler` as is.
@@ -258,8 +260,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - Counters: `packets` and `frames` handed on; `lost`, frames in sequence gaps not (yet)
   filled; `late`, frames that arrived out of order (after a later packet), still handed
   on; `dropped`, packets refused, and `drops` the same by `DropReason`: `not_rtp` (no RTP
-  header), `payload_type` (not the SDP's), `size` (empty, or not whole frames), `source`
-  (not the source filter's, RFC 4570), `ssrc` (another source while the learnt one is
+  header), `payload_type` (not the SDP's), `size` (empty, not whole frames, or more than
+  `max_frames()`), `source` (not the source filter's, RFC 4570, or the learnt SSRC from
+  another address), `ssrc` (another source while the learnt one is
   live), `sequence` (a duplicate, or a jump RFC 3550 Appendix A.1 has not confirmed) and
   `no_offset` (a sender-clocked stream before `set_offset()`). Checked in that order; a
   packet counts once, under the first reason that refuses it.
@@ -271,7 +274,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   CNAME in every compound packet). A receiver's sends an RR with one report block about
   the stream, then SDES. Both send an empty RR, SDES and BYE on `close()` or destruction; a sender's
   session also sends one, at its next `tick()`, for the SSRC it last saw sending once that is gone
-  (stopped by `Sender::pause()`, or replaced by a resumed run's, however quickly), and then none on
+  (stopped by `Sender::pause()`, or replaced by a resumed run's, however quickly; `SendState::sent` says whether
+  a run has sent, so a clock step that moves `next_index` back onto `first_index` is not a stop), and then none on
   `close()` unless it sent again. The BYE is built on the reactor, never the real-time thread.
   Out of scope: an RFC 3550 wall-clock NTP mode, APP, SDES items past CNAME, RTCP-XR,
   timer reconsideration and member tables (§6.3.3–6.3.7), and RTP/RTCP multiplexing (RFC
@@ -292,7 +296,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - One SR form: the time field is the sender's clock in the PTP truncated format (TR-10-1 §8.7: seconds mod 2³²,
   then nanoseconds) and the SR always carries the IPMX Info Block with the PCM Media Info Block. The field is PTP
   time when `ts-refclk` names a PTP grandmaster; under `localmac` it is the sender's free-running clock (§7.1,
-  §10.4). AES67-2018 §6.3 asks only for RFC 3550 §6 and prescribes no derivation of the field, and no AES67
+  §10.4). AES67-2023 §6.3 asks only for RFC 3550 §6 and prescribes no derivation of the field, and no AES67
   receiver synchronises from it. The pair is exact: the field is the time the SR's packet's first sample is
   sampled (`time_of(index)`), the RTP timestamp that sample's (`mediaclk:direct=0`).
 - The packet's time is the sender's own: with no timebase it is written unconverted, so a sender ticked with
@@ -320,7 +324,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   (Dante marks media EF, 46).
 - A receiver's interval keeps RFC 3550 §6.2's 5 s fixed minimum; an `rfc3550` sender's a chosen 1 s. `Rfc3550Interval` applies §6.3.1 with two
   members and one sender over 5 % of the stream's bandwidth (the share never binds at AES67 rates), halves the
-  first interval, and randomises each. Receivers heard from are not counted into it.
+  first interval, and randomises each. Receivers reporting are not counted into it.
 - Round trip: an RR echoes the middle bits of the SR's field, which for the PTP form are
   not RFC 3550's 1/65536 s units, so the sender keeps the PTP time of its last
   `SR_HISTORY` SRs (128, 1.28 s of them) and finds the one an RR's LSR names; the RTT is arrival − that time −
@@ -332,10 +336,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   measurement. Loss figures come from the receiver's
   `RtpSequence`; the session forms the interval's fraction from the cumulative
   `expected` and `received` it last reported, so nothing on the real-time thread resets.
-- A session hears its own reports when the group loops them back and skips its SSRC.
-  A receiver's session accepts any SR on the stream's RTCP endpoint before the first media
-  packet, and only the stream's SSRC after. A sender's "remote" is whichever receiver
-  reported on its stream last.
+- A session receives its own reports when the group loops them back and skips its SSRC.
+  A receiver's session reads RTCP only from `ReceiveState::source`: the address the
+  stream's packets come from, or before the first one the SDP's source filter; with
+  neither it reads nothing, and after the first packet only the stream's SSRC counts. Its
+  SRs drive a sender-clocked stream's offset, so no other host may send them. A sender's
+  "remote" is whichever receiver reported on its stream last.
 - The CNAME is the caller's: RFC 3550 §6.5.1's `user@host` shape, as
   `<identity>@<address>`, at most 255 bytes.
 - `Receiver::rtcp_options()` reads the endpoint from the SDP: `a=rtcp:` when given,
@@ -379,7 +385,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   `Sender::set_dscp()`, by default `rtp::FrameAddressing::DSCP_MEDIA`, 34). A tick's packets are written straight
   into the `SEND_BATCH` slots of the sender's `sendmmsg()` batch.
 - An RTCP port is one socket for both directions. For a group it is bound to the group at
-  the RTCP port, joined, and sends there with loopback on, so a session hears its own
+  the RTCP port, joined, and sends there with loopback on, so a session receives its own
   reports and must skip its own SSRC; for a unicast peer it is bound to `RtcpOptions::local`
   (by default this address at the destination port), without `SO_REUSEADDR`, leaves as its
   stream's socket does (by the interface, with `RtcpOptions::ttl`, at socket priority 0),
@@ -479,7 +485,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### Streams under SRP
 
-- AES67-2018 Annex C.1.1 carries a stream as an IEEE 802.1Q Clause 35 reservation. `srp_tspec(format,
+- AES67-2023 Annex C.1.1 carries a stream as an IEEE 802.1Q Clause 35 reservation. `srp_tspec(format,
   class)` is its TSpec (Clause 35.2.2.8.4): MaxFrameSize counts the IPv4, UDP and RTP headers, the
   payload and one spare octet, no Ethernet overhead (Annex C.1.1.1); MaxIntervalFrames the packets
   that can start in one class interval (125 us for class A, 250 us for B, Clause 34.4).
@@ -513,12 +519,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   time committed (`net::LaunchOrder`: igc's queue is a FIFO; the last time a second or more ahead of
   now is a clock step; a time already past at commit, an overrunning tick, goes at once and is
   counted, as are holds and steps, in `launch_clock().order()`); `clear_launch_lead()` is now again.
-  An untimed send (`send()`, a tick without a time) goes at now. RTCP and SAP go by kernel sockets,
+  An untimed send (a tick without a time) goes at now. RTCP and SAP go by kernel sockets,
   never through the socket.
 - The lead moves the wire time only: the packet leaves at departure plus lead, free of the sending
   CPU's jitter, while its timestamp and the receiver's placement are unchanged, so launch time
   changes no latency; it lets a receiver's link offset cover the lead plus the network transit
-  instead of the sender's jitter as well (AES67-2018 Section 7.4). A lead of 0 would be past when
+  instead of the sender's jitter as well (AES67-2023 Clause 7.4). A lead of 0 would be past when
   the tick commits the frame (the NIC sends at once, as without launch time), so the lead is a
   whole tick or more.
 - The NIC honours the time only with the socket's queue in launch-time mode:
@@ -539,7 +545,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ## Further reading
 
-- AES67-2018 — interoperability requirements for audio over IP (§6.2 DSCP, §6.3 transport and RTCP).
+- AES67-2023 — interoperability requirements for audio over IP (§6.2 DSCP, §6.3 transport and RTCP).
 - RFC 3550 — RTP and RTCP; RFC 3605 — the RTCP attribute; RFC 7273 — clock source signalling; RFC 4570 — source filters.
 - VSF TR-10-1:2024 §8.7, §8.10.1, §10.1 and §10.4, and TR-10-3:2024 §11 — the IPMX SR, its schedule, the SDP
   declaration and `localmac`, and the Info Block.

@@ -172,7 +172,7 @@ auto parse_network(std::string_view& rest) noexcept -> Status
 }
 
 /// The text after `ptp=`: `<version>[:<gmid>|:traceable][:<domain>]`; IEEE 802.1AS's domain is 0 whatever is
-/// written (AES67-2018 Clause 8.2). Another version is kept unparsed, and a bare one as read: neither fails.
+/// written (AES67-2023 Clause 8.2). Another version is kept unparsed, and a bare one as read: neither fails.
 [[nodiscard]] auto parse_ptp_reference(std::string_view const value) -> StatusValue<PtpReference>
 {
     auto rest = value.substr(4);
@@ -207,7 +207,7 @@ void keep_reference(ReferenceClocks& clocks, PtpReference clock)
 }
 
 /// Whether PTP versions `a` and `b` can name one clock: PTPv1 only itself, and IEEE 1588-2008, 1588-2019 and 802.1AS
-/// one another (one PTPv2 domain across a boundary clock, AES67-2018 Annex D.1); never another token.
+/// one another (one PTPv2 domain across a boundary clock, AES67-2023 Annex D.1); never another token.
 [[nodiscard]] auto same_protocol(PtpVersion const a, PtpVersion const b) noexcept -> bool
 {
     if (a == PtpVersion::other || b == PtpVersion::other) {
@@ -482,7 +482,7 @@ class Parser
             case 'a':
                 return attribute(value);
             default:
-                return success();  // b=, k=, r=, z=, ...: nothing the bridge needs
+                return success();  // b=, k=, r=, z=, ...: nothing a receiver of AES67 needs
         }
     }
 
@@ -545,11 +545,20 @@ class Parser
         if (!parse_offered(rest) || !port || offered_.empty()) {
             return failure(SdpError::malformed_line);
         }
-        media_ = &session_.media.emplace_back(Media{.port = *port, .payload_type = offered_.front()});
+        if (session_.media.size() >= Session::MAX_MEDIA) {
+            return failure(SdpError::too_many_media);
+        }
+        open_media(*port);
+        return success();
+    }
+
+    /// A new audio media section at `port`, its primary payload type the first offered.
+    void open_media(uint16_t const port)
+    {
+        media_ = &session_.media.emplace_back(Media{.port = port, .payload_type = offered_.front()});
         rtpmap_ = RtpmapResult::other_payload_type;
         formats_.clear();
         parameters_.clear();
-        return success();
     }
 
     /// The payload types an `m=` line offers, in order of preference (RFC 8866 Section 5.14), into `offered_`;
@@ -667,10 +676,11 @@ class Parser
     /// `a=clock-domain:PTPv2 <domain>`; another clock kind, or a domain out of range, is ignored.
     auto clock_domain_attribute(std::string_view const rest) -> Status
     {
-        if (!rest.starts_with("PTPv2 ")) {
+        static constexpr std::string_view PTPV2 = "PTPv2 ";
+        if (!rest.starts_with(PTPV2)) {
             return success();
         }
-        auto const domain = parse_number<uint8_t>(rest.substr(6));
+        auto const domain = parse_number<uint8_t>(rest.substr(PTPV2.size()));
         if (domain && *domain <= 127) {
             (media_ != nullptr ? media_->clock_domain : session_.clock_domain) = domain;
         }

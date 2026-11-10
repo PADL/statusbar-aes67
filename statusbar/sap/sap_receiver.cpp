@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
+#include <system_error>
 #include <utility>
 
 #include <arpa/inet.h>
@@ -18,8 +20,6 @@ namespace statusbar::sap {
 namespace {
 
 constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
-/// Copies of one announcement closer together than this are one announcement.
-constexpr int64_t DUPLICATE_NS = 1'000'000'000;
 
 /// Reads the next line from `text`, without its CR LF or LF.
 [[nodiscard]] auto next_line(std::string_view& text) noexcept -> std::string_view
@@ -55,27 +55,16 @@ constexpr int64_t DUPLICATE_NS = 1'000'000'000;
     return message.message_id_hash != 0 && entry.message_id_hash == message.message_id_hash;
 }
 
-/// Records an announcement heard `gap` after the last; a copy (another group, another path) is not an interval.
-void note_heard(SapDirectory::Entry& entry, SapMessage const& message, int64_t const gap, int64_t const now_ns) noexcept
-{
-    if (gap >= DUPLICATE_NS) {
-        entry.interval_ns = std::max(gap, entry.last_gap_ns);  // the longer of the last two: one late burst passes
-        entry.last_gap_ns = gap;
-    }
-    entry.last_seen_ns = now_ns;
-    entry.message_id_hash = message.message_id_hash;
-}
-
-/// A re-announcement of a known entry: an event when its description changed. Only from the origin that
-/// announced it; an older version is a late copy, unless it comes after the copies' window (a reboot).
+/// A re-announcement of a known entry, from the origin that announced it: an event when its description changed,
+/// whatever its version (RFC 2974 Section 5: a change is a new message id hash).
 [[nodiscard]] auto update_entry(SapDirectory::Entry& entry, SapMessage const& message, sdp::Session session, int64_t const now_ns)
     -> std::optional<SapDirectory::Event>
 {
-    int64_t const gap = now_ns - entry.last_seen_ns;
-    if (message.origin != entry.sap_origin || (session.session_version < entry.session.session_version && gap < DUPLICATE_NS)) {
+    if (message.origin != entry.sap_origin) {
         return std::nullopt;
     }
-    note_heard(entry, message, gap, now_ns);
+    entry.last_seen_ns = now_ns;
+    entry.message_id_hash = message.message_id_hash;
     if (entry.session == session) {
         return std::nullopt;  // a re-announcement
     }
@@ -113,6 +102,25 @@ void note_heard(SapDirectory::Entry& entry, SapMessage const& message, int64_t c
         }
     }
     return success();
+}
+
+/// A datagram read: its length and IP source address.
+struct Received
+{
+    size_t length{0};
+    ip::IPv4Address source;
+};
+
+/// Reads one datagram from `fd` into `buffer` without waiting; the errno as an error when none is read.
+[[nodiscard]] auto receive_from(int const fd, std::span<uint8_t> const buffer) noexcept -> StatusValue<Received>
+{
+    sockaddr_in from{};
+    socklen_t length = sizeof(from);
+    auto const n = ::recvfrom(fd, buffer.data(), buffer.size(), MSG_DONTWAIT, net::sockaddr_cast(from), &length);
+    if (n < 0) {
+        return failure(net::errno_code());
+    }
+    return Received{.length = static_cast<size_t>(n), .source = ip::IPv4Address{ntohl(from.sin_addr.s_addr)}};
 }
 
 }  // namespace
@@ -178,9 +186,7 @@ auto SapDirectory::handle_deletion(SapMessage const& message) -> std::optional<E
     if (it == entries_.end()) {
         return std::nullopt;
     }
-    Event event{.kind = Kind::deleted, .entry = std::move(*it)};
-    entries_.erase(it);
-    return event;
+    return Event{.kind = Kind::deleted, .entry = remove_entry(it)};
 }
 
 auto SapDirectory::handle_announcement(SapMessage const& message, int64_t const now_ns) -> std::optional<Event>
@@ -196,40 +202,59 @@ auto SapDirectory::handle_announcement(SapMessage const& message, int64_t const 
     return add_entry(std::move(key), std::move(*session), message, now_ns);
 }
 
-auto SapDirectory::add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t const now_ns)
-    -> std::optional<Event>
+auto SapDirectory::add_entry(SessionKey key, sdp::Session session, SapMessage const& message, int64_t const now_ns) -> Event
 {
-    if (entries_.size() >= MAX_SESSIONS) {
-        return std::nullopt;
-    }
+    std::optional<Entry> evicted = make_room(message.origin);
     entries_.push_back(Entry{
         .key = std::move(key),
         .session = std::move(session),
         .sap_origin = message.origin,
         .message_id_hash = message.message_id_hash,
         .last_seen_ns = now_ns});
-    return Event{.kind = Kind::announced, .entry = entries_.back()};
+    return Event{.kind = Kind::announced, .entry = entries_.back(), .evicted = std::move(evicted)};
 }
 
-auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, int64_t const now_ns) -> std::optional<Event>
+auto SapDirectory::make_room(ip::IPv4Address const& origin) -> std::optional<Entry>
 {
-    auto const message = parse_sap_packet(packet);
-    return message ? handle(*message, now_ns) : std::nullopt;
-}
-
-auto SapDirectory::entry_timeout_ns(Entry const& entry) const noexcept -> int64_t
-{
-    if (entry.interval_ns == 0) {
-        return 2 * timeout_ns_;  // heard once: its interval unknown (an RFC 2974 sender's is 300 s or more)
+    bool const own = static_cast<size_t>(std::ranges::count(entries_, origin, &Entry::sap_origin)) >= MAX_SESSIONS_PER_ORIGIN;
+    if (!own && entries_.size() < MAX_SESSIONS) {
+        return std::nullopt;
     }
-    return std::clamp(10 * entry.interval_ns, timeout_ns_, std::max(timeout_ns_, MAX_TIMEOUT_NS));
+    // One origin cannot flood out the others' sessions: past its share it replaces its own.
+    auto const age = [&](Entry const& e) {
+        return own && e.sap_origin != origin ? std::numeric_limits<int64_t>::max() : e.last_seen_ns;
+    };
+    return remove_entry(std::ranges::min_element(entries_, {}, age));
+}
+
+auto SapDirectory::remove_entry(std::vector<Entry>::iterator const it) -> Entry
+{
+    Entry entry = std::move(*it);
+    entries_.erase(it);
+    return entry;
+}
+
+auto SapDirectory::admit(std::span<uint8_t const> const packet, ip::IPv4Address const& source) -> std::optional<SapMessage>
+{
+    auto message = packet.size() <= MAX_PACKET ? parse_sap_packet(packet) : std::nullopt;
+    if (!message || message->origin != source) {
+        return std::nullopt;
+    }
+    return std::move(message);
+}
+
+auto SapDirectory::handle_packet(std::span<uint8_t const> const packet, ip::IPv4Address const& source, int64_t const now_ns)
+    -> std::optional<Event>
+{
+    auto const message = admit(packet, source);
+    return message ? handle(*message, now_ns) : std::nullopt;
 }
 
 auto SapDirectory::expire(int64_t const now_ns) -> std::vector<Event>
 {
     std::vector<Event> events;
     std::erase_if(entries_, [&](Entry& entry) {
-        if (now_ns - entry.last_seen_ns <= entry_timeout_ns(entry)) {
+        if (now_ns - entry.last_seen_ns <= timeout_ns_) {
             return false;
         }
         events.push_back(Event{.kind = Kind::timed_out, .entry = std::move(entry)});
@@ -273,20 +298,37 @@ void SapReceiver::on_ready(int64_t const now_ns)
 {
     // A bounded batch per call: a flood must not hold the reactor.
     static constexpr int MAX_BATCH = 64;
-    thread_local std::vector<uint8_t> buffer(65536);
     for (int i = 0; i < MAX_BATCH; ++i) {
-        auto const n = ::recv(fd_.get(), buffer.data(), buffer.size(), MSG_DONTWAIT);
-        if (n < 0) {
-            if (net::was_interrupted()) {
-                continue;
-            }
-            return;  // EAGAIN, or an error (recv clears it)
-        }
-        auto event = directory_.handle_packet(std::span{buffer}.first(static_cast<size_t>(n)), now_ns);
-        if (event && handler_) {
-            handler_(*event);
+        if (!receive_one(now_ns)) {
+            return;
         }
     }
+}
+
+auto SapReceiver::receive_one(int64_t const now_ns) -> bool
+{
+    auto const received = receive_from(fd_.get(), buffer_);
+    if (!received) {
+        return received.error() == std::errc::interrupted;  // else EAGAIN, or an error (recvfrom clears it)
+    }
+    auto const message = SapDirectory::admit(std::span{buffer_}.first(received->length), received->source);
+    if (!message) {
+        dropped_.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    deliver(directory_.handle(*message, now_ns));
+    return true;
+}
+
+void SapReceiver::deliver(std::optional<SapDirectory::Event> const& event)
+{
+    if (!event || !handler_) {
+        return;
+    }
+    if (event->evicted) {
+        handler_(SapDirectory::Event{.kind = SapDirectory::Kind::evicted, .entry = *event->evicted});
+    }
+    handler_(*event);
 }
 
 void SapReceiver::tick(int64_t const now_ns)

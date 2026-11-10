@@ -51,8 +51,8 @@ class SapAnnouncer final : public net::Pollable
     static constexpr ip::IPv4Address GROUP{239, 255, 255, 255};
     static constexpr uint16_t PORT = 9875;
 
-    /// Announce out of `interface` (by index; 0 lets the kernel choose) from
-    /// `origin`, to `destination`:`port` (the SAP group, or another for tests).
+    /// Announce out of `interface` (by index; 0 lets the kernel choose) from `origin`, an address of this host the
+    /// socket is bound to, to `destination`:`port` (the SAP group, or another for tests).
     [[nodiscard]] static auto open(
         unsigned int interface_index,
         ip::IPv4Address const& origin,
@@ -62,9 +62,8 @@ class SapAnnouncer final : public net::Pollable
 
     SapAnnouncer(net::FileDescriptor fd, ip::IPv4Address const& origin) noexcept;
 
-    /// Announce `session` under `key` (a slot id, say), replacing what was
-    /// announced under it; the next tick sends it. A changed session gets a new
-    /// message id hash, so listeners read it as new.
+    /// Announce `session` under `key` (a slot id, say), replacing what was announced under it; the next tick sends
+    /// it. A changed session goes under a new message id hash, with no deletion first (RFC 2974 Section 5).
     void announce(std::string const& key, sdp::Session const& session);
     /// Stop announcing `key`, sending its deletion now, not at the next tick (a caller shutting
     /// down may close straight after): the send's error, or success (also for a key not announced).

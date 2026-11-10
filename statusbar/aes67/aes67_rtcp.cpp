@@ -214,7 +214,7 @@ void RtcpSession::note_sending() noexcept
     // The SSRC last seen sending is gone (stopped, or a new run under a new SSRC): its BYE. A run held for its first
     // SR has sent no packet: not sending.
     SendState const state = sender_->send_state();
-    uint32_t const sending = state.next_index != state.first_index ? state.ssrc : 0;  // packets, which wrap, would not do
+    uint32_t const sending = state.sent ? state.ssrc : 0;
     if (sending_ssrc_ != 0 && sending != sending_ssrc_) {
         bool const sent = send_bye(sending_ssrc_);
         stats_.bye_sent += sent ? 1 : 0;
@@ -271,7 +271,7 @@ void RtcpSession::schedule_report(uint64_t const now_ns) noexcept
 void RtcpSession::send_scheduled_sender_report(uint64_t const now_ns) noexcept
 {
     auto const state = sending_state();
-    bool const sending = state && state->next_index != state->first_index;  // a packet of this run has gone
+    bool const sending = state && state->sent;
     auto const at = sending ? report_time(state->next_index) : std::nullopt;
     if (at) {
         (void)send_sender_report(*state, *at, now_ns);
@@ -490,12 +490,23 @@ void RtcpSession::on_ready(uint64_t const now_ns) noexcept
     for (size_t round = 0; round < 4; ++round) {
         size_t const n = port_->receive(batch);
         for (size_t i = 0; i < n; ++i) {
-            handle(batch[i].payload, now_ns);
+            if (from_peer(batch[i].source.address)) {
+                handle(batch[i].payload, now_ns);
+            }
         }
         if (n < batch.size()) {
             break;
         }
     }
+}
+
+auto RtcpSession::from_peer(ip::IPv4Address const& source) const noexcept -> bool
+{
+    if (role_ == Role::sender) {
+        return true;  // any receiver of the stream may report on it
+    }
+    ip::IPv4Address const stream_source = receiver_->receive_state().source;
+    return !stream_source.is_unspecified() && source == stream_source;
 }
 
 void RtcpSession::handle(std::span<uint8_t const> const datagram, uint64_t const now_ns) noexcept
@@ -558,7 +569,7 @@ auto RtcpSession::round_trip_ns(rtp::ReportBlock const& block, uint64_t const no
 {
     uint32_t const lsr = block.lsr.get();
     if (lsr == 0) {
-        return std::nullopt;  // the receiver has heard no SR yet
+        return std::nullopt;  // the receiver has received no SR yet
     }
     for (auto const& sent : sent_) {
         if (sent.sent_ns != 0 && sent.lsr == lsr) {
@@ -571,7 +582,7 @@ auto RtcpSession::round_trip_ns(rtp::ReportBlock const& block, uint64_t const no
 void RtcpSession::handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t const now_ns) noexcept
 {
     ReceiveState const state = receiver_->receive_state();
-    // Before the stream's first packet any SR on its RTCP endpoint is the sender's.
+    // Before the stream's first packet an SR from its source filter's address is the sender's.
     if (compound.sr && (!state.valid || compound.sr->ssrc == state.ssrc)) {
         note_stream_sr(*compound.sr, now_ns);
     }
