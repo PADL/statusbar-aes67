@@ -26,6 +26,7 @@ struct Timebase
     /// follow_phase fit that had locked.
     std::uint32_t epoch{0};
     bool running{false};        ///< outputs in the domain send: locked or in holdover, a follow_phase fit's always
+    bool locked{false};         ///< the fit is locked to its source (not before a lock, not in holdover)
     std::uint16_t restarts{0};  ///< a follow_phase fit's media clock restarts: a talker toggles mr on each change
 
     /// The provisional map before a first lock: domain time is PTP time; not running.
@@ -50,6 +51,7 @@ struct Timebase
 };
 
 static_assert(sizeof(Timebase) == 32);
+static_assert(offsetof(Timebase, locked) == 29);
 static_assert(offsetof(Timebase, restarts) == 30);
 static_assert(std::is_trivially_copyable_v<Timebase>);
 
@@ -76,7 +78,8 @@ struct TimebaseEstimatorParams
     std::int64_t lock_rms_ns{2'000};                 ///< locked while the RMS residual is under this, ns
     double lock_rate_ppm{500.0};                     ///< and |rate offset| is under this, ppm
     std::int64_t step_threshold_ns{20'000};          ///< a residual over this is held, not fitted, ns
-    std::uint32_t step_pairs{3};                     ///< this many held in a row is a step (at most 8)
+    std::uint32_t step_pairs{3};                     ///< this many held in a row is a step
+    std::int64_t step_span_ns{0};                    ///< and they span this much PTP time, ns: one rule at any cadence
     std::int64_t reference_timeout_ns{100'000'000};  ///< no pair for this long: reference absent, ns
     /// Nonzero: the timeout is this many of the window's mean pair intervals, within [reference_timeout_ns,
     /// reference_timeout_max_ns], and the ceiling while under two pairs are held: a sender's own cadence sets it.
@@ -102,6 +105,7 @@ struct TimebaseEstimatorParams
             .lock_pairs = 4,
             .lock_span_ns = 2'500'000'000,
             .step_pairs = 2,
+            .step_span_ns = 2'000'000'000,
             .reference_timeout_ns = 1'000'000'000,
             .timeout_intervals = 3,
             .reference_timeout_max_ns = 20'000'000'000,
@@ -164,7 +168,7 @@ class TimebaseEstimator
     static constexpr std::size_t MAX_WINDOW_PAIRS = 2048;
     /// A follower's lock that moves domain time by more than this is a restart, whatever came before it, ns.
     static constexpr std::int64_t RESTART_NS = 1'000;
-    /// The largest step_pairs a preset may ask for.
+    /// The largest step_pairs a preset may ask for; a step spanning more pairs restarts the window from its last ones.
     static constexpr std::size_t MAX_STEP_PAIRS = 8;
     /// window_span_ns never trims a window to fewer pairs than this: a slow sender's fit keeps its averaging.
     static constexpr std::size_t MIN_SPAN_PAIRS = 16;
@@ -190,9 +194,10 @@ class TimebaseEstimator
     /// in a new epoch, a restart once it had locked; the window dropped. Pairs fed afterwards are followed afresh.
     auto free_run(std::int64_t now_ns) noexcept -> void;
 
-    /// A follow_phase fit (else nothing) adopts another source kind's preset, clamped as constructed and kept a
-    /// follower: the old source forgotten (window, reference, epoch), the published line, its epoch and restarts kept.
-    auto retune(TimebaseEstimatorParams const& params) noexcept -> void;
+    /// A follow_phase fit (else nothing) leaves its source at now_ns as free_run() does (a restart once it had locked),
+    /// then adopts another source kind's preset, clamped as constructed and kept a follower: the old source forgotten
+    /// (window, reference, epoch), the line continuous.
+    auto retune(std::int64_t now_ns, TimebaseEstimatorParams const& params) noexcept -> void;
 
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
     [[nodiscard]] auto status() const noexcept -> TimebaseEstimatorStatus;
@@ -232,8 +237,11 @@ class TimebaseEstimator
     [[nodiscard]] auto accept_reference(std::int64_t reference_ns) noexcept -> bool;
     /// Holds a pair off the fit when its residual says it may be a step; true when it was held.
     [[nodiscard]] auto screen_step(Pair const& p) noexcept -> bool;
-    /// Holds a step candidate; enough in a row restart the window from them (a step, once the fit was long).
+    /// Holds a step candidate; enough in a row, spanning step_span_ns, restart the window from them (a step, once the
+    /// fit was long).
     auto hold(Pair const& p) noexcept -> void;
+    /// Restarts the window from the pairs held: a step when the fit spanned lock_pairs.
+    auto confirm_step() noexcept -> void;
     /// The time without a pair after which the reference is absent: fixed, or from the window's cadence.
     [[nodiscard]] auto reference_timeout() const noexcept -> std::int64_t;
     /// Notes whether the reference is present at `now_ns`; pairs from before a silence are dropped.
@@ -266,9 +274,10 @@ class TimebaseEstimator
     std::array<Pair, MAX_WINDOW_PAIRS> window_{};
     std::size_t head_{0};  // index of the oldest pair
     std::size_t size_{0};
-    std::size_t pending_{0};  // pairs since the last refit
-    std::array<Pair, MAX_STEP_PAIRS> held_{};
-    std::size_t held_count_{0};
+    std::size_t pending_{0};                   // pairs since the last refit
+    std::array<Pair, MAX_STEP_PAIRS> held_{};  // the newest of the pairs held, oldest first
+    std::size_t held_count_{0};                // pairs held in a row (held_ keeps the last MAX_STEP_PAIRS)
+    std::int64_t held_first_ns_{0};            // PTP time of the first pair held
 
     bool have_reference_{false};
     std::int64_t last_reference_ns_{0};  // newest pair accepted, fitted or held
