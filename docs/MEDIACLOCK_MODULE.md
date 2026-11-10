@@ -30,7 +30,11 @@ domain time continuous across them: each lock joins the new line to the one in u
 instant, so only the slope changes. With `absolute` set (a followed PTP instance, whose time
 the domain's outputs announce as `mediaclk:direct`) domain time is the source's own time
 instead: a step or new epoch of the source stops the domain (`running` false) until it
-re-locks on the source's new time. Gate a `direct` announcement on `running`.
+re-locks on the source's new time. Gate a `direct` announcement on `running` (a follower is never `direct`). With
+`follow_phase` set (a CRF that a talker's streams follow) the domain runs from the start, holds
+over without end, lands the source's frames on its own frame grid at each lock, and counts each
+loss of the reference, and the next lock after it or after a source discontinuity, in
+`Timebase::restarts`: a talker toggles `mr` on a change (IEEE 1722-2016 Clause 4.4.4.3).
 
 ## Key types
 
@@ -41,12 +45,13 @@ re-locks on the source's new time. Gate a `direct` announcement on `running`.
   - `rtp_timestamp(index, offset)` / `index_of_rtp(timestamp, offset, reference)` — RTP timestamps under `mediaclk:direct=<offset>`.
   - `avtp_timestamp(index)` — a sample's AVTP presentation time, mod 2^32 ns.
   - `samples_per_tick()` — samples per 125 µs (AVB class A) tick: 6, 12 or 24.
-- `Timebase` — 32 bytes, trivially copyable: `reference_ns`, `domain_ns`, `rate_offset`, `epoch`, `running`.
+- `Timebase` — 32 bytes, trivially copyable: `reference_ns`, `domain_ns`, `rate_offset`, `epoch`, `running`, `restarts`.
   - `to_domain(t_phc)` / `from_domain(t_d)` — exact within a nanosecond over a day either side of the anchor.
   - `identity()` — domain time is PTP time, not running: the map before a first lock.
 - `ClockSample` — one pair: `reference_ns` (PTP), `count` (frames since the epoch), `rate_hz`, `epoch`.
-- `TimebaseEstimatorParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `phc_pairs()`; `absolute` makes domain time the source's own.
-- `TimebaseEstimator` — `feed(sample)` per pair, `update(now_ns)` per pass (true: publish `timebase()`), `status()`.
+- `TimebaseEstimatorParams` — a preset per source kind; `avb_stream()`, `rtcp_sender_reports()`, `crf()`, `crf_follower()`, `phc_pairs()`; `absolute` makes domain time the source's own; `follow_phase` makes a media clock follower.
+- `TimebaseEstimator` — `feed(sample)` per pair, `update(now_ns)` per pass (true: publish `timebase()`), `status()`;
+  `free_run(now_ns)` stops a follower following (another clock source selected).
 - `TimebaseEstimatorStatus` — `locked`, `holdover`, `reference_present`, `rate_offset_ppm`, `residual_ns`, `last_step_ns`, `steps`, `outliers`, `pairs`.
 
 ## Quick example
@@ -155,6 +160,19 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 - Before the first lock the map is the identity and, unless `absolute`, the first lock
   joins it, so a fresh domain's index starts near PTP's. When holdover expires `running` goes false but the
   line is kept, so a later lock still joins it without a jump (unless `absolute`).
+- A `follow_phase` fit runs on the identity from the start and never stops: holdover has no end.
+  Each lock joins as above with its constant rounded to a whole source frame (under half a frame
+  of domain time moves), so the source's events fall on the domain's frame grid (within a
+  nanosecond: both rounding rules). `restarts` counts each loss of the reference while locked, and
+  the next lock after a loss or a source discontinuity (a step, a new epoch: a toggled `mr`, a
+  rebind), so a new epoch while the source keeps coming is one restart; a lock regained on the same
+  source (a residual over the threshold for a pass) is none unless its grid snap moves domain time by
+  over `RESTART_NS` (1 us). So a follower's line restarts exactly when its time moves: a consumer
+  toggles `mr` on `restarts` alone. `follow_phase` clears `absolute`.
+  `free_run(now)` drops the window and, once it had locked, joins a line at PTP's rate at `now` in
+  a new epoch: a restart. Pairs fed afterwards are followed afresh. On a fit that is no follower it
+  does nothing. A follower's `running` is true from construction (its outputs always send), so a
+  consumer that waits for a lock reads the epoch instead.
 - A pair whose PTP time is not after the newest one is ignored: a step backwards by more
   than the pair interval loses the pairs until they pass it.
 
