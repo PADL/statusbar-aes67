@@ -214,7 +214,7 @@ void RtcpSession::note_sending() noexcept
     // The SSRC last seen sending is gone (stopped, or a new run under a new SSRC): its BYE. A run held for its first
     // SR has sent no packet: not sending.
     SendState const state = sender_->send_state();
-    uint32_t const sending = state.next_index != state.first_index ? state.ssrc : 0;  // packets, which wrap, would not do
+    uint32_t const sending = state.sent ? state.ssrc : 0;
     if (sending_ssrc_ != 0 && sending != sending_ssrc_) {
         bool const sent = send_bye(sending_ssrc_);
         stats_.bye_sent += sent ? 1 : 0;
@@ -271,7 +271,7 @@ void RtcpSession::schedule_report(uint64_t const now_ns) noexcept
 void RtcpSession::send_scheduled_sender_report(uint64_t const now_ns) noexcept
 {
     auto const state = sending_state();
-    bool const sending = state && state->next_index != state->first_index;  // a packet of this run has gone
+    bool const sending = state && state->sent;
     auto const at = sending ? report_time(state->next_index) : std::nullopt;
     if (at) {
         (void)send_sender_report(*state, *at, now_ns);

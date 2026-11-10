@@ -681,6 +681,23 @@ TEST(aes67_rtcp, a_paused_sender_says_bye_once_and_reports_again_when_it_sends)
     EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{1});
 }
 
+TEST(aes67_rtcp, a_large_clock_step_back_onto_the_runs_first_packet_says_no_bye)
+{
+    SenderRig rig;
+    rig.run(T0, 40);
+    SendState const before = rig.sender.send_state();
+    EXPECT_TRUE(before.sent);
+    EXPECT_TRUE(before.next_index > before.first_index + (uint64_t{Sender::MAX_BURST} * 48));
+    // PTP steps back so far that the sender resynchronises to the packet before the run's first: the one it sends
+    // leaves next_index on first_index, and the run is still sending.
+    uint64_t const first = before.first_index;
+    rig.sender.tick(first, 0);
+    rig.session->tick(time_of(first));
+    EXPECT_EQ(rig.sender.send_state().next_index, first);
+    EXPECT_TRUE(rig.sender.send_state().sent);
+    EXPECT_EQ(rig.session->stats().bye_sent, uint64_t{0});
+}
+
 TEST(aes67_rtcp, a_pause_and_resume_between_two_ticks_still_says_bye_for_the_old_ssrc)
 {
     SenderRig rig;

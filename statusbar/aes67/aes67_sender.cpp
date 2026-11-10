@@ -494,6 +494,7 @@ void Sender::report_sent(uint32_t const packets, uint32_t const run_ssrc) noexce
         .octets = rtcp_counts_.octets,
         .first_index = run_first_,
         .next_index = next_index_,
+        .sent = true,
     });
 }
 
