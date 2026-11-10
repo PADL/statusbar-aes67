@@ -814,6 +814,24 @@ TEST(aes67_sender, resynchronises_after_a_large_backward_step)
     EXPECT_EQ(rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(back));
 }
 
+TEST(aes67_sender, a_run_has_sent_once_a_packet_has_gone)
+{
+    LoopTransport transport;
+    transport.refuse = true;  // no TX buffer: nothing goes
+    Sender sender{STEREO_L24, {}, transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    uint64_t const base = uint64_t{4800} * 48;
+    sender.tick(base - 1, 0);
+    EXPECT_TRUE(sender.send_state().next_index != sender.send_state().first_index);  // tried
+    EXPECT_FALSE(sender.send_state().sent);
+    transport.refuse = false;
+    sender.tick(base + 47, 0);
+    EXPECT_TRUE(sender.send_state().sent);
+    sender.pause();
+    EXPECT_FALSE(sender.send_state().sent);
+}
+
 TEST(aes67_sender, still_pulls_and_counts_a_packet_the_transport_cannot_accept)
 {
     LoopTransport transport;

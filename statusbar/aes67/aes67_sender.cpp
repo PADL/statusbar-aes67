@@ -447,13 +447,14 @@ void Sender::report_sent(uint32_t const packets, uint32_t const run_ssrc) noexce
 {
     rtcp_counts_.packets += packets;
     rtcp_counts_.octets += static_cast<uint32_t>(packets * payload_.size());
+    rtcp_counts_.sent = rtcp_counts_.sent || packets != 0;
     send_state_.store({
         .ssrc = run_ssrc,
         .packets = rtcp_counts_.packets,
         .octets = rtcp_counts_.octets,
         .first_index = run_first_,
         .next_index = next_index_,
-        .sent = true,
+        .sent = rtcp_counts_.sent,
     });
 }
 

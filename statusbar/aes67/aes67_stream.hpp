@@ -288,7 +288,7 @@ struct SendState
     uint32_t octets{0};       ///< payload octets sent since configure(), mod 2^32
     uint64_t first_index{0};  ///< the run's first packet (its first frame's index), sent or held for its first SR
     uint64_t next_index{0};   ///< the next packet to send: first_index while that is held
-    bool sent{false};         ///< the run has sent: false while its first packet is held for its SR
+    bool sent{false};         ///< a packet of the run has gone: false while its first is held for its SR
 
     auto operator==(SendState const&) const noexcept -> bool = default;
 };

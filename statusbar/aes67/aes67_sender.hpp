@@ -279,6 +279,7 @@ class Sender
     {
         uint32_t packets{0};
         uint32_t octets{0};
+        bool sent{false};  ///< a packet of the run has gone (SendState::sent)
     };
     RtcpCounts rtcp_counts_{};
     itc::SeqlockValue<SendState> send_state_;  ///< real-time -> RTCP session
