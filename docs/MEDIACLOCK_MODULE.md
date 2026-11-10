@@ -30,7 +30,7 @@ domain time continuous across them: each lock joins the new line to the one in u
 instant, so only the slope changes. With `absolute` set (a followed PTP instance, whose time
 the domain's outputs announce as `mediaclk:direct`) domain time is the source's own time
 instead: a step or new epoch of the source stops the domain (`running` false) until it
-re-locks on the source's new time. Gate a `direct` announcement on `running`. With
+re-locks on the source's new time. Gate a `direct` announcement on `running` (a follower is never `direct`). With
 `follow_phase` set (a CRF that a talker's streams follow) the domain runs from the start, holds
 over without end, lands the source's frames on its own frame grid at each lock, and counts each
 loss of the reference, and the next lock after it or after a source discontinuity, in
@@ -168,7 +168,9 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   rebind), so a new epoch while the source keeps coming is one restart; a lock regained on the same
   source (a residual over the threshold for a pass) is none. `follow_phase` clears `absolute`.
   `free_run(now)` drops the window and, once it had locked, joins a line at PTP's rate at `now` in
-  a new epoch: a restart.
+  a new epoch: a restart. Pairs fed afterwards are followed afresh. On a fit that is no follower it
+  does nothing. A follower's `running` is true from construction (its outputs always send), so a
+  consumer that waits for a lock reads the epoch instead.
 - A pair whose PTP time is not after the newest one is ignored: a step backwards by more
   than the pair interval loses the pairs until they pass it.
 

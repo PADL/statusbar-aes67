@@ -22,9 +22,9 @@ struct Timebase
     std::int64_t reference_ns{0};  ///< PTP time of the anchor, ns
     std::int64_t domain_ns{0};     ///< domain time at the anchor, ns
     double rate_offset{0.0};       ///< r: domain ns per PTP ns, minus one (1e-6 is 1 ppm)
-    std::uint32_t epoch{0};        ///< bumped at each lock: a join (continuous), or for an absolute fit a re-anchor (may jump)
-    bool running{false};           ///< locked or in holdover: outputs in the domain send
-    std::uint16_t restarts{0};     ///< a follow_phase fit's media clock restarts: a talker toggles mr on each change
+    std::uint32_t epoch{0};  ///< bumped at each lock (a join, or an absolute fit's re-anchor, which may jump) and each free_run()
+    bool running{false};     ///< outputs in the domain send: locked or in holdover, a follow_phase fit's always
+    std::uint16_t restarts{0};  ///< a follow_phase fit's media clock restarts: a talker toggles mr on each change
 
     /// The provisional map before a first lock: domain time is PTP time; not running.
     [[nodiscard]] static constexpr auto identity() noexcept -> Timebase { return Timebase{}; }
@@ -162,8 +162,8 @@ class TimebaseEstimator
     /// always).
     [[nodiscard]] auto timebase() const noexcept -> Timebase { return published_; }
 
-    /// A follow_phase fit stops following at PTP time now_ns: the line runs on at the reference's rate, continuous, in
-    /// a new epoch, a restart unless it had never locked; the window is dropped. update() then publishes it.
+    /// A follow_phase fit (else nothing) stops following at now_ns: the line runs on at the reference's rate, continuous,
+    /// in a new epoch, a restart once it had locked; the window dropped. Pairs fed afterwards are followed afresh.
     auto free_run(std::int64_t now_ns) noexcept -> void;
 
     /// Lock state, rate offset, residual and step counts as of the last feed() and update().
