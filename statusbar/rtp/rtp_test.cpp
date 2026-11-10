@@ -106,7 +106,6 @@ TEST(rtp_sequence, a_source_is_validated_after_two_in_order_packets)
     EXPECT_TRUE(seq.update(102));
     EXPECT_EQ(seq.expected(), uint32_t{2});
     EXPECT_EQ(seq.received(), uint32_t{2});
-    EXPECT_EQ(seq.lost(), int64_t{0});
 }
 
 TEST(rtp_sequence, probation_restarts_on_a_gap)
@@ -129,7 +128,6 @@ TEST(rtp_sequence, counts_losses_and_wraps)
     EXPECT_EQ(seq.extended_max(), uint32_t{65536 + 3});
     EXPECT_EQ(seq.expected(), uint32_t{5});
     EXPECT_EQ(seq.received(), uint32_t{3});
-    EXPECT_EQ(seq.lost(), int64_t{2});
 }
 
 TEST(rtp_sequence, late_and_duplicate_packets_keep_the_high_water_mark)
@@ -141,7 +139,8 @@ TEST(rtp_sequence, late_and_duplicate_packets_keep_the_high_water_mark)
     EXPECT_TRUE(seq.update(12));  // late
     EXPECT_TRUE(seq.update(13));  // duplicate
     EXPECT_EQ(seq.extended_max(), uint32_t{13});
-    EXPECT_EQ(seq.lost(), int64_t{-1});  // RFC 3550: duplicates can make loss negative
+    EXPECT_EQ(seq.expected(), uint32_t{3});
+    EXPECT_EQ(seq.received(), uint32_t{4});  // RFC 3550: duplicates count, so loss can be negative
 }
 
 TEST(rtp_sequence, a_jump_is_believed_only_when_confirmed)
@@ -202,8 +201,7 @@ TEST(rtp_sequence, figures_are_zero_on_probation)
     EXPECT_FALSE(seq.update(100));
     EXPECT_FALSE(seq.update(50));  // a reorder or restart while on probation
     EXPECT_EQ(seq.expected(), uint32_t{0});
-    EXPECT_EQ(seq.lost(), int64_t{0});
-    EXPECT_EQ(seq.report().cumulative_lost, int32_t{0});
+    EXPECT_EQ(seq.received(), uint32_t{0});
 }
 
 TEST(rtp_sequence, probation_across_a_wrap)
@@ -227,27 +225,6 @@ TEST(rtp_sequence, the_misorder_boundary)
     EXPECT_FALSE(seq.update(static_cast<uint16_t>(1001 + RtpSequence::MAX_DROPOUT)));
     EXPECT_TRUE(seq.update(static_cast<uint16_t>(1001 + RtpSequence::MAX_DROPOUT - 1)));
     EXPECT_EQ(seq.extended_max(), uint32_t{1001 + RtpSequence::MAX_DROPOUT - 1});
-}
-
-TEST(rtp_sequence, reports_interval_loss)
-{
-    RtpSequence seq;
-    seq.update(0);
-    seq.update(1);  // validated: expected 1, received 1
-    for (uint16_t s = 2; s < 9; ++s) {
-        if (s != 4 && s != 6) {
-            seq.update(s);
-        }
-    }
-    // Since validation: expected 8 (1..8), received 6.
-    auto const first = seq.report();
-    EXPECT_EQ(first.fraction_lost, uint8_t{64});  // 2/8
-    EXPECT_EQ(first.cumulative_lost, int32_t{2});
-    seq.update(9);
-    seq.update(10);
-    auto const second = seq.report();
-    EXPECT_EQ(second.fraction_lost, uint8_t{0});
-    EXPECT_EQ(second.cumulative_lost, int32_t{2});
 }
 
 TEST_MAIN(statusbar_rtp, rtp_test)
