@@ -1365,7 +1365,7 @@ TEST(aes67_receiver, a_sender_clocked_stream_counts_packets_before_its_offset_as
     EXPECT_EQ(receiver.counters().dropped, uint64_t{2});
 }
 
-TEST(aes67_receiver, accepts_an_eight_channel_stream_in_packets_of_any_whole_frame_count)
+TEST(aes67_receiver, accepts_an_eight_channel_stream_in_packets_of_up_to_its_ptime)
 {
     // One sender's announcement: source port = destination port, a large media clock offset.
     constexpr char const* SDP_TEXT =
@@ -1381,9 +1381,9 @@ TEST(aes67_receiver, accepts_an_eight_channel_stream_in_packets_of_any_whole_fra
     EXPECT_TRUE(session && receiver.configure(*session));
     Endpoint const group{.address = IPv4Address{239, 200, 163, 140}, .port = 5004};
 
-    // 48 frames (a 1206-octet frame), then 24, then Sender::MAX_PAYLOAD's 60.
+    // 48 frames (a 1206-octet frame), then 24, then 12; Sender::MAX_PAYLOAD's 60 is more than the 1 ms ptime.
     uint64_t const base = (1ULL << 40U) + 12345;
-    std::array<uint32_t, 3> const sizes{FPP, FPP / 2, Sender::MAX_PAYLOAD / 24};
+    std::array<uint32_t, 4> const sizes{FPP, FPP / 2, FPP / 4, Sender::MAX_PAYLOAD / 24};
     uint64_t index = base;
     for (uint16_t i = 0; i < sizes.size(); ++i) {
         rtp::RtpHeader header{};
@@ -1395,14 +1395,81 @@ TEST(aes67_receiver, accepts_an_eight_channel_stream_in_packets_of_any_whole_fra
     }
     receiver.drain(index + 53);
 
-    EXPECT_EQ(sink.blocks.size(), sizes.size());
-    EXPECT_EQ(receiver.counters().dropped, uint64_t{0});
+    EXPECT_EQ(receiver.max_frames(), FPP);
+    EXPECT_EQ(sink.blocks.size(), sizes.size() - 1);
+    EXPECT_EQ(receiver.counters().drops.size, uint64_t{1});
+    EXPECT_EQ(receiver.counters().dropped, uint64_t{1});
     index = base;
     for (size_t i = 0; i < std::min(sizes.size(), sink.blocks.size()); ++i) {
         EXPECT_EQ(sink.blocks[i].first_index, index);
         EXPECT_EQ(sink.blocks[i].frames, sizes[i]);
         index += sizes[i];
     }
+}
+
+TEST(aes67_receiver, the_ssrc_from_another_address_is_refused_while_the_learnt_source_is_live)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    transport.every_tick = true;  // each packet is received in its own drain, from the address it was sent from
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    uint64_t const base = 48'000ULL * 6000;
+    auto at = [&](uint16_t const n) { return base + (uint64_t{n} * FPP); };
+    auto send = [&](uint16_t const n, uint16_t const seq) {
+        transport.queue.push_back({group, rtp_packet(seq, static_cast<uint32_t>(at(n)))});
+        receiver.drain(at(n));
+    };
+    send(0, 0);
+    send(1, 1);
+    EXPECT_TRUE(receiver.receive_state().source == transport.source.address);
+
+    // Another host copying the SSRC, its sequence far on: refused, the stream's sequence untouched.
+    transport.source.address = IPv4Address{192, 168, 1, 66};
+    send(2, 30'000);
+    send(3, 30'001);
+    EXPECT_EQ(receiver.counters().drops.source, uint64_t{2});
+    EXPECT_EQ(receiver.receive_state().extended_max, uint32_t{1});
+    transport.source.address = IPv4Address{192, 168, 1, 10};
+    send(4, 2);
+    EXPECT_EQ(receiver.counters().packets, uint64_t{3});
+    EXPECT_EQ(receiver.counters().drops.sequence, uint64_t{0});
+    EXPECT_EQ(receiver.receive_state().extended_max, uint32_t{2});
+
+    // After a second of silence the sender at a new address is adopted.
+    transport.source.address = IPv4Address{192, 168, 1, 11};
+    send(1004, 3);
+    EXPECT_TRUE(receiver.receive_state().source == (IPv4Address{192, 168, 1, 11}));
+    EXPECT_EQ(receiver.counters().packets, uint64_t{4});
+}
+
+TEST(aes67_receiver, a_packet_of_more_frames_than_the_maxptime_is_refused)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    auto session = stream_session(group);
+    session.media[0].packet_time_us = 125;
+    session.media[0].max_packet_time_us = 1000;
+    EXPECT_TRUE(receiver.configure(session));
+    EXPECT_EQ(receiver.max_frames(), FPP);  // the maxptime's, the longer
+    uint64_t const base = 48'000ULL * 7000;
+    auto packet = [&](uint16_t const seq, size_t const frames) {
+        rtp::RtpHeader header{};
+        header.init(97, seq, static_cast<uint32_t>(base + (uint64_t{seq} * FPP)), 0x1234);
+        std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + (frames * 6));
+        (void)rtp::serialize_rtp_header(header, bytes.size() - rtp::RtpHeader::LENGTH, bytes);
+        transport.queue.push_back({group, std::move(bytes)});
+    };
+    packet(0, FPP);
+    packet(1, FPP + 1);
+    packet(2, 240);  // Sender::MAX_PAYLOAD's worth: five times the frames
+    receiver.drain(base + (uint64_t{3} * FPP));
+    EXPECT_EQ(sink.blocks.size(), size_t{1});
+    EXPECT_EQ(receiver.counters().drops.size, uint64_t{2});
+    EXPECT_EQ(receiver.counters().frames, uint64_t{FPP});
 }
 
 TEST(aes67_receiver, accepts_late_packets_as_far_back_as_rtp_sequence_does)

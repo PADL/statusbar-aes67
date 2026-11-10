@@ -225,8 +225,8 @@ enum class DropReason : uint8_t
 {
     not_rtp,       ///< not an RTP packet (RFC 3550 Section 5.1)
     payload_type,  ///< not the SDP's payload type
-    size,          ///< an empty payload, or not whole frames of the format
-    source,        ///< not from the source the SDP's source filter names (RFC 4570)
+    size,          ///< an empty payload, not whole frames of the format, or more frames than the SDP's ptime
+    source,        ///< not from the SDP's source filter (RFC 4570), or another address with the live source's SSRC
     ssrc,          ///< another SSRC while the learnt one is live
     sequence,      ///< a duplicate, or a sequence jump not yet confirmed (RFC 3550 Appendix A.1)
     no_offset,     ///< a sender-clocked stream's, before its offset is known
@@ -297,7 +297,8 @@ struct SendState
 struct ReceiveState
 {
     uint32_t ssrc{0};
-    bool valid{false};           ///< a source has been heard
+    bool valid{false};           ///< a source has been learnt
+    ip::IPv4Address source;      ///< its address, or before one the SDP's source filter (0.0.0.0: neither)
     uint32_t extended_max{0};    ///< rtp::RtpSequence::extended_max()
     uint32_t expected{0};        ///< rtp::RtpSequence::expected()
     uint32_t received{0};        ///< rtp::RtpSequence::received()

@@ -48,6 +48,13 @@ static_assert(WINDOW <= 128);
     return std::nullopt;
 }
 
+/// The most frames a packet of `media` holds: its ptime's, or its maxptime's when longer (RFC 8866 Sections 6.4, 6.5).
+[[nodiscard]] auto max_frames_of(sdp::Media const& media) noexcept -> uint32_t
+{
+    uint64_t const us = std::max(media.packet_time_us, media.max_packet_time_us.value_or(0));
+    return static_cast<uint32_t>(std::max<uint64_t>(((us * media.sample_rate) + 999'999) / 1'000'000, 1));
+}
+
 }  // namespace
 
 auto receive_endpoint(
@@ -105,12 +112,20 @@ void Receiver::apply_media(
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
 {
     payload_type_ = media.payload_type;
+    max_frames_ = max_frames_of(media);
     offset_.store(initial_offset(session.effective_media_clock(media)), std::memory_order_release);
+    set_source_filter(session, media, connection, endpoint);
+    set_rtcp(session, media, connection, endpoint);
+}
+
+void Receiver::set_source_filter(
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
+{
     source_filter_ = matching_source(session.effective_source_filter(media), connection.address);
     if (!source_filter_ && endpoint.address != connection.address) {
         source_filter_ = connection.address;  // an offer: c= is the sender (AES67-2023 Clause 8.5.2)
     }
-    set_rtcp(session, media, connection, endpoint);
+    receive_state_.store({.source = source_filter_.value_or(ip::IPv4Address{})});
 }
 
 auto Receiver::reopen(Endpoint const& destination, std::optional<ip::IPv4Address> const& source) -> Status
@@ -213,6 +228,7 @@ void Receiver::reset_stream() noexcept
 {  // NOLINT(statusbar-block-statements): one stream's state, reset together
     next_poll_index_ = 0;
     ssrc_.reset();
+    source_ = {};
     sequence_ = rtp::RtpSequence{};
     have_max_ = false;
     max_seq_ = 0;
@@ -234,10 +250,11 @@ void Receiver::drain(uint64_t const now_index) noexcept
     }
     bool const backlog = receive_batches(now_index);
     note_port_error();
-    if (this_drain_.heard && ssrc_) {
+    if (this_drain_.accepted && ssrc_) {
         receive_state_.store({
             .ssrc = *ssrc_,
             .valid = true,
+            .source = source_,
             .extended_max = sequence_.extended_max(),
             .expected = sequence_.expected(),
             .received = sequence_.received(),
@@ -330,7 +347,7 @@ auto Receiver::admit(rtp::RtpPacket const& packet, ip::IPv4Address const& source
     if (auto const refused = check_payload(packet, source)) {
         return std::unexpected{*refused};
     }
-    if (auto const admitted = admit_source(packet.header.ssrc.get(), now_index); !admitted) {
+    if (auto const admitted = admit_source(packet.header.ssrc.get(), source, now_index); !admitted) {
         return std::unexpected{admitted.error()};
     }
     auto const frames = static_cast<uint32_t>(packet.payload.size() / format_.bytes_per_frame());
@@ -346,7 +363,8 @@ auto Receiver::check_payload(rtp::RtpPacket const& packet, ip::IPv4Address const
     if (packet.header.payload_type() != payload_type_) {
         return DropReason::payload_type;
     }
-    if (packet.payload.empty() || packet.payload.size() % format_.bytes_per_frame() != 0) {
+    size_t const bytes = packet.payload.size();
+    if (bytes == 0 || bytes % format_.bytes_per_frame() != 0 || bytes / format_.bytes_per_frame() > max_frames_) {
         return DropReason::size;
     }
     if (source_filter_ && source != *source_filter_) {
@@ -355,14 +373,14 @@ auto Receiver::check_payload(rtp::RtpPacket const& packet, ip::IPv4Address const
     return std::nullopt;
 }
 
-auto Receiver::admit_source(uint32_t const ssrc, uint64_t const now_index) noexcept -> std::expected<void, DropReason>
+auto Receiver::admit_source(uint32_t const ssrc, ip::IPv4Address const& source, uint64_t const now_index) noexcept
+    -> std::expected<void, DropReason>
 {
-    if (ssrc_ && *ssrc_ != ssrc) {
-        // Another source: refused while the learnt one is live, adopted once it
-        // has been silent for a second (the sender restarted with a new SSRC).
-        // Signed: after a PTP step backwards the learnt source still counts as live.
+    if (ssrc_ && (*ssrc_ != ssrc || source_ != source)) {
+        // Another SSRC or address: refused while the learnt source is live, adopted once it has been silent for a
+        // second (a restarted sender). Signed: after a PTP step backwards the learnt source still counts as live.
         if (static_cast<int64_t>(now_index - last_index_) < static_cast<int64_t>(format_.sample_rate)) {
-            return std::unexpected{DropReason::ssrc};
+            return std::unexpected{*ssrc_ != ssrc ? DropReason::ssrc : DropReason::source};
         }
         reset_stream();
         if (sender_clock_) {
@@ -372,6 +390,7 @@ auto Receiver::admit_source(uint32_t const ssrc, uint64_t const now_index) noexc
     }
     if (!ssrc_) {
         ssrc_ = ssrc;
+        source_ = source;
     }
     last_index_ = now_index;
     return {};
@@ -404,7 +423,7 @@ void Receiver::note_arrival(uint32_t const timestamp, uint64_t const now_index) 
         have_transit_ = true;
     }
     last_rtp_ts_ = timestamp;
-    this_drain_.heard = true;
+    this_drain_.accepted = true;
 }
 
 void Receiver::deliver(
