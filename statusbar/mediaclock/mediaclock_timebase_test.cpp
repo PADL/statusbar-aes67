@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 
 using namespace statusbar::mediaclock;
 
@@ -98,6 +99,9 @@ class Source
         rate_offset_ = r;
         ++epoch_;
     }
+
+    /// PTP time of frame `count` of the current epoch, without jitter.
+    [[nodiscard]] auto ptp_of_frame(std::uint64_t count) const noexcept -> std::int64_t { return ptp_of(count); }
 
     auto outliers(int n, std::int64_t extra_ns) noexcept -> void
     {
@@ -513,6 +517,175 @@ TEST(mediaclock_timebase, a_silent_source_holds_over_then_unlocks)
     EXPECT_TRUE(fit.status().locked);
     EXPECT_TRUE(fit.timebase().running);
     EXPECT_TRUE(continuity.max_publish_jump < 250);
+}
+
+//
+// A media clock follower (follow_phase) - IEEE 1722-2016 Clause 4.4.4.3
+//
+
+namespace {
+
+/// The distance of domain time `d` from the nearest 48 kHz frame, ns.
+auto off_frame_grid_ns(std::int64_t const d) -> std::int64_t
+{
+    auto const clock = PtpMediaClock::make(48000);
+    auto const t = static_cast<std::uint64_t>(d);
+    std::uint64_t const below = clock->index_at(t);
+    auto const low = static_cast<std::int64_t>(clock->time_of(below));
+    auto const high = static_cast<std::int64_t>(clock->time_of(below + 1));
+    return std::min(d - low, high - d);
+}
+
+/// Passes with the source silent for `duration_ns` of PTP time.
+auto silent_for(TimebaseEstimator& fit, Source& source, std::int64_t& now, std::int64_t const duration_ns) -> void
+{
+    std::int64_t const end = now + duration_ns;
+    while (now < end) {
+        now += PASS_NS;
+        source.skip_until(now);
+        (void)fit.update(now);
+    }
+}
+
+}  // namespace
+
+// Before any pair the follower already runs, on PTP time itself, and its first pass publishes that.
+TEST(mediaclock_timebase, a_phase_follower_runs_before_its_first_lock)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    EXPECT_TRUE(fit.timebase().running);
+    EXPECT_TRUE(fit.update(NOW_NS));
+    EXPECT_FALSE(fit.update(NOW_NS + PASS_NS));
+    auto const line = fit.timebase();
+    EXPECT_TRUE(line.running && line.rate_offset == 0.0 && line.restarts == 0);
+    EXPECT_EQ(line.to_domain(NOW_NS), NOW_NS);
+    EXPECT_FALSE(fit.status().locked || fit.status().holdover);
+}
+
+// A CRF 7.7 us off the PTP grid and 12 ppm fast: once locked, each of its events is a whole number of 48 kHz frames
+// of domain time (the join moved domain time by under half a frame), and the domain runs at its rate.
+TEST(mediaclock_timebase, a_phase_follower_lands_the_source_frames_on_its_grid)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    Source source{48000, 96, 12e-6, 200};
+    source.step(-7'700);
+    std::int64_t now = NOW_NS;
+    Continuity continuity;
+    run_for(fit, source, now, 3'000 * MS, [&](Timebase const& before, bool) { continuity.observe(before, fit.timebase(), now); });
+    EXPECT_TRUE(fit.status().locked);
+    EXPECT_TRUE(std::fabs(fit.status().rate_offset_ppm - 12.0) < 0.1);
+    EXPECT_TRUE(continuity.max_publish_jump <= static_cast<std::int64_t>(SAMPLE_NS / 2) + 1);
+    std::int64_t worst = 0;
+    for (std::uint64_t event = 0; event < 1'000; ++event) {
+        std::int64_t const ptp = source.ptp_of_frame((event * 96) + 96'000);
+        worst = std::max(worst, off_frame_grid_ns(fit.timebase().to_domain(ptp)));
+    }
+    EXPECT_TRUE(worst < 100);
+    EXPECT_EQ(fit.timebase().restarts, std::uint16_t{1});
+}
+
+// A follower that loses its reference keeps running on the last line for good, its loss one restart.
+TEST(mediaclock_timebase, a_phase_follower_holds_over_without_end)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    Source source{48000, 96, -30e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 1'000 * MS);
+    auto const locked = fit.timebase();
+    EXPECT_TRUE(fit.status().locked && locked.restarts == 1);
+    silent_for(fit, source, now, 60'000 * MS);
+    auto const held = fit.timebase();
+    EXPECT_TRUE(held.running && fit.status().holdover && !fit.status().reference_present);
+    EXPECT_EQ(held.restarts, std::uint16_t{2});
+    EXPECT_TRUE(held.to_domain(now) == locked.to_domain(now) && held.rate_offset == locked.rate_offset);
+}
+
+// Each stimulus is one restart: the first lock, the CRF stopping, the CRF back in a new epoch (a restart or a
+// rebind), and a toggle of its mr (a new epoch while it keeps coming: no loss, one re-lock).
+TEST(mediaclock_timebase, each_lock_and_each_loss_is_one_restart)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    Source source{48000, 96, 5e-6, 200};
+    std::int64_t now = NOW_NS;
+    std::vector<std::uint16_t> seen;
+    auto const watch = [&](Timebase const& before, bool changed) {
+        EXPECT_TRUE(changed || fit.timebase().restarts == before.restarts);
+        if (fit.timebase().restarts != before.restarts) {
+            seen.push_back(fit.timebase().restarts);
+        }
+    };
+    run_for(fit, source, now, 2'000 * MS, watch);
+    silent_for(fit, source, now, 2'000 * MS);
+    seen.push_back(fit.timebase().restarts);
+    source.restart(48000, 96, 5e-6);
+    run_for(fit, source, now, 2'000 * MS, watch);
+    source.restart(48000, 96, 5e-6);
+    bool absent = false;
+    run_for(fit, source, now, 2'000 * MS, [&](Timebase const& before, bool changed) {
+        absent = absent || !fit.status().reference_present;
+        watch(before, changed);
+    });
+    EXPECT_FALSE(absent);
+    EXPECT_TRUE(seen == (std::vector<std::uint16_t>{1, 2, 3, 4}));
+}
+
+// Leaving the CRF (another clock source selected) joins a line at PTP's rate where the domain is: one restart,
+// published at the next pass, and no lock until pairs are fed again. Unlocked, it is nothing to leave.
+TEST(mediaclock_timebase, free_running_returns_to_the_reference_rate_with_one_restart)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    fit.free_run(NOW_NS);
+    EXPECT_TRUE(fit.update(NOW_NS));
+    EXPECT_EQ(fit.timebase().restarts, std::uint16_t{0});
+    Source source{48000, 96, 40e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 1'000 * MS);
+    auto const followed = fit.timebase();
+    EXPECT_TRUE(fit.status().locked && followed.restarts == 1);
+    fit.free_run(now);
+    EXPECT_TRUE(fit.update(now));
+    auto const free = fit.timebase();
+    EXPECT_TRUE(free.running && free.rate_offset == 0.0 && free.restarts == 2 && free.epoch == followed.epoch + 1);
+    EXPECT_EQ(free.to_domain(now), followed.to_domain(now));
+    fit.free_run(now + PASS_NS);
+    silent_for(fit, source, now, 1'000 * MS);
+    EXPECT_TRUE(fit.timebase() == free && !fit.status().locked && !fit.status().holdover);
+}
+
+// A CRF that comes back too briefly to lock and goes again is no second loss, and a follower never re-anchors
+// (follow_phase clears absolute): its line runs on through a new epoch of the source.
+TEST(mediaclock_timebase, a_brief_return_that_never_locks_is_no_restart)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams{.window_pairs = 1024, .lock_pairs = 128, .absolute = true, .follow_phase = true}};
+    EXPECT_FALSE(fit.params().absolute);
+    Source source{48000, 96, 5e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 1'000 * MS);
+    silent_for(fit, source, now, 1'000 * MS);
+    EXPECT_EQ(fit.timebase().restarts, std::uint16_t{2});
+    source.restart(48000, 96, 5e-6);
+    run_for(fit, source, now, 150 * MS);
+    EXPECT_FALSE(fit.status().locked);
+    silent_for(fit, source, now, 1'000 * MS);
+    EXPECT_EQ(fit.timebase().restarts, std::uint16_t{2});
+    EXPECT_TRUE(fit.timebase().running);
+}
+
+// A fit that is no follower counts no restarts: its joins keep domain time continuous.
+TEST(mediaclock_timebase, a_continuous_fit_counts_no_restarts)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf()};
+    Source source{48000, 96, 5e-6, 200};
+    std::int64_t now = NOW_NS;
+    EXPECT_FALSE(fit.timebase().running);
+    run_for(fit, source, now, 1'000 * MS);
+    silent_for(fit, source, now, 1'000 * MS);
+    source.restart(48000, 96, 5e-6);
+    fit.free_run(now);
+    run_for(fit, source, now, 1'000 * MS);
+    EXPECT_TRUE(fit.status().locked);
+    EXPECT_EQ(fit.timebase().epoch, std::uint32_t{2});
+    EXPECT_EQ(fit.timebase().restarts, std::uint16_t{0});
 }
 
 TEST_MAIN(statusbar_mediaclock, mediaclock_timebase_test)
