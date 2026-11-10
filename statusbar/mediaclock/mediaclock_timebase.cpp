@@ -341,7 +341,10 @@ auto TimebaseEstimator::update(std::int64_t now_ns) noexcept -> bool
 
 auto TimebaseEstimator::free_run(std::int64_t const now_ns) noexcept -> void
 {
-    bool const left = params_.follow_phase && state_ != State::unlocked;
+    if (!params_.follow_phase) {
+        return;  // only a follower leaves its source: another fit's line stays the fit's
+    }
+    bool const left = state_ != State::unlocked;
     forget_source();
     if (left) {
         leave_line(now_ns);
