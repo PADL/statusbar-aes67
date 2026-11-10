@@ -164,15 +164,26 @@ auto TimebaseEstimator::accept_reference(std::int64_t const reference_ns) noexce
 
 auto TimebaseEstimator::hold(Pair const& p) noexcept -> void
 {
-    held_[held_count_++] = p;
-    if (held_count_ < params_.step_pairs) {
-        return;
+    held_first_ns_ = held_count_ == 0 ? p.reference_ns : held_first_ns_;
+    if (held_count_ < MAX_STEP_PAIRS) {
+        held_[held_count_] = p;
+    } else {
+        std::shift_left(held_.begin(), held_.end(), 1);  // the newest kept, oldest first
+        held_.back() = p;
     }
+    ++held_count_;
+    if (held_count_ >= params_.step_pairs && (p.reference_ns - held_first_ns_) >= params_.step_span_ns) {
+        confirm_step();
+    }
+}
+
+auto TimebaseEstimator::confirm_step() noexcept -> void
+{
     if (fit_pairs_ >= params_.lock_pairs) {  // a shorter fit is restarted, not stepped
         ++steps_;
-        last_step_ns_ = held_[0].reference_ns;
+        last_step_ns_ = held_first_ns_;
     }
-    std::size_t const n = held_count_;
+    std::size_t const n = std::min(held_count_, MAX_STEP_PAIRS);
     source_discontinuity();
     for (std::size_t i = 0; i < n; ++i) {
         push(held_[i]);
@@ -272,6 +283,7 @@ auto TimebaseEstimator::line() const noexcept -> Timebase
         .rate_offset = slope_ - 1.0,
         .epoch = published_.epoch,
         .running = true,
+        .locked = true,
         .restarts = published_.restarts,
     };
 }
@@ -354,6 +366,9 @@ auto TimebaseEstimator::lose_lock(std::int64_t const now_ns) noexcept -> bool
     if (state_ == State::locked) {
         state_ = State::holdover;
     }
+    if (std::exchange(published_.locked, false)) {
+        publish_pending_ = true;  // the line runs on, no longer locked to its source
+    }
     if (state_ == State::holdover && !params_.follow_phase && (now_ns - last_good_ns_) > params_.holdover_ns) {
         state_ = State::unlocked;
         published_.running = false;
@@ -385,12 +400,12 @@ auto TimebaseEstimator::free_run(std::int64_t const now_ns) noexcept -> void
     }
 }
 
-auto TimebaseEstimator::retune(TimebaseEstimatorParams const& params) noexcept -> void
+auto TimebaseEstimator::retune(std::int64_t const now_ns, TimebaseEstimatorParams const& params) noexcept -> void
 {
     if (!params_.follow_phase) {
         return;  // only a follower changes source kind without a new fit
     }
-    forget_source();
+    free_run(now_ns);
     have_reference_ = false;  // the next source's pairs are on their own timeline
     have_source_ = false;
     params_ = clamped(TimebaseEstimatorParams::follower(params));
