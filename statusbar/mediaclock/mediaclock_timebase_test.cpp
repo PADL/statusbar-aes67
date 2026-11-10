@@ -837,14 +837,14 @@ TEST(mediaclock_timebase, a_publish_at_a_hundred_reports_a_second_moves_the_line
     EXPECT_TRUE(continuity.max_publish_jump < 20);
 }
 
-// RFC 3550's 5 s cadence: the window holds 4 reports, enough to lock after the fourth.
-TEST(mediaclock_timebase, a_report_every_five_seconds_locks_after_four)
+// A report every 4 s: the window holds 4 reports, enough to lock after the fourth.
+TEST(mediaclock_timebase, a_report_every_four_seconds_locks_after_four)
 {
     TimebaseEstimator fit{TimebaseEstimatorParams::rtcp_sender_reports()};
-    Source source{48000, 240000, 20e-6, 1'000};
+    Source source{48000, 192000, 20e-6, 1'000};
     std::int64_t now = NOW_NS;
     std::int64_t const locked_at = time_to_lock(fit, source, now, 30'000 * MS);
-    EXPECT_TRUE(locked_at > 14'990 * MS && locked_at <= 15'000 * MS);
+    EXPECT_TRUE(locked_at > 11'990 * MS && locked_at <= 12'000 * MS);
     run_for(fit, source, now, 60'000 * MS);
     EXPECT_TRUE(fit.status().locked && fit.status().pairs == 4);
     EXPECT_TRUE(std::fabs(fit.status().rate_offset_ppm - 20.0) < 0.1);
