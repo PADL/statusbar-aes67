@@ -488,7 +488,7 @@ TEST(mediaclock_timebase, a_silent_source_holds_over_then_unlocks)
     Timebase const last = fit.timebase();
     std::int64_t const silent_at = now;
 
-    // No pairs: holdover once the reference times out, on the last line, for 5 s.
+    // No pairs: holdover once the reference times out, on the last line (published unlocked), for 5 s.
     std::int64_t holdover_at = 0;
     std::int64_t unlocked_at = 0;
     while (now < silent_at + (6'000 * MS)) {
@@ -504,9 +504,11 @@ TEST(mediaclock_timebase, a_silent_source_holds_over_then_unlocks)
             EXPECT_TRUE(changed);
             EXPECT_FALSE(fit.timebase().running);
         }
-        if (unlocked_at == 0) {
-            EXPECT_FALSE(changed);
-            EXPECT_TRUE(fit.timebase() == last);
+        if (unlocked_at == 0) {  // one publish, entering holdover: the same line, no longer locked
+            EXPECT_EQ(changed, now - silent_at == holdover_at);
+            Timebase held = last;
+            held.locked = status.locked;
+            EXPECT_TRUE(fit.timebase() == held);
         }
     }
     EXPECT_TRUE(holdover_at >= 100 * MS && holdover_at <= 110 * MS);
@@ -710,6 +712,291 @@ TEST(mediaclock_timebase, a_continuous_fit_counts_no_restarts)
     EXPECT_TRUE(fit.status().locked);
     EXPECT_EQ(fit.timebase().epoch, std::uint32_t{2});
     EXPECT_EQ(fit.timebase().restarts, std::uint16_t{0});
+}
+
+//
+// Sender reports at any cadence - RFC 3550 Section 6.4.1, VSF TR-10-1 Section 8.10.1
+//
+
+namespace {
+
+/// The preset of one report a second before window_span_ns: 16 pairs, locked on 4 whatever they span; its timeout
+/// the 3 s that three of those intervals give rtcp_sender_reports(), its step the 3 reports that span 2 s.
+constexpr TimebaseEstimatorParams ONE_A_SECOND{
+    .window_pairs = 16, .lock_pairs = 4, .lock_span_ns = 0, .step_pairs = 3, .reference_timeout_ns = 3'000'000'000};
+
+/// rtcp_sender_reports() with domain time the source's own, so a test compares the line with the source's truth.
+constexpr auto absolute_reports() noexcept -> TimebaseEstimatorParams
+{
+    auto params = TimebaseEstimatorParams::rtcp_sender_reports();
+    params.absolute = true;
+    return params;
+}
+
+/// Uniform jitter of this half-width has an RMS of 1 us.
+constexpr std::int64_t ONE_US_RMS_JITTER_NS = 1'732;
+
+}  // namespace
+
+// A pair 1 s older than the newest leaves; pairs 2 s apart still keep MIN_SPAN_PAIRS of them.
+TEST(mediaclock_timebase, a_window_span_drops_pairs_older_than_it)
+{
+    TimebaseEstimatorParams const params{
+        .window_pairs = 2048,
+        .window_span_ns = 1'000'000'000,
+        .lock_pairs = 4,
+        .lock_span_ns = 0,
+        .reference_timeout_ns = 5'000'000'000};
+    TimebaseEstimator dense{params};
+    Source every_10_ms{48000, 480, 0.0, 0};
+    std::int64_t now = NOW_NS;
+    run_for(dense, every_10_ms, now, 5'000 * MS);
+    EXPECT_EQ(dense.status().pairs, std::uint32_t{101});
+    EXPECT_TRUE(dense.status().locked);
+    TimebaseEstimator sparse{params};
+    Source every_2_s{48000, 96000, 0.0, 0};
+    now = NOW_NS;
+    run_for(sparse, every_2_s, now, 60'000 * MS);
+    EXPECT_EQ(sparse.status().pairs, std::uint32_t{TimebaseEstimator::MIN_SPAN_PAIRS});
+    EXPECT_TRUE(sparse.status().locked);
+}
+
+// One report a second, a step and a silence: the preset locks, steps and publishes as the 16-pair one did.
+TEST(mediaclock_timebase, sender_reports_at_one_a_second_lock_as_before)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::rtcp_sender_reports()};
+    TimebaseEstimator before{ONE_A_SECOND};
+    Source source{48000, 48000, -100e-6, 0};
+    Source same{48000, 48000, -100e-6, 0};
+    std::int64_t now = NOW_NS;
+    std::int64_t worst = 0;
+    bool agree = true;
+    auto const pass = [&](std::int64_t const duration_ns) {
+        for (std::int64_t const end = now + duration_ns; now < end;) {
+            now += PASS_NS;
+            source.feed_until(fit, now);
+            same.feed_until(before, now);
+            agree = agree && fit.update(now) == before.update(now) && fit.status().locked == before.status().locked;
+            worst = std::max(worst, std::abs(fit.timebase().to_domain(now) - before.timebase().to_domain(now)));
+        }
+    };
+    pass(30'000 * MS);
+    source.step(100'000);
+    same.step(100'000);
+    pass(30'000 * MS);
+    source.skip_until(now + (8'000 * MS));
+    same.skip_until(now + (8'000 * MS));
+    pass(30'000 * MS);
+    EXPECT_TRUE(agree && fit.status().locked && fit.status().steps == 1);
+    EXPECT_TRUE(worst <= 1);
+}
+
+// IPMX's cadence: 4 reports would do, but the lock waits until they span 2.5 s; the window then holds 15 s of them.
+TEST(mediaclock_timebase, a_hundred_reports_a_second_lock_within_three_seconds)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::rtcp_sender_reports()};
+    Source source{48000, 480, 37e-6, 1'000};
+    std::int64_t now = NOW_NS;
+    std::int64_t const locked_at = time_to_lock(fit, source, now, 10'000 * MS);
+    EXPECT_TRUE(locked_at >= 2'500 * MS && locked_at <= 2'520 * MS);
+    run_for(fit, source, now, 20'000 * MS);
+    auto const status = fit.status();
+    EXPECT_TRUE(status.locked && status.pairs >= 1'499 && status.pairs <= 1'502);
+    EXPECT_TRUE(std::fabs(status.rate_offset_ppm - 37.0) < 0.01);
+}
+
+// Reports with 1 us RMS of noise: the line at each pass is, in RMS, within a tenth of that of the sender's time.
+TEST(mediaclock_timebase, a_hundred_noisy_reports_a_second_predict_within_a_tenth_of_their_noise)
+{
+    TimebaseEstimator fit{absolute_reports()};
+    Source source{48000, 480, -23e-6, ONE_US_RMS_JITTER_NS};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 20'000 * MS);
+    double sum_squares = 0.0;
+    int passes = 0;
+    run_for(fit, source, now, 60'000 * MS, [&](Timebase const&, bool) {
+        double const error = static_cast<double>(fit.timebase().to_domain(now)) - source.source_ns_at(now);
+        sum_squares += error * error;
+        ++passes;
+    });
+    EXPECT_TRUE(fit.status().locked);
+    EXPECT_TRUE(std::sqrt(sum_squares / passes) < 100.0);
+}
+
+// The same noise moves the line by a few nanoseconds at each publish: a listener's lock tolerance is microseconds.
+TEST(mediaclock_timebase, a_publish_at_a_hundred_reports_a_second_moves_the_line_by_nanoseconds)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::rtcp_sender_reports()};
+    Source source{48000, 480, 41e-6, ONE_US_RMS_JITTER_NS};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 5'000 * MS);
+    Continuity continuity;
+    int publishes = 0;
+    run_for(fit, source, now, 60'000 * MS, [&](Timebase const& before, bool changed) {
+        continuity.observe(before, fit.timebase(), now);
+        publishes += changed ? 1 : 0;
+    });
+    EXPECT_TRUE(fit.status().locked && publishes > 5'000);
+    EXPECT_TRUE(continuity.max_publish_jump < 20);
+}
+
+// A report every 4 s: locked after the fourth, the window then holding 16 of them (a minute).
+TEST(mediaclock_timebase, a_report_every_four_seconds_locks_after_four)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::rtcp_sender_reports()};
+    Source source{48000, 192000, 20e-6, 1'000};
+    std::int64_t now = NOW_NS;
+    std::int64_t const locked_at = time_to_lock(fit, source, now, 30'000 * MS);
+    EXPECT_TRUE(locked_at > 11'990 * MS && locked_at <= 12'000 * MS);
+    run_for(fit, source, now, 60'000 * MS);
+    EXPECT_TRUE(fit.status().locked && fit.status().pairs == TimebaseEstimator::MIN_SPAN_PAIRS);
+    EXPECT_TRUE(std::fabs(fit.status().rate_offset_ppm - 20.0) < 0.1);
+}
+
+// A follower switched from a CRF to sender reports keeps its line, epoch and restarts, then follows the reports.
+TEST(mediaclock_timebase, a_retuned_follower_keeps_its_line_and_its_restarts)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    Source crf{48000, 96, 12e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, crf, now, 1'000 * MS);
+    auto const followed = fit.timebase();
+    fit.retune(now, TimebaseEstimatorParams::rtcp_sender_reports());  // left at now: one restart, no stale line
+    EXPECT_TRUE(fit.update(now));
+    auto const left = fit.timebase();
+    EXPECT_TRUE(left.restarts == followed.restarts + 1 && left.rate_offset == 0.0 && !left.locked);
+    EXPECT_EQ(left.to_domain(now), followed.to_domain(now));
+    EXPECT_FALSE(fit.update(now));
+    auto const& params = fit.params();
+    EXPECT_TRUE(params.follow_phase && !params.absolute && params.window_span_ns == 15'000'000'000);
+    EXPECT_TRUE(params.window_pairs == 2048 && params.lock_pairs == 4 && params.step_pairs == 2);
+    Source reports{48000, 480, -8e-6, 200};
+    reports.restart(48000, 480, -8e-6);
+    run_for(fit, reports, now, 5'000 * MS);
+    EXPECT_TRUE(fit.status().locked && std::fabs(fit.status().rate_offset_ppm + 8.0) < 0.1);
+    EXPECT_TRUE(fit.timebase().restarts == left.restarts + 1 && fit.timebase().epoch == left.epoch + 1);
+}
+
+// A fit that is no follower keeps its preset, window and line: a source switch rebuilds it instead.
+TEST(mediaclock_timebase, a_retune_of_a_fit_that_does_not_follow_changes_nothing)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf()};
+    Source source{48000, 96, 5e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 1'000 * MS);
+    auto const line = fit.timebase();
+    auto const pairs = fit.status().pairs;
+    fit.retune(now, TimebaseEstimatorParams::rtcp_sender_reports());
+    EXPECT_TRUE(fit.timebase() == line && fit.status().pairs == pairs && fit.status().locked);
+    EXPECT_TRUE(fit.params().window_pairs == 1024 && fit.params().lock_pairs == 128 && !fit.params().follow_phase);
+}
+
+// A sender 9 us off the PTP grid and 30 ppm slow: once followed, each report's frame is on the domain's grid.
+TEST(mediaclock_timebase, a_follower_of_sender_reports_lands_their_frames_on_its_grid)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::follower(TimebaseEstimatorParams::rtcp_sender_reports())};
+    Source source{48000, 480, -30e-6, 0};
+    source.step(9'000);
+    std::int64_t now = NOW_NS;
+    Continuity continuity;
+    run_for(fit, source, now, 5'000 * MS, [&](Timebase const& before, bool) { continuity.observe(before, fit.timebase(), now); });
+    EXPECT_TRUE(fit.status().locked && fit.timebase().restarts == 1);
+    EXPECT_TRUE(continuity.max_publish_jump <= static_cast<std::int64_t>(SAMPLE_NS / 2) + 1);
+    std::int64_t worst = 0;
+    for (std::uint64_t report = 0; report < 1'000; ++report) {
+        std::int64_t const ptp = source.ptp_of_frame((report * 480) + 480'000);
+        worst = std::max(worst, off_frame_grid_ns(fit.timebase().to_domain(ptp)));
+    }
+    EXPECT_TRUE(worst < 100);
+}
+
+// Reports that stop for over 1 s (three intervals, at least 1 s): the follower runs on its line, one restart; their
+// return is another.
+TEST(mediaclock_timebase, a_follower_that_loses_its_reports_holds_its_line_and_counts_a_restart)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::follower(TimebaseEstimatorParams::rtcp_sender_reports())};
+    Source source{48000, 480, 15e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 5'000 * MS);
+    auto const locked = fit.timebase();
+    silent_for(fit, source, now, 900 * MS);
+    EXPECT_TRUE(fit.status().reference_present && fit.timebase().restarts == 1);
+    silent_for(fit, source, now, 200 * MS);
+    auto const held = fit.timebase();
+    EXPECT_TRUE(held.running && fit.status().holdover && held.restarts == 2);
+    EXPECT_TRUE(held.to_domain(now) == locked.to_domain(now) && held.rate_offset == locked.rate_offset);
+    run_for(fit, source, now, 5'000 * MS);
+    EXPECT_TRUE(fit.status().locked && fit.timebase().restarts == 3);
+}
+
+// RFC 3550's randomised interval (Section 6.3.1: Td of 5 s times 0.5 to 1.5, over 1.21828), an hour of it: one lock
+// and no loss, the timeout following the sender's own cadence.
+TEST(mediaclock_timebase, a_randomised_rfc_3550_sender_locks_once_and_stays_locked)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::follower(TimebaseEstimatorParams::rtcp_sender_reports())};
+    constexpr double TD_FRAMES = 5.0 * 48000.0;
+    constexpr double RATE_OFFSET = 17e-6;
+    std::uint32_t rng = 0x2468ACE1U;
+    std::uint64_t count = 0;
+    auto const ptp_of = [](std::uint64_t const frames) {
+        return NOW_NS + std::llround(static_cast<double>(frames) * 1e9 / (48000.0 * (1.0 + RATE_OFFSET)));
+    };
+    int locks = 0;
+    bool was_locked = false;
+    for (std::int64_t now = NOW_NS; now < NOW_NS + (3'600'000 * MS); now += PASS_NS) {
+        for (; ptp_of(count) <= now;) {
+            fit.feed(ClockSample{static_cast<std::uint64_t>(ptp_of(count)), count, 48000, 1});
+            rng ^= rng << 13U;
+            rng ^= rng >> 17U;
+            rng ^= rng << 5U;
+            double const draw = 0.5 + (static_cast<double>(rng) / 4294967296.0);
+            count += static_cast<std::uint64_t>(std::llround(TD_FRAMES * draw / 1.21828));
+        }
+        (void)fit.update(now);
+        bool const locked = fit.status().locked;
+        locks += locked && !was_locked ? 1 : 0;
+        was_locked = locked;
+    }
+    EXPECT_EQ(locks, 1);
+    EXPECT_TRUE(was_locked && fit.timebase().restarts == 1);
+}
+
+// At IPMX's cadence a 20 ms excursion of 50 us in the reports' times (a sender's hiccup: two reports) is two outliers,
+// not a step: the follower's line and restarts stay; a lasting 50 us step is one, confirmed once it spans 2 s.
+TEST(mediaclock_timebase, a_twenty_millisecond_excursion_at_a_hundred_reports_a_second_is_no_step)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::follower(TimebaseEstimatorParams::rtcp_sender_reports())};
+    Source source{48000, 480, 12e-6, 500};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 5'000 * MS);
+    auto const before = fit.timebase();
+    EXPECT_TRUE(fit.status().locked && before.restarts == 1);
+    source.outliers(2, 50'000);
+    run_for(fit, source, now, 5'000 * MS);
+    EXPECT_TRUE(fit.status().locked && fit.status().steps == 0 && fit.status().outliers == 2);
+    EXPECT_TRUE(fit.timebase().restarts == before.restarts && fit.timebase().epoch == before.epoch);
+    source.step(-50'000);
+    std::int64_t const stepped = now;
+    run_for(fit, source, now, 1'900 * MS);
+    EXPECT_EQ(fit.status().steps, std::uint32_t{0});
+    run_for(fit, source, now, 6'000 * MS);
+    EXPECT_TRUE(fit.status().steps == 1 && fit.status().last_step_ns >= stepped && fit.status().locked);
+    EXPECT_EQ(fit.timebase().restarts, static_cast<std::uint16_t>(before.restarts + 1));
+}
+
+// The published line says whether the fit is locked: not before the first lock or in holdover, though a follower's
+// line runs throughout.
+TEST(mediaclock_timebase, the_line_says_whether_the_fit_is_locked)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::follower(TimebaseEstimatorParams::rtcp_sender_reports())};
+    Source source{48000, 480, 12e-6, 500};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 1'000 * MS);
+    EXPECT_TRUE(fit.timebase().running && !fit.timebase().locked);
+    run_for(fit, source, now, 3'000 * MS);
+    EXPECT_TRUE(fit.timebase().locked);
+    silent_for(fit, source, now, 1'500 * MS);
+    EXPECT_TRUE(fit.timebase().running && !fit.timebase().locked && fit.status().holdover);
 }
 
 TEST_MAIN(statusbar_mediaclock, mediaclock_timebase_test)

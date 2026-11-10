@@ -42,13 +42,18 @@ constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
 }  // namespace
 
-TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept
-    : params_{params}
+auto TimebaseEstimator::clamped(TimebaseEstimatorParams params) noexcept -> TimebaseEstimatorParams
 {
-    params_.window_pairs = std::clamp<std::uint32_t>(params_.window_pairs, 2, MAX_WINDOW_PAIRS);
-    params_.step_pairs = std::clamp<std::uint32_t>(params_.step_pairs, 1, MAX_STEP_PAIRS);
-    params_.lock_pairs = std::clamp<std::uint32_t>(params_.lock_pairs, 2, params_.window_pairs);
-    params_.absolute = params_.absolute && !params_.follow_phase;  // a follower joins, it never re-anchors
+    params.window_pairs = std::clamp<std::uint32_t>(params.window_pairs, 2, MAX_WINDOW_PAIRS);
+    params.step_pairs = std::clamp<std::uint32_t>(params.step_pairs, 1, MAX_STEP_PAIRS);
+    params.lock_pairs = std::clamp<std::uint32_t>(params.lock_pairs, 2, params.window_pairs);
+    params.absolute = params.absolute && !params.follow_phase;  // a follower joins, it never re-anchors
+    return params;
+}
+
+TimebaseEstimator::TimebaseEstimator(TimebaseEstimatorParams const& params) noexcept
+    : params_{clamped(params)}
+{
     // A follower runs from the start, on the identity line: the first update() publishes it.
     published_.running = params_.follow_phase;
     publish_pending_ = params_.follow_phase;
@@ -86,6 +91,19 @@ auto TimebaseEstimator::push(Pair const& p) noexcept -> void
     window_[(head_ + size_) % params_.window_pairs] = p;
     ++size_;
     ++pending_;
+    trim_span();
+}
+
+auto TimebaseEstimator::trim_span() noexcept -> void
+{
+    if (params_.window_span_ns <= 0) {
+        return;
+    }
+    std::size_t const floor = std::max<std::size_t>(params_.lock_pairs, MIN_SPAN_PAIRS);
+    while (size_ > floor && (newest().reference_ns - pair_at(0).reference_ns) > params_.window_span_ns) {
+        head_ = (head_ + 1) % params_.window_pairs;
+        --size_;
+    }
 }
 
 auto TimebaseEstimator::reset_window() noexcept -> void
@@ -146,15 +164,26 @@ auto TimebaseEstimator::accept_reference(std::int64_t const reference_ns) noexce
 
 auto TimebaseEstimator::hold(Pair const& p) noexcept -> void
 {
-    held_[held_count_++] = p;
-    if (held_count_ < params_.step_pairs) {
-        return;
+    held_first_ns_ = held_count_ == 0 ? p.reference_ns : held_first_ns_;
+    if (held_count_ < MAX_STEP_PAIRS) {
+        held_[held_count_] = p;
+    } else {
+        std::shift_left(held_.begin(), held_.end(), 1);  // the newest kept, oldest first
+        held_.back() = p;
     }
+    ++held_count_;
+    if (held_count_ >= params_.step_pairs && (p.reference_ns - held_first_ns_) >= params_.step_span_ns) {
+        confirm_step();
+    }
+}
+
+auto TimebaseEstimator::confirm_step() noexcept -> void
+{
     if (fit_pairs_ >= params_.lock_pairs) {  // a shorter fit is restarted, not stepped
         ++steps_;
-        last_step_ns_ = held_[0].reference_ns;
+        last_step_ns_ = held_first_ns_;
     }
-    std::size_t const n = held_count_;
+    std::size_t const n = std::min(held_count_, MAX_STEP_PAIRS);
     source_discontinuity();
     for (std::size_t i = 0; i < n; ++i) {
         push(held_[i]);
@@ -254,6 +283,7 @@ auto TimebaseEstimator::line() const noexcept -> Timebase
         .rate_offset = slope_ - 1.0,
         .epoch = published_.epoch,
         .running = true,
+        .locked = true,
         .restarts = published_.restarts,
     };
 }
@@ -264,10 +294,23 @@ auto TimebaseEstimator::restart() noexcept -> void
     publish_pending_ = true;
 }
 
+auto TimebaseEstimator::reference_timeout() const noexcept -> std::int64_t
+{
+    if (params_.timeout_intervals == 0) {
+        return params_.reference_timeout_ns;
+    }
+    if (size_ < 2) {
+        return params_.reference_timeout_max_ns;
+    }
+    std::int64_t const mean = (newest().reference_ns - pair_at(0).reference_ns) / static_cast<std::int64_t>(size_ - 1);
+    std::int64_t const ceiling = std::max(params_.reference_timeout_max_ns, params_.reference_timeout_ns);
+    return std::clamp(mean * params_.timeout_intervals, params_.reference_timeout_ns, ceiling);
+}
+
 auto TimebaseEstimator::check_reference(std::int64_t const now_ns) noexcept -> void
 {
     bool const was_present = reference_present_;
-    reference_present_ = have_reference_ && (now_ns - last_reference_ns_) <= params_.reference_timeout_ns;
+    reference_present_ = have_reference_ && (now_ns - last_reference_ns_) <= reference_timeout();
     if (!reference_present_ && size_ != 0) {
         reset_window();
     }
@@ -323,6 +366,9 @@ auto TimebaseEstimator::lose_lock(std::int64_t const now_ns) noexcept -> bool
     if (state_ == State::locked) {
         state_ = State::holdover;
     }
+    if (std::exchange(published_.locked, false)) {
+        publish_pending_ = true;  // the line runs on, no longer locked to its source
+    }
     if (state_ == State::holdover && !params_.follow_phase && (now_ns - last_good_ns_) > params_.holdover_ns) {
         state_ = State::unlocked;
         published_.running = false;
@@ -352,6 +398,17 @@ auto TimebaseEstimator::free_run(std::int64_t const now_ns) noexcept -> void
     if (left) {
         leave_line(now_ns);
     }
+}
+
+auto TimebaseEstimator::retune(std::int64_t const now_ns, TimebaseEstimatorParams const& params) noexcept -> void
+{
+    if (!params_.follow_phase) {
+        return;  // only a follower changes source kind without a new fit
+    }
+    free_run(now_ns);
+    have_reference_ = false;  // the next source's pairs are on their own timeline
+    have_source_ = false;
+    params_ = clamped(TimebaseEstimatorParams::follower(params));
 }
 
 auto TimebaseEstimator::leave_line(std::int64_t const now_ns) noexcept -> void
