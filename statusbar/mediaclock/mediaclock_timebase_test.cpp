@@ -100,6 +100,9 @@ class Source
         ++epoch_;
     }
 
+    /// Jitter of up to `ns` either way from now on.
+    auto set_jitter(std::int64_t const ns) noexcept -> void { jitter_ns_ = ns; }
+
     /// PTP time of frame `count` of the current epoch, without jitter.
     [[nodiscard]] auto ptp_of_frame(std::uint64_t count) const noexcept -> std::int64_t { return ptp_of(count); }
 
@@ -669,6 +672,24 @@ TEST(mediaclock_timebase, a_brief_return_that_never_locks_is_no_restart)
     silent_for(fit, source, now, 1'000 * MS);
     EXPECT_EQ(fit.timebase().restarts, std::uint16_t{2});
     EXPECT_TRUE(fit.timebase().running);
+}
+
+// A follower that loses lock to a noisy spell and regains it on the same source, in place, counts no restart: its
+// line did not move, so no talker toggles mr.
+TEST(mediaclock_timebase, a_lock_regained_in_place_is_no_restart)
+{
+    TimebaseEstimator fit{TimebaseEstimatorParams::crf_follower()};
+    Source source{48000, 96, 5e-6, 200};
+    std::int64_t now = NOW_NS;
+    run_for(fit, source, now, 2'000 * MS);
+    EXPECT_TRUE(fit.status().locked && fit.timebase().restarts == 1);
+    source.set_jitter(4'000);  // an RMS residual just past lock_rms_ns, steps under step_threshold_ns
+    bool lost = false;
+    run_for(fit, source, now, 3'000 * MS, [&](Timebase const&, bool) { lost = lost || fit.status().holdover; });
+    source.set_jitter(200);
+    run_for(fit, source, now, 4'000 * MS);
+    EXPECT_TRUE(lost && fit.status().locked && fit.status().reference_present);
+    EXPECT_EQ(fit.timebase().restarts, std::uint16_t{1});
 }
 
 // A fit that is no follower counts no restarts: its joins keep domain time continuous, and free_run() leaves it as
