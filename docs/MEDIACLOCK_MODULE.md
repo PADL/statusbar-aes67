@@ -135,7 +135,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   | Preset | Pairs/s | Window | Lock after | Step | Reference timeout | Absolute |
   |---|---|---|---|---|---|---|
   | `avb_stream()` | 1000 | 2048 pairs (2 s) | 256 pairs spanning 250 ms | 3 residuals over 20 µs | 100 ms | no |
-  | `rtcp_sender_reports()` | 0.2 to 100 | 15 s (at most 2048) | 4 spanning 2.5 s | 2 over 20 µs | 5 s | no |
+  | `rtcp_sender_reports()` | 0.25 to 100 | 15 s (at most 2048) | 4 spanning 2.5 s | 2 over 20 µs | 5 s | no |
   | `crf()` | 500 | 1024 (2 s) | 128 spanning 250 ms | 3 over 20 µs | 100 ms | no |
   | `phc_pairs()` | 16 | 64 (4 s) | 16 spanning 900 ms | 3 over 2 µs | 500 ms | yes |
 
@@ -148,8 +148,9 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
   `lock_pairs` pairs, so one preset fits a sender at any report rate: `rtcp_sender_reports()`
   holds 16 reports at one a second (as its 16-pair window did) and 1500 at IPMX's 100 a second
   (VSF TR-10-1 Section 8.10.1), which predicts the line within about 2σ/√N of the reports' noise σ.
-  Feed every report; do not thin them. A sender whose reports are over 5 s apart (RFC 3550
-  Section 6.3.1's randomised interval at a 5 s minimum) loses its reference between them.
+  Feed every report; do not thin them. A sender whose reports come over 5 s apart (RFC 3550
+  Section 6.3.1's randomised interval at its 5 s minimum) loses its reference between them.
+  `retune()` forgets the old source's window, reference time and epoch.
 - A residual over the step threshold is held; fewer than `step_pairs` in a row are dropped
   as outliers, `step_pairs` in a row are a step and restart the window from them. A new
   `epoch` or `rate_hz` restarts it without counting a step. Either way the domain runs on

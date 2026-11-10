@@ -376,7 +376,9 @@ auto TimebaseEstimator::retune(TimebaseEstimatorParams const& params) noexcept -
     if (!params_.follow_phase) {
         return;  // only a follower changes source kind without a new fit
     }
-    reset_window();
+    forget_source();
+    have_reference_ = false;  // the next source's pairs are on their own timeline
+    have_source_ = false;
     params_ = clamped(TimebaseEstimatorParams::follower(params));
 }
 
