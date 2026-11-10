@@ -89,4 +89,15 @@ TEST(mediaclock_ptp_clock, rtp_timestamps_carry_the_direct_offset)
     EXPECT_EQ(clock.avtp_timestamp(n + 6) - clock.avtp_timestamp(n), std::uint32_t{125'000});
 }
 
+TEST(mediaclock_ptp_clock, a_timestamp_before_the_epoch_unwraps_to_zero)
+{
+    // Near the epoch (a grandmaster on the 1970 timescale), a timestamp up to 2^31 behind cannot wrap to 2^64.
+    EXPECT_EQ(PtpMediaClock::unwrap(0xFFFF'FF00U, 100), uint64_t{0});
+    EXPECT_EQ(PtpMediaClock::unwrap(0x8000'0000U, 0), uint64_t{0});
+    EXPECT_EQ(PtpMediaClock::index_of_rtp(0, 0x1000, 0x800), uint64_t{0});
+    EXPECT_EQ(PtpMediaClock::unwrap(40, 100), uint64_t{40});
+    EXPECT_EQ(PtpMediaClock::unwrap(0, 100), uint64_t{0});
+    EXPECT_EQ(PtpMediaClock::unwrap(0xFFFF'FFFFU, uint64_t{1} << 32U), uint64_t{0xFFFF'FFFFU});
+}
+
 TEST_MAIN(statusbar_mediaclock, mediaclock_ptp_clock_test)
