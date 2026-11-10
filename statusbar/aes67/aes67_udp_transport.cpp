@@ -113,19 +113,6 @@ class UdpSendPort final : public SendPort
         , destination_{destination}
     {}
 
-    auto send(rtp::RtpHeader const& header, std::span<uint8_t const> const payload) noexcept -> bool override
-    {
-        if (queued_ == UdpTransport::SEND_BATCH) {
-            return false;
-        }
-        auto const length = rtp::serialize_rtp(header, payload, buffers_[queued_]);
-        if (!length) {
-            return false;
-        }
-        enqueue(*length);
-        return true;
-    }
-
     auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
         -> bool override
     {

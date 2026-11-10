@@ -69,12 +69,6 @@ class XdpTransport::Sender final : public SendPort
         , addressing_{addressing}
     {}
 
-    auto send(rtp::RtpHeader const& header, std::span<uint8_t const> const payload) noexcept -> bool override
-    {
-        auto const frame = write_frame(transport_.tx_pool_, addressing_.current(), header, payload);
-        return frame && transport_.commit(frame->first, frame->second, 0);
-    }
-
     auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
         -> bool override
     {
@@ -173,18 +167,6 @@ auto XdpTransport::RtcpPipe::read(std::span<Datagram> const out, std::span<Frame
         ++n;
     }
     return n;
-}
-
-auto XdpTransport::write_frame(
-    TxPool& pool,
-    rtp::FrameAddressing const& addressing,
-    rtp::RtpHeader const& header,
-    std::span<uint8_t const> const payload) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>
-{
-    return render_frame(pool, addressing, header, payload.size(), [payload](std::span<uint8_t> const out) noexcept {
-        std::ranges::copy(payload, out.begin());
-        return true;
-    });
 }
 
 auto XdpTransport::render_frame(

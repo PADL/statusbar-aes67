@@ -127,7 +127,6 @@ class FakeTransport final : public Transport
         explicit Tx(FakeTransport& t)
             : transport{t}
         {}
-        auto send(rtp::RtpHeader const&, std::span<uint8_t const>) noexcept -> bool override { return true; }
         auto send_rendered(rtp::RtpHeader const& header, size_t const length, PayloadRenderer const& render) noexcept
             -> bool override
         {

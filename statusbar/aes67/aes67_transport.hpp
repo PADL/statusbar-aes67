@@ -125,10 +125,6 @@ class SendPort
 {
   public:
     virtual ~SendPort() = default;
-    /// Queue a packet, copying `payload` in. False if it cannot be queued (the
-    /// batch or the ring is full, or it does not fit a frame); the packet is
-    /// then not sent.
-    [[nodiscard]] virtual auto send(rtp::RtpHeader const& header, std::span<uint8_t const> payload) noexcept -> bool = 0;
     /// Queue a packet whose `payload_length`-byte payload `render` writes straight into the next TX
     /// buffer, after the headers; `render` is not called when no buffer can be reserved. True when
     /// queued; when `render` returns false or the packet is refused after it, the buffer goes unsent.
@@ -145,7 +141,7 @@ class SendPort
         (void)departure_ns;
         return send_rendered(header, payload_length, render);
     }
-    /// Send what send() and send_rendered() queued. Returns the number of packets the network
+    /// Send what send_rendered() queued. Returns the number of packets the network
     /// refused (0 on success).
     virtual auto flush() noexcept -> size_t = 0;
     /// Tag the packets queued from now on with `vlan` (PCP and VID), or none (nullopt); sequence and

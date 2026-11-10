@@ -19,6 +19,32 @@ using namespace statusbar;
 using namespace statusbar::aes67;
 using statusbar::ip::IPv4Address;
 
+namespace {
+
+/// An RTP frame with `payload` copied in, through XdpTransport::render_frame().
+auto write_frame(
+    XdpTransport::TxPool& pool,
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    std::span<uint8_t const> const payload) -> std::optional<std::pair<net::EthernetTxSlot, size_t>>
+{
+    return XdpTransport::render_frame(pool, addressing, header, payload.size(), [payload](std::span<uint8_t> const out) noexcept {
+        std::ranges::copy(payload, out.begin());
+        return true;
+    });
+}
+
+/// Queue `payload` on `port`, copied in through send_rendered().
+auto copy_send(SendPort& port, rtp::RtpHeader const& header, std::span<uint8_t const> const payload) -> bool
+{
+    return port.send_rendered(header, payload.size(), [payload](std::span<uint8_t> const out) noexcept {
+        std::ranges::copy(payload, out.begin());
+        return true;
+    });
+}
+
+}  // namespace
+
 TEST(aes67_xdp, ships_a_umem_sized_for_the_rings_and_the_tx_pool)
 {
     // The senders' pool is never offered to the kernel: the rest of the UMEM
@@ -215,7 +241,7 @@ TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
     std::array<uint8_t, 2048> big{};
     std::array<uint8_t, 40> small{};  // less than the 42 bytes of headers
     XdpTransport::TxPool pool;
-    EXPECT_FALSE(XdpTransport::write_frame(pool, {}, {}, {}).has_value());  // empty pool
+    EXPECT_FALSE(write_frame(pool, {}, {}, {}).has_value());  // empty pool
     EXPECT_EQ(pool.empty_count(), uint64_t{1});
     EXPECT_TRUE(pool.put({.handle = 1, .buffer = big}));
     EXPECT_TRUE(pool.put({.handle = 2, .buffer = small}));
@@ -229,12 +255,12 @@ TEST(aes67_xdp, a_frame_that_does_not_fit_goes_back_to_the_pool)
     header.init(96, 1, 2, 3);
     std::array<uint8_t, 288> const payload{};
     // The small frame is on top: it does not fit and goes back.
-    EXPECT_FALSE(XdpTransport::write_frame(pool, addressing, header, payload).has_value());
+    EXPECT_FALSE(write_frame(pool, addressing, header, payload).has_value());
     EXPECT_EQ(pool.size(), size_t{2});
     // Claim it out of the way, and the big one is written.
     auto const spare = pool.claim();
     EXPECT_EQ(spare->handle, uint64_t{2});
-    auto const written = XdpTransport::write_frame(pool, addressing, header, payload);
+    auto const written = write_frame(pool, addressing, header, payload);
     EXPECT_TRUE(written.has_value());
     EXPECT_EQ(written->first.handle, uint64_t{1});
     EXPECT_EQ(written->second, rtp::rtp_frame_overhead(false) + rtp::RtpHeader::LENGTH + payload.size());
@@ -267,7 +293,7 @@ TEST(aes67_xdp, renders_the_payload_into_the_pooled_frame)
         std::array<uint8_t, 2048> rendered{};
         XdpTransport::TxPool pool;
         EXPECT_TRUE(pool.put({.handle = 1, .buffer = copied}));
-        auto const written = XdpTransport::write_frame(pool, addressing, header, payload);
+        auto const written = write_frame(pool, addressing, header, payload);
         EXPECT_TRUE(written.has_value());
 
         EXPECT_TRUE(pool.put({.handle = 2, .buffer = rendered}));
@@ -610,7 +636,7 @@ TEST(aes67_xdp, a_send_port_s_tag_changes_from_its_next_frame)
         sending.set_vlan(tags[i]);
         rtp::RtpHeader header{};
         header.init(96, static_cast<uint16_t>(100 + i), 6U * i, 7);
-        auto const written = XdpTransport::write_frame(pool, sending.current(), header, payload);
+        auto const written = write_frame(pool, sending.current(), header, payload);
         size_t const length = written ? written->second : 0;
         auto const frame = rtp::parse_rtp_frame(std::span{buffers[i]}.first(length));
         EXPECT_EQ(length, rtp::rtp_frame_overhead(tags[i].has_value()) + rtp::RtpHeader::LENGTH + payload.size());
@@ -716,7 +742,7 @@ TEST(aes67_xdp, open_fails_cleanly_or_serves_multicast_only)
     rtp::RtpHeader header{};
     header.init(96, 1, 2, 3);
     std::array<uint8_t, 288> const payload{};
-    EXPECT_TRUE((*sender)->send(header, payload));
+    EXPECT_TRUE(copy_send(**sender, header, payload));
     (*transport)->end_tick();
     EXPECT_EQ((*transport)->tx_flush_failures(), uint64_t{0});
     EXPECT_FALSE((*transport)->send_error());

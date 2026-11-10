@@ -17,6 +17,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -40,6 +41,15 @@ using namespace statusbar::aes67;
 using statusbar::ip::IPv4Address;
 
 namespace {
+
+/// Queue `payload` on `port`, copied in through send_rendered().
+auto copy_send(SendPort& port, rtp::RtpHeader const& header, std::span<uint8_t const> const payload) -> bool
+{
+    return port.send_rendered(header, payload.size(), [payload](std::span<uint8_t> const out) noexcept {
+        std::ranges::copy(payload, out.begin());
+        return true;
+    });
+}
 
 /// A veth pair, its first end addressed (and its second, given `far_address`), both up; removed on destruction.
 class VethPair
@@ -130,7 +140,7 @@ auto sent_and_received(XdpTransport& sending, SendPort& sender, XdpTransport& re
     rtp::RtpHeader header{};
     header.init(97, 1, 2, 3);
     std::array<uint8_t, 288> const payload{};
-    EXPECT_TRUE(sender.send(header, payload));
+    EXPECT_TRUE(copy_send(sender, header, payload));
     sending.end_tick();
     std::array<Datagram, 8> batch{};
     size_t total = 0;

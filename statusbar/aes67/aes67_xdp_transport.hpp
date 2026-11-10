@@ -231,15 +231,6 @@ class XdpTransport final : public Transport
         std::atomic<uint64_t> empty_{0};  ///< written by the owning thread only
     };
 
-    /// Write an RTP frame into a pooled TX frame: the slot and the frame
-    /// length, or nullopt (the pool was empty, or the frame did not fit, and
-    /// the slot went back to the pool).
-    [[nodiscard]] static auto write_frame(
-        TxPool& pool,
-        rtp::FrameAddressing const& addressing,
-        rtp::RtpHeader const& header,
-        std::span<uint8_t const> payload) noexcept -> std::optional<std::pair<net::EthernetTxSlot, size_t>>;
-
     /// Write an RTP frame's headers into a pooled TX frame and have `render` write the payload
     /// after them: the slot and the frame length, or nullopt (pool empty: `render` not called;
     /// frame too long or `render` false: the slot back in the pool).

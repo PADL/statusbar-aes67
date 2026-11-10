@@ -169,13 +169,6 @@ class LoopTransport final : public Transport
             : transport{t}
             , destination{d}
         {}
-        auto send(rtp::RtpHeader const& header, std::span<uint8_t const> const payload) noexcept -> bool override
-        {
-            std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
-            (void)rtp::serialize_rtp(header, payload, bytes);
-            transport.queue.push_back({destination, std::move(bytes), transport.vlan});
-            return true;
-        }
         auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
             -> bool override
         {
@@ -326,22 +319,6 @@ TEST(aes67_sender, a_packet_departs_at_the_time_of_the_tick_that_sends_it)
     EXPECT_TRUE(transport.departures.size() >= 5 && transport.departures.back() == T0 + 6'250'000);
 }
 
-TEST(aes67_sender, parses_a_grandmaster)
-{
-    auto const gm = parse_grandmaster("00-1D-C1-FF-FE-12-34-56:3");
-    EXPECT_TRUE(gm.has_value());
-    EXPECT_EQ(gm->domain, uint8_t{3});
-    EXPECT_TRUE(gm->identity == *ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"));
-    auto const colons = parse_grandmaster("00:1d:c1:ff:fe:12:34:56:0");
-    EXPECT_TRUE(colons.has_value());
-    EXPECT_EQ(colons->domain, uint8_t{0});
-    auto const bare = parse_grandmaster("001DC1FFFE123456");
-    EXPECT_TRUE(bare.has_value());
-    EXPECT_FALSE(parse_grandmaster("not a clock").has_value());
-    EXPECT_FALSE(parse_grandmaster("00-1D-C1-FF-FE-12-34-56:x").has_value());
-    EXPECT_FALSE(parse_grandmaster("00-1D-C1-FF-FE-12-34-56:128").has_value());
-}
-
 TEST(aes67_sender, writes_sdp_that_parses_back)
 {
     LoopTransport transport;
@@ -383,7 +360,6 @@ TEST(aes67_sender, writes_sdp_that_parses_back)
     EXPECT_TRUE(text.find("a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-12-34-56:0\r\n") != std::string::npos);
     EXPECT_TRUE(text.find("a=mediaclk:direct=0\r\n") != std::string::npos);
     EXPECT_TRUE(text.find("a=clock-domain:PTPv2 0\r\n") != std::string::npos);
-    EXPECT_TRUE(parsed->effective_clock_domain(media) == uint8_t{0});
 
     // Reconfiguring bumps the version and keeps the session id.
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 3}, .port = 5004}));
@@ -633,7 +609,6 @@ TEST(aes67_sender, waits_out_the_send_offset)
     EXPECT_EQ(sender.send_offset(), uint32_t{6});  // the default: one 125 us tick
     EXPECT_EQ(Sender::default_send_offset(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 44100}), uint32_t{6});
     EXPECT_EQ(Sender::default_send_offset(StreamFormat{.encoding = sdp::Encoding::l24, .sample_rate = 96000}), uint32_t{12});
-    EXPECT_EQ(Sender::relay_send_offset(STEREO_L24), FPP + 12);  // a packet and two ticks
     EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}}));
     sender.set_send_offset(100);
 
@@ -1809,7 +1784,7 @@ void receive_datagrams(ReceivePort& port, size_t const count, std::vector<std::v
     }
 }
 
-/// The bridge's AES67 encodings (L16, L24 and L32), at a few channel counts.
+/// AES67's linear encodings (L16, L24 and L32), at a few channel counts.
 constexpr std::array<StreamFormat, 6> RENDER_FORMATS{{
     {.encoding = sdp::Encoding::l16, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP},
     {.encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP},
@@ -1949,7 +1924,7 @@ TEST(aes67_udp, a_datagram_is_kept_only_for_its_address_and_interface)
     EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 3}, 3));
 }
 
-TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
+TEST(aes67_udp, a_rendered_send_is_the_serialised_packet_byte_for_byte)
 {
     auto transport = UdpTransport::open("lo");
     EXPECT_TRUE(transport.has_value());
@@ -1971,7 +1946,6 @@ TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
         std::vector<uint8_t> expected(rtp::RtpHeader::LENGTH + payload.size());
         EXPECT_TRUE(rtp::serialize_rtp(header, payload, expected).has_value());
 
-        EXPECT_TRUE(port.send(header, payload));
         size_t rendered_length = 0;
         EXPECT_TRUE(port.send_rendered(header, payload.size(), [&](std::span<uint8_t> const out) noexcept {
             rendered_length = out.size();
@@ -1987,9 +1961,8 @@ TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
         EXPECT_EQ(port.flush(), size_t{0});
 
         std::vector<std::vector<uint8_t>> got;
-        receive_datagrams(**rx, 3, got);
-        EXPECT_EQ(got.size(), size_t{2});
-        EXPECT_TRUE(got.size() == 2 && got[0] == expected && got[1] == expected);
+        receive_datagrams(**rx, 2, got);
+        EXPECT_TRUE(got == std::vector<std::vector<uint8_t>>{expected});
         ++seq;
     }
 
@@ -2010,7 +1983,6 @@ TEST(aes67_udp, rendered_sends_match_copied_sends_byte_for_byte)
         return true;
     }));
     EXPECT_FALSE(called);
-    EXPECT_FALSE(port.send(header, small));
     EXPECT_EQ(port.flush(), size_t{0});
     std::vector<std::vector<uint8_t>> got;
     receive_datagrams(**rx, UdpTransport::SEND_BATCH, got);

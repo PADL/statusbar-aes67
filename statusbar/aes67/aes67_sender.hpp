@@ -25,11 +25,6 @@
 
 namespace statusbar::aes67 {
 
-/// A grandmaster written `<EUI-64>[:<domain>]` (the EUI-64 with '-' or ':'
-/// separators, or none; the domain 0-127), as a command line or configuration
-/// gives it; nullopt if it is not one.
-[[nodiscard]] auto parse_grandmaster(std::string_view text) -> std::optional<Grandmaster>;
-
 class Sender
 {
   public:
@@ -58,18 +53,10 @@ class Sender
     /// behind now. Default: default_send_offset(). Any thread, real-time safe; the next tick adopts it.
     void set_send_offset(uint32_t const frames) noexcept { send_offset_.store(frames, std::memory_order_relaxed); }
     [[nodiscard]] auto send_offset() const noexcept -> uint32_t { return send_offset_.load(std::memory_order_relaxed); }
-    /// One 125 us tick, rounded up (6 frames at 48 kHz): for a provider whose frames are there by
-    /// their index; a provider fed from the network wants relay_send_offset().
+    /// One 125 us tick, rounded up (6 frames at 48 kHz): for a provider whose frames are there by their index.
     [[nodiscard]] static constexpr auto default_send_offset(StreamFormat const& format) noexcept -> uint32_t
     {
         return (format.sample_rate + 7999) / 8000;
-    }
-    /// One packet of this stream plus two 125 us ticks: for a provider whose
-    /// frames arrive over a network (an AES67 receiver's), a packet time plus
-    /// arrival jitter after their index.
-    [[nodiscard]] static constexpr auto relay_send_offset(StreamFormat const& format) noexcept -> uint32_t
-    {
-        return format.frames_per_packet + (format.sample_rate / 4000);
     }
 
     /// Where the packet grid starts, in frames (modulo frames_per_packet):

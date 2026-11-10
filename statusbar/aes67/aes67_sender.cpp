@@ -9,7 +9,6 @@
 #include "statusbar/rtp/rtp_header.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <chrono>
 #include <format>
 #include <iterator>
@@ -20,35 +19,6 @@
 namespace statusbar::aes67 {
 
 namespace {
-
-/// A grandmaster's text split: an EUI-64 of 23 characters with separators (which may be ':') or 16
-/// without, then any `:<domain>`.
-struct GrandmasterText
-{
-    std::string_view eui;
-    std::optional<std::string_view> domain;
-};
-
-[[nodiscard]] auto split_grandmaster(std::string_view const text) noexcept -> GrandmasterText
-{
-    for (size_t const length : {size_t{23}, size_t{16}}) {
-        if (text.size() > length && text[length] == ':') {
-            return {.eui = text.substr(0, length), .domain = text.substr(length + 1)};
-        }
-    }
-    return {.eui = text, .domain = std::nullopt};
-}
-
-/// A PTP domain number, 0 to 127; std::nullopt otherwise.
-[[nodiscard]] auto parse_domain(std::string_view const text) noexcept -> std::optional<uint8_t>
-{
-    unsigned value = 0;
-    auto const [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (ec != std::errc{} || end != text.data() + text.size() || value > 127) {
-        return std::nullopt;
-    }
-    return static_cast<uint8_t>(value);
-}
 
 /// Fails unsupported_format unless the media clock supports the rate and a packet holds frames,
 /// packet_too_large when a packet would not fit.
@@ -64,17 +34,6 @@ struct GrandmasterText
 }
 
 }  // namespace
-
-auto parse_grandmaster(std::string_view const text) -> std::optional<Grandmaster>
-{
-    auto const [eui, domain_text] = split_grandmaster(text);
-    auto const identity = ieee::eui64_from_string(eui);
-    auto const domain = domain_text ? parse_domain(*domain_text) : std::optional<uint8_t>{0};
-    if (!identity || !domain) {
-        return std::nullopt;
-    }
-    return Grandmaster{.identity = *identity, .domain = *domain};
-}
 
 Sender::Sender(StreamFormat const& format, FrameProvider provider, Transport& transport, std::string name)
     : format_{format}
