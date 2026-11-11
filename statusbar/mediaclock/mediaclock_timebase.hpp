@@ -259,7 +259,7 @@ class TimebaseEstimator
     /// free_run()'s new line: the one in use at `now_ns`, at the reference's rate, in a new epoch; a restart.
     auto leave_line(std::int64_t now_ns) noexcept -> void;
     /// A follower's lock at `now_ns`: a restart unless it regains the source it was following in place.
-    auto note_follow_lock(std::int64_t now_ns) noexcept -> void;
+    auto notify_follow_lock(std::int64_t now_ns) noexcept -> void;
     [[nodiscard]] auto pair_at(std::size_t i) const noexcept -> Pair const&;
     [[nodiscard]] auto newest() const noexcept -> Pair const& { return pair_at(size_ - 1); }
     [[nodiscard]] auto residual(Pair const& p) const noexcept -> double;

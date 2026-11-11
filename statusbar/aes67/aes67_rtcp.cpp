@@ -198,7 +198,7 @@ void RtcpSession::close() noexcept
     if (!port_) {
         return;
     }
-    note_sending();
+    notify_sending();
     if (!stopped_bye_) {
         (void)send_bye(ssrc());
     }
@@ -206,7 +206,7 @@ void RtcpSession::close() noexcept
     hold_ = {};  // an ipmx sender's next run waits for no SR
 }
 
-void RtcpSession::note_sending() noexcept
+void RtcpSession::notify_sending() noexcept
 {
     if (role_ != Role::sender) {
         return;
@@ -245,7 +245,7 @@ void RtcpSession::tick(uint64_t const now_ns) noexcept
     if (port_->fd() < 0) {
         on_ready(now_ns);
     }
-    note_sending();
+    notify_sending();
     if (ipmx()) {
         send_due_report(now_ns);
     } else {
@@ -533,14 +533,14 @@ void RtcpSession::handle_as_sender(rtp::RtcpCompound const& compound, uint32_t c
     if (compound.sr) {
         ++stats_.sr_received;
         if (auto const block = compound.sr->blocks.find(own)) {
-            note_report_block(*block, now_ns);
+            notify_report_block(*block, now_ns);
             stats_.remote_ssrc = reporter;
         }
     }
     if (compound.rr) {
         ++stats_.rr_received;
         if (auto const block = compound.rr->blocks.find(own)) {
-            note_report_block(*block, now_ns);
+            notify_report_block(*block, now_ns);
             stats_.remote_ssrc = reporter;
         }
     }
@@ -553,7 +553,7 @@ void RtcpSession::handle_as_sender(rtp::RtcpCompound const& compound, uint32_t c
     }
 }
 
-void RtcpSession::note_report_block(rtp::ReportBlock const& block, uint64_t const now_ns) noexcept
+void RtcpSession::notify_report_block(rtp::ReportBlock const& block, uint64_t const now_ns) noexcept
 {
     stats_.remote_fraction_lost = block.fraction_lost();
     stats_.remote_cumulative_lost = block.cumulative_lost();
@@ -584,28 +584,28 @@ void RtcpSession::handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t
     ReceiveState const state = receiver_->receive_state();
     // Before the stream's first packet an SR from its source filter's address is the sender's.
     if (compound.sr && (!state.valid || compound.sr->ssrc == state.ssrc)) {
-        note_stream_sr(*compound.sr, now_ns);
+        notify_stream_sr(*compound.sr, now_ns);
     }
     if (compound.rr) {
         ++stats_.rr_received;
     }
     uint32_t const remote = state.valid ? state.ssrc : stats_.remote_ssrc;
     if (remote != 0) {
-        note_remote(compound, remote);
+        notify_remote(compound, remote);
     }
 }
 
-void RtcpSession::note_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
+void RtcpSession::notify_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
 {
     ++stats_.sr_received;
     last_sr_ =
         LastSenderReport{.lsr = rtp::lsr_of(sr.info.ntp_msw.get(), sr.info.ntp_lsw.get()), .ssrc = sr.ssrc, .arrival_ns = now_ns};
     stats_.remote_ssrc = sr.ssrc;
     stats_.remote_bye = false;
-    note_sender_report(sr, now_ns);
+    notify_sender_report(sr, now_ns);
 }
 
-void RtcpSession::note_remote(rtp::RtcpCompound const& compound, uint32_t const remote)
+void RtcpSession::notify_remote(rtp::RtcpCompound const& compound, uint32_t const remote)
 {
     if (compound.sdes && compound.sdes->ssrc == remote) {
         stats_.remote_cname.assign(compound.sdes->cname);
@@ -616,7 +616,7 @@ void RtcpSession::note_remote(rtp::RtcpCompound const& compound, uint32_t const 
     }
 }
 
-void RtcpSession::note_sender_report(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
+void RtcpSession::notify_sender_report(rtp::RtcpSenderReport const& sr, uint64_t const now_ns) noexcept
 {
     // The Info Block says the time field is the sender's Internal Clock, PTP truncated (VSF TR-10-1 Section 8.7);
     // whether that clock is PTP's is its ts-refclk's to say, which the handler checks.
