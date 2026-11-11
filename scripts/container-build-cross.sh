@@ -2,7 +2,7 @@
 # Copyright 2026 PADL Software Pty Ltd
 # SPDX-License-Identifier: MIT
 #
-# Cross-compile the statusbar-aes67 Debian package for arm64 inside a
+# Cross-compile the padl-aes67 Debian package for arm64 inside a
 # native amd64 container — no qemu emulation. Produces a .deb stamped
 # Architecture: arm64. Tests are not run (cross-built binaries cannot
 # execute on the build host); for test runs use the emulated path
@@ -13,6 +13,8 @@
 set -euo pipefail
 
 PKG="aes67"
+# The Debian package is padl-aes67-dev; its dependencies are statusbar-<dep>.
+DEB_NAME="padl-aes67"
 DEPS="core"
 # STATUSBAR_TOOLCHAIN picks the compiler: clang (default) or gcc. clang
 # cross-targets with a single multi-target driver; gcc needs Debian's
@@ -88,7 +90,7 @@ for d in $DEPS; do
   fi
 done
 
-echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
+echo "=== cross-building $DEB_NAME .deb (target $TARGET_ARCH) ==="
 "$ENGINE" run --rm \
   --platform linux/amd64 \
   -v "$TREE_DIR:/src:ro$MOUNT_OPT" \
@@ -96,6 +98,7 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
   -v "statusbar-deb-ccache-cross-$TARGET_ARCH-$STATUSBAR_TOOLCHAIN:/root/.ccache" \
   -e "DEPS=$DEPS" \
   -e "PKG=$PKG" \
+  -e "DEB_NAME=$DEB_NAME" \
   -e "TARGET_ARCH=$TARGET_ARCH" \
   -e "STATUSBAR_TOOLCHAIN=$STATUSBAR_TOOLCHAIN" \
   -e "STATUSBAR_STATIC_CXX=$STATUSBAR_STATIC_CXX" \
@@ -130,11 +133,9 @@ echo "=== cross-building statusbar-$PKG .deb (target $TARGET_ARCH) ==="
       -DCPACK_DEBIAN_PACKAGE_ARCHITECTURE="$TARGET_ARCH"
     cmake --build /build
     ( cd /build && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_RELEASE="$DEB_REVISION" )
-    rm -f /debs/statusbar-"$PKG"_*_"$TARGET_ARCH".deb \
-          /debs/statusbar-"$PKG"-dev_*_"$TARGET_ARCH".deb
+    rm -f /debs/"$DEB_NAME"-dev_*_"$TARGET_ARCH".deb /debs/statusbar-"$PKG"-dev_*_"$TARGET_ARCH".deb
     cp -v /build/*.deb /debs/
   '
 
-echo "=== statusbar-$PKG packages in $DEB_OUTPUT ==="
-ls -1 "$DEB_OUTPUT"/statusbar-"$PKG"_*_"$TARGET_ARCH".deb \
-      "$DEB_OUTPUT"/statusbar-"$PKG"-dev_*_"$TARGET_ARCH".deb 2>/dev/null || true
+echo "=== $DEB_NAME packages in $DEB_OUTPUT ==="
+ls -1 "$DEB_OUTPUT"/"$DEB_NAME"-dev_*_"$TARGET_ARCH".deb 2>/dev/null || true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Debian packages for statusbar-aes67 inside a container.
+# Build the padl-aes67 Debian package inside a container.
 #
 # Compiles in a Debian container and writes .deb files to the shared
 # output directory (DEB_OUTPUT, default <export-root>/deb-output).
@@ -9,6 +9,8 @@
 set -euo pipefail
 
 PKG="aes67"
+# The Debian package is padl-aes67-dev; its dependencies are statusbar-<dep>.
+DEB_NAME="padl-aes67"
 DEPS="core"
 # STATUSBAR_TOOLCHAIN picks the compiler: clang (default) or gcc. It selects
 # the toolchain file, the base image, the image tag and the ccache volume, so
@@ -135,7 +137,7 @@ for d in $DEPS; do
   fi
 done
 
-echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
+echo "=== building $DEB_NAME .deb packages (Debian $DEBIAN_VERSION) ==="
 "$ENGINE" run --rm \
   --platform "$TARGET_PLATFORM" \
   -v "$TREE_DIR:/src:ro$MOUNT_OPT" \
@@ -143,6 +145,7 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
   -v "statusbar-deb-ccache-$TARGET_ARCH-$STATUSBAR_TOOLCHAIN:/root/.ccache" \
   -e "DEPS=$DEPS" \
   -e "PKG=$PKG" \
+  -e "DEB_NAME=$DEB_NAME" \
   -e "STATUSBAR_TOOLCHAIN=$STATUSBAR_TOOLCHAIN" \
   -e "STATUSBAR_STATIC_CXX=$STATUSBAR_STATIC_CXX" \
   -e "DEB_REVISION=$DEB_REVISION" \
@@ -164,9 +167,8 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
     cmake --build /build
     ( cd /build && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_RELEASE="$DEB_REVISION" )
-    rm -f /debs/statusbar-"$PKG"_*.deb /debs/statusbar-"$PKG"-dev_*.deb
+    rm -f /debs/"$DEB_NAME"-dev_*.deb /debs/statusbar-"$PKG"-dev_*.deb
     cp -v /build/*.deb /debs/
   '
-echo "=== statusbar-$PKG packages in $DEB_OUTPUT ==="
-ls -1 "$DEB_OUTPUT"/statusbar-"$PKG"_*.deb \
-      "$DEB_OUTPUT"/statusbar-"$PKG"-dev_*.deb 2>/dev/null || true
+echo "=== $DEB_NAME packages in $DEB_OUTPUT ==="
+ls -1 "$DEB_OUTPUT"/"$DEB_NAME"-dev_*.deb 2>/dev/null || true

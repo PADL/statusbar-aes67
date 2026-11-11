@@ -46,6 +46,11 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   statusbar_package_cpack_defaults(
     NAME aes67 DESCRIPTION
     "AES67 — the PTP media clock, RTP and SDP for bridging.")
+  # PADL's packages carry padl- (the project and its CMake package stay
+  # statusbar-aes67).
+  set(CPACK_PACKAGE_NAME padl-aes67)
+  set(CPACK_DEBIAN_DEVEL_PACKAGE_NAME padl-aes67-dev)
+  set(CPACK_RPM_DEVEL_PACKAGE_NAME padl-aes67-devel)
   set(CPACK_PACKAGE_VENDOR "PADL Software Pty Ltd")
   set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Luke Howard <lukeh@padl.com>")
   # Headers, static libraries and the CMake package config only: no runtime
