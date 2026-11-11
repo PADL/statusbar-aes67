@@ -227,7 +227,7 @@ class RtcpSession
     /// An empty RR, SDES and BYE for `ssrc` (RFC 3550 Sections 6.1, 6.6); whether it went.
     auto send_bye(uint32_t ssrc) noexcept -> bool;
     /// A sender's BYE for the SSRC it last saw sending, once that is gone.
-    void note_sending() noexcept;
+    void notify_sending() noexcept;
     void write_receiver_report(rtp::RtcpWriter& writer, uint64_t now_ns) noexcept;
     /// The time an SR for the packet at `index` pairs it with (VSF TR-10-1 Section 8.10.1: when that packet's media
     /// clock is sampled); nullopt when the rate is unsupported or the domain is not running.
@@ -249,9 +249,9 @@ class RtcpSession
     /// The round trip a report block echoing one of the SRs sent gives (RFC 3550 Section 6.4.1).
     [[nodiscard]] auto round_trip_ns(rtp::ReportBlock const& block, uint64_t now_ns) const noexcept -> std::optional<uint64_t>;
     /// The stream's SR: remembered for the next report block, and its time pair recorded.
-    void note_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
+    void notify_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
     /// The remote's CNAME and BYE.
-    void note_remote(rtp::RtcpCompound const& compound, uint32_t remote);
+    void notify_remote(rtp::RtcpCompound const& compound, uint32_t remote);
     /// Whether a datagram from `source` is the session's to read: a sender's from anyone, a receiver's only from its
     /// stream's source (ReceiveState::source), since its SRs drive the stream's clock.
     [[nodiscard]] auto from_peer(ip::IPv4Address const& source) const noexcept -> bool;
@@ -261,8 +261,8 @@ class RtcpSession
     void handle_as_sender(rtp::RtcpCompound const& compound, uint32_t reporter, uint64_t now_ns) noexcept;
     void handle_as_receiver(rtp::RtcpCompound const& compound, uint64_t now_ns) noexcept;
     /// The pair from the stream's SR, when it is in the IPMX form.
-    void note_sender_report(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
-    void note_report_block(rtp::ReportBlock const& block, uint64_t now_ns) noexcept;
+    void notify_sender_report(rtp::RtcpSenderReport const& sr, uint64_t now_ns) noexcept;
+    void notify_report_block(rtp::ReportBlock const& block, uint64_t now_ns) noexcept;
 
     Role role_;
     Sender* sender_;

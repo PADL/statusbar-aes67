@@ -320,7 +320,7 @@ auto TimebaseEstimator::check_reference(std::int64_t const now_ns) noexcept -> v
     }
 }
 
-auto TimebaseEstimator::note_follow_lock(std::int64_t const now_ns) noexcept -> void
+auto TimebaseEstimator::notify_follow_lock(std::int64_t const now_ns) noexcept -> void
 {
     // The first lock after a loss or a source discontinuity restarts, as does one whose grid snap moves domain time
     // by over RESTART_NS; a lock regained on the same source in place does not.
@@ -350,7 +350,7 @@ auto TimebaseEstimator::publish_locked(std::int64_t const now_ns, bool const ref
         // a frame), or adopt the source's own time when absolute.
         domain_constant_ns_ = join_constant(now_ns);
         ++published_.epoch;
-        note_follow_lock(now_ns);
+        notify_follow_lock(now_ns);
         state_ = State::locked;
     }
     if (!joined && !refitted) {
