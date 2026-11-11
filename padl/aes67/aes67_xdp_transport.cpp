@@ -1,0 +1,823 @@
+// Copyright 2026 PADL Software Pty Ltd
+// SPDX-License-Identifier: MIT
+
+#include "padl/aes67/aes67_xdp_transport.hpp"
+
+#include "padl/aes67/aes67_error.hpp"
+#include "statusbar/ip/ip_ipv4.hpp"
+#include "statusbar/net/net_interface_info.hpp"
+
+#include <algorithm>
+#include <cassert>
+
+namespace padl::aes67 {
+
+namespace {
+
+/// Whether the NIC at `index` can send timed frames: the build and kernel, then the driver.
+auto probe_launch_time(unsigned int const index) -> statusbar::Status
+{
+    auto const metadata = statusbar::net::probe_tx_metadata();
+    return metadata ? statusbar::net::probe_tx_launch_time(index) : metadata;
+}
+
+}  // namespace
+
+/// The handle a receiver owns. receive() runs on the real-time thread; the
+/// destructor on the control thread, once the receiver is no longer drained.
+class XdpTransport::Port final : public ReceivePort
+{
+  public:
+    Port(XdpTransport& transport, PortState* state) noexcept
+        : transport_{transport}
+        , state_{state}
+    {}
+
+    ~Port() override { transport_.port_closed(state_); }
+    Port(Port const&) = delete;
+    auto operator=(Port const&) -> Port& = delete;
+    Port(Port&&) = delete;
+    auto operator=(Port&&) -> Port& = delete;
+
+    auto receive(std::span<Datagram> const out) noexcept -> size_t override
+    {
+        auto& s = *state_;
+        size_t const n = std::min(out.size(), s.pending_count);
+        std::copy_n(s.pending.begin(), n, out.begin());
+        // What did not fit stays for the next call (its frame stays held until
+        // the next begin_tick(), so a caller must drain within the tick).
+        std::copy(
+            s.pending.begin() + static_cast<std::ptrdiff_t>(n),
+            s.pending.begin() + static_cast<std::ptrdiff_t>(s.pending_count),
+            s.pending.begin());
+        s.pending_count -= n;
+        return n;
+    }
+
+    [[nodiscard]] auto error() const noexcept -> std::error_code override { return state_->rule_error; }
+
+  private:
+    XdpTransport& transport_;
+    PortState* state_;
+};
+
+class XdpTransport::Sender final : public SendPort
+{
+  public:
+    Sender(XdpTransport& transport, rtp::FrameAddressing const& addressing) noexcept
+        : transport_{transport}
+        , addressing_{addressing}
+    {}
+
+    auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
+        -> bool override
+    {
+        return send_rendered_at(header, payload_length, render, 0);
+    }
+
+    auto send_rendered_at(
+        rtp::RtpHeader const& header,
+        size_t const payload_length,
+        PayloadRenderer const& render,
+        uint64_t const departure_ns) noexcept -> bool override
+    {
+        auto const frame = render_frame(transport_.tx_pool_, addressing_.current(), header, payload_length, render);
+        return frame && transport_.commit(frame->first, frame->second, departure_ns);
+    }
+
+    /// The transport flushes every sender's frames in end_tick().
+    auto flush() noexcept -> size_t override { return 0; }
+
+    auto set_vlan(std::optional<statusbar::ieee::VlanTag> const& vlan) noexcept -> statusbar::Status override
+    {
+        addressing_.set_vlan(vlan);
+        return statusbar::success();
+    }
+
+  private:
+    XdpTransport& transport_;
+    SendAddressing addressing_;
+};
+
+/// An RTCP port: the kernel socket sends, and receives what the program passes; the pipe
+/// receives what it redirects. Reactor thread; the destructor on the control thread.
+class XdpRtcpPort final : public RtcpPort
+{
+  public:
+    /// Datagrams one receive() reads from the pipe at most.
+    static constexpr size_t BATCH = 8;
+
+    XdpRtcpPort(XdpTransport& transport, XdpTransport::RtcpPipe* pipe, std::unique_ptr<RtcpPort> socket) noexcept
+        : transport_{transport}
+        , pipe_{pipe}
+        , socket_{std::move(socket)}
+    {}
+
+    ~XdpRtcpPort() override { transport_.rtcp_closed(pipe_); }
+    XdpRtcpPort(XdpRtcpPort const&) = delete;
+    auto operator=(XdpRtcpPort const&) -> XdpRtcpPort& = delete;
+    XdpRtcpPort(XdpRtcpPort&&) = delete;
+    auto operator=(XdpRtcpPort&&) -> XdpRtcpPort& = delete;
+
+    /// Redirected datagrams wake no descriptor: the session polls.
+    [[nodiscard]] auto fd() const noexcept -> int override { return -1; }
+
+    auto receive(std::span<Datagram> const out) noexcept -> size_t override
+    {
+        size_t const n = pipe_->read(out.first(std::min(out.size(), BATCH)), frames_);
+        return n + socket_->receive(out.subspan(n));
+    }
+
+    auto send(std::span<uint8_t const> const packet) noexcept -> statusbar::Status override { return socket_->send(packet); }
+
+    [[nodiscard]] auto dropped() const noexcept -> uint64_t override { return pipe_->dropped() + socket_->dropped(); }
+
+  private:
+    XdpTransport& transport_;
+    XdpTransport::RtcpPipe* pipe_;
+    std::unique_ptr<RtcpPort> socket_;
+    std::array<XdpTransport::RtcpPipe::Frame, BATCH> frames_{};
+};
+
+auto XdpTransport::RtcpPipe::offer(Datagram const& datagram) noexcept -> bool
+{  // NOLINT(statusbar-block-statements): the datagram copied into a frame, field by field
+    if (datagram.payload.size() > MAX_DATAGRAM || !queue_.can_publish()) {
+        dropped_.store(dropped_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        return false;
+    }
+    Frame frame;  // NOLINT(cppcoreguidelines-pro-type-member-init): only `length` bytes are copied
+    std::ranges::copy(datagram.payload, frame.bytes.begin());
+    frame.length = static_cast<uint16_t>(datagram.payload.size());
+    frame.source = datagram.source;
+    queue_.publish(frame);
+    return true;
+}
+
+auto XdpTransport::RtcpPipe::read(std::span<Datagram> const out, std::span<Frame> const storage) noexcept -> size_t
+{
+    size_t const want = std::min(out.size(), storage.size());
+    size_t n = 0;
+    while (n < want) {
+        auto frame = queue_.try_consume();
+        if (!frame) {
+            break;
+        }
+        storage[n] = *frame;
+        out[n] = {.payload = std::span<uint8_t const>{storage[n].bytes}.first(storage[n].length), .source = storage[n].source};
+        ++n;
+    }
+    return n;
+}
+
+auto XdpTransport::render_frame(
+    TxPool& pool,
+    rtp::FrameAddressing const& addressing,
+    rtp::RtpHeader const& header,
+    size_t const payload_length,
+    PayloadRenderer const& render) noexcept -> std::optional<std::pair<statusbar::net::EthernetTxSlot, size_t>>
+{
+    auto slot = pool.claim();
+    if (!slot) {
+        return std::nullopt;
+    }
+    auto const offset = rtp::serialize_rtp_frame_headers(addressing, header, payload_length, slot->buffer);
+    if (!offset || !render(slot->buffer.subspan(*offset, payload_length))) {
+        (void)pool.put(*slot);  // back to the pool unused
+        return std::nullopt;
+    }
+    return std::pair{*slot, *offset + payload_length};
+}
+
+XdpTransport::XdpTransport(InterfaceInfo interface) noexcept
+    : interface_{std::move(interface)}
+{}
+
+XdpTransport::~XdpTransport()
+{
+    assert(live_ports_ == 0 && "every receive port must be destroyed before its transport");
+    assert(live_rtcp_ == 0 && "every RTCP port must be destroyed before its transport");
+    release_held();
+    delete_port_states();
+    collect_retired();
+    while (auto slot = tx_pool_.claim()) {
+        (void)context_.tx_cancel(slot->handle);
+    }
+}
+
+void XdpTransport::delete_port_states() noexcept
+{
+    for (size_t i = 0; i < port_count_; ++i) {
+        delete ports_[i];
+    }
+    while (auto state = added_.try_consume()) {
+        delete *state;
+    }
+    for (size_t i = 0; i < rtcp_count_; ++i) {
+        delete rtcp_pipes_[i];
+    }
+    while (auto pipe = rtcp_added_.try_consume()) {
+        delete *pipe;
+    }
+}
+
+auto XdpTransport::config_for(std::string_view const interface, Options const& options) noexcept -> statusbar::net::XdpConfig
+{
+    return statusbar::net::XdpConfig{
+        .interface_name = interface,
+        .filter_rules = {},
+        .default_action = statusbar::net::XdpAction::pass_kernel,
+        .queue_id = options.queue,
+        .fill_ring_size = FILL_RING,
+        .umem_frame_count = UMEM_FRAMES,
+        .rx_drain_max = RECEIVE_BATCH,
+        .tx_launch_time = options.launch_time,
+        .bind_mode = options.bind_mode,
+        .attach_mode = options.attach_mode,
+        .pin_path = options.pin_path,
+    };
+}
+
+#if defined(__linux__)
+namespace {
+
+/// `queue` of `ifindex` to `mode` over a TcClient of its own.
+auto settle_over_tc(
+    int const ifindex, statusbar::net::tc::LaunchTimeQueue const& queue, statusbar::net::tc::LaunchTimeMode const mode)
+    -> statusbar::StatusValue<statusbar::net::tc::LaunchTimeQueueAction>
+{
+    statusbar::net::tc::TcClient tc;
+    if (auto const opened = tc.open(); !opened) {
+        return statusbar::forward_failure(opened);
+    }
+    return statusbar::net::tc::settle_launch_time_queue(tc, ifindex, queue, mode);
+}
+
+}  // namespace
+#endif
+
+auto XdpTransport::settle_launch_time(std::string_view const interface, statusbar::net::tc::LaunchTimeMode const mode)
+    -> statusbar::StatusValue<statusbar::net::tc::LaunchTimeQueueAction>
+{
+#if defined(__linux__)
+    if (mode == statusbar::net::tc::LaunchTimeMode::unsupported) {
+        return statusbar::net::tc::LaunchTimeQueueAction::none;
+    }
+    auto const ifindex = statusbar::net::interface_index(interface);
+    auto const queues = statusbar::net::tx_queue_count(interface);
+    if (!ifindex || !queues) {
+        return statusbar::failure(ifindex ? queues.error() : ifindex.error());
+    }
+    return settle_over_tc(*ifindex, launch_time_queue(*queues), mode);
+#else
+    (void)interface, (void)mode;
+    return failure(std::errc::not_supported);
+#endif
+}
+
+auto XdpTransport::group_rule(statusbar::ip::IPv4Address const& group) noexcept -> statusbar::net::CompiledRule<32>
+{
+    auto rule = statusbar::net::ClassifierRuleBuilder<32>{}
+                    .dest_mac(rtp::multicast_mac(group))
+                    .ethertype(0x0800)
+                    .ipv4_protocol(statusbar::ip::IPv4Header::PROTOCOL_UDP)
+                    .vlan_untagged()
+                    .result(statusbar::net::flag::process)
+                    .build()[0];
+    // Past what the builder writes: version 4, any IHL (options follow the addresses), and the
+    // destination's first two octets, the window's bytes the MAC (its low 23 bits) leaves unpinned.
+    constexpr size_t VERSION_IHL = 14;
+    constexpr size_t DESTINATION = 14 + 16;
+    std::array<std::array<uint8_t, 3>, 3> const bytes{{
+        {VERSION_IHL, 0xF0, 0x40},
+        {DESTINATION, 0xFF, group.octet(0)},
+        {DESTINATION + 1, 0xFF, group.octet(1)},
+    }};
+    for (auto const& [at, mask, match] : bytes) {
+        rule.mask[at] = mask;
+        rule.match[at] = match;
+    }
+    return rule;
+}
+
+auto XdpTransport::tagged_groups_rule(uint16_t const vid) noexcept -> statusbar::net::CompiledRule<32>
+{
+    auto rule = statusbar::net::ClassifierRuleBuilder<32>{}
+                    .ethertype(0x0800)
+                    .ipv4_protocol(statusbar::ip::IPv4Header::PROTOCOL_UDP)
+                    .vlan_tagged_exact(vid)
+                    .result(statusbar::net::flag::process)
+                    .build()[0];
+    constexpr size_t VERSION_IHL = 14 + statusbar::ieee::VlanTag::LENGTH;  // version 4, any IHL, as the untagged rule
+    std::array<std::array<uint8_t, 3>, 5> const bytes{{
+        {0, 0xFF, 0x01},  // 01:00:5e, then bit 24 clear: an IPv4 group's MAC
+        {1, 0xFF, 0x00},
+        {2, 0xFF, 0x5E},
+        {3, 0x80, 0x00},
+        {VERSION_IHL, 0xF0, 0x40},
+    }};
+    for (auto const& [at, mask, match] : bytes) {
+        rule.mask[at] = mask;
+        rule.match[at] = match;
+    }
+    return rule;
+}
+
+namespace {
+
+/// `interface`'s RSS table back to `before` when steering to `queue` changed it (the socket did not open).
+void put_back_rss(
+    std::string_view const interface, statusbar::StatusValue<statusbar::net::RssIndirection> const& before, uint32_t const queue)
+{
+    if (before && !statusbar::net::rss_steered_to(*before, queue)) {
+        (void)statusbar::net::set_rss_indirection(interface, *before);  // best effort: the open has failed already
+    }
+}
+
+}  // namespace
+
+auto XdpTransport::steer_rss(std::string_view const interface, uint32_t const queue) -> statusbar::Status
+{
+    return statusbar::net::set_rss_indirection_all(interface, queue).transform([](statusbar::net::RssIndirection const&) {});
+}
+
+auto XdpTransport::open(std::string_view const interface, Options const& options)
+    -> statusbar::StatusValue<std::unique_ptr<XdpTransport>>
+{
+    auto info = find_interface(interface);
+    if (!info) {
+        return statusbar::failure(info.error());
+    }
+    std::unique_ptr<XdpTransport> transport{new XdpTransport{std::move(*info)}};
+    transport->queue_ = options.queue;
+    if (auto opened = transport->open_steered(options); !opened) {
+        return statusbar::forward_failure(opened);
+    }
+    return transport;
+}
+
+auto XdpTransport::unopened() -> std::unique_ptr<XdpTransport>
+{
+    return std::unique_ptr<XdpTransport>{new XdpTransport{{}}};
+}
+
+auto XdpTransport::open_steered(Options const& options) -> statusbar::Status
+{
+    // Steered first, so a refusal attaches nothing (on igb an attach resets the adapter). The table is written in
+    // one ioctl: a refused steer leaves it as it was, and a socket that then fails to open puts it back.
+    auto const before = statusbar::net::set_rss_indirection_all(interface_.name, queue_);
+    rss_status_ = before.transform([](statusbar::net::RssIndirection const&) {});
+    if (auto const verdict = rss_verdict(rss_status_); !verdict) {
+        return verdict;
+    }
+    auto opened = context_.open(
+        config_for(interface_.name, with_launch_time(options, [this] { return probe_launch_time(interface_.index); })));
+    if (!opened) {
+        put_back_rss(interface_.name, before, queue_);
+    }
+    return opened;
+}
+
+auto XdpTransport::rss_verdict(statusbar::Status const& steered) noexcept -> statusbar::Status
+{
+    if (steered || steered.error() == std::errc::operation_not_supported) {
+        return statusbar::success();
+    }
+    return statusbar::failure(Aes67Error::rss_not_steered);
+}
+
+auto XdpTransport::rules_status() const noexcept -> statusbar::Status
+{
+    auto const error = rules_error_.load();
+    if (error) {
+        return statusbar::failure(error);
+    }
+    return statusbar::success();
+}
+
+auto XdpTransport::open_receive(Endpoint const& destination) -> statusbar::StatusValue<std::unique_ptr<ReceivePort>>
+{
+    return open_port(destination, std::nullopt);
+}
+
+auto XdpTransport::open_receive_from(Endpoint const& destination, statusbar::ip::IPv4Address const& source)
+    -> statusbar::StatusValue<std::unique_ptr<ReceivePort>>
+{
+    return open_port(destination, source);
+}
+
+auto XdpTransport::open_port(Endpoint const& destination, std::optional<statusbar::ip::IPv4Address> const& source)
+    -> statusbar::StatusValue<std::unique_ptr<ReceivePort>>
+{
+    collect_retired();
+    if (auto const checked = check_receive(destination); !checked) {
+        return statusbar::forward_failure(checked);
+    }
+    auto membership = source ? statusbar::net::open_source_group_membership(destination.address, *source, interface_.index)
+                             : statusbar::net::open_group_membership(destination.address, interface_.index);
+    if (!membership) {
+        return forward_failure(membership);
+    }
+    retain_group(destination.address);
+    return std::make_unique<Port>(*this, publish_port(destination, std::move(*membership)));
+}
+
+auto XdpTransport::check_receive(Endpoint const& destination) const noexcept -> statusbar::Status
+{
+    if (!destination.address.is_multicast()) {
+        return statusbar::failure(Aes67Error::unsupported_destination);
+    }
+    bool const new_group =
+        std::ranges::find(groups_, destination.address, &std::pair<statusbar::ip::IPv4Address, size_t>::first) == groups_.end();
+    if (new_group && groups_.size() == MAX_GROUPS) {
+        return statusbar::failure(statusbar::net::XdpError::too_many_filter_rules);
+    }
+    if (live_ports_ == MAX_PORTS || !added_.can_publish()) {
+        return statusbar::failure(std::errc::resource_unavailable_try_again);
+    }
+    return statusbar::success();
+}
+
+void XdpTransport::retain_group(statusbar::ip::IPv4Address const& group)
+{
+    auto const it = std::ranges::find(groups_, group, &std::pair<statusbar::ip::IPv4Address, size_t>::first);
+    if (it == groups_.end()) {
+        groups_.emplace_back(group, 1);
+        return;
+    }
+    ++it->second;
+}
+
+auto XdpTransport::publish_port(Endpoint const& destination, statusbar::net::FileDescriptor membership) -> PortState*
+{
+    auto* const state = new PortState{destination, std::move(membership)};
+    added_.publish(state);
+    ++live_ports_;
+    return state;
+}
+
+void XdpTransport::port_closed(PortState* const state) noexcept
+{
+    state->membership = statusbar::net::FileDescriptor{};  // the group left now, not at retirement
+    state->closed.store(true, std::memory_order_release);
+    release_group(state->destination.address);
+    --live_ports_;
+    collect_retired();
+}
+
+void XdpTransport::release_group(statusbar::ip::IPv4Address const& group) noexcept
+{
+    auto const it = std::ranges::find(groups_, group, &std::pair<statusbar::ip::IPv4Address, size_t>::first);
+    if (it != groups_.end() && --it->second == 0) {
+        groups_.erase(it);  // no allocation
+    }
+}
+
+void XdpTransport::collect_retired() noexcept
+{
+    while (auto state = retired_.try_consume()) {
+        delete *state;
+    }
+    while (auto pipe = rtcp_retired_.try_consume()) {
+        delete *pipe;
+    }
+}
+
+auto XdpTransport::open_rtcp(RtcpOptions const& options) -> statusbar::StatusValue<std::unique_ptr<RtcpPort>>
+{
+    collect_retired();
+    if (!options.destination.address.is_multicast()) {
+        return statusbar::failure(Aes67Error::unsupported_destination);
+    }
+    if (live_rtcp_ == MAX_RTCP_PORTS || !rtcp_added_.can_publish()) {
+        return statusbar::failure(std::errc::resource_unavailable_try_again);
+    }
+    auto socket = open_rtcp_socket(interface_, options);
+    if (!socket) {
+        return statusbar::failure(socket.error());
+    }
+    return std::make_unique<XdpRtcpPort>(*this, publish_rtcp_pipe(options.destination), std::move(*socket));
+}
+
+auto XdpTransport::publish_rtcp_pipe(Endpoint const& destination) -> RtcpPipe*
+{
+    auto* const pipe = new RtcpPipe{destination};
+    rtcp_added_.publish(pipe);
+    ++live_rtcp_;
+    return pipe;
+}
+
+void XdpTransport::rtcp_closed(RtcpPipe* const pipe) noexcept
+{
+    pipe->closed.store(true, std::memory_order_release);
+    --live_rtcp_;
+    collect_retired();
+}
+
+void XdpTransport::update_rtcp_pipes() noexcept
+{
+    while (rtcp_count_ < MAX_RTCP_PORTS) {
+        auto pipe = rtcp_added_.try_consume();
+        if (!pipe) {
+            break;
+        }
+        rtcp_pipes_[rtcp_count_++] = *pipe;
+    }
+    for (size_t i = 0; i < rtcp_count_;) {
+        if (rtcp_pipes_[i]->closed.load(std::memory_order_acquire) && rtcp_retired_.try_publish(rtcp_pipes_[i])) {
+            rtcp_pipes_[i] = rtcp_pipes_[--rtcp_count_];
+        } else {
+            ++i;
+        }
+    }
+}
+
+auto XdpTransport::open_send(SendOptions const& options) -> statusbar::StatusValue<std::unique_ptr<SendPort>>
+{
+    collect_retired();
+    if (!options.destination.address.is_multicast()) {
+        return statusbar::failure(Aes67Error::unsupported_destination);
+    }
+    rtp::FrameAddressing const addressing{
+        .destination_mac = rtp::multicast_mac(options.destination.address),
+        .source_mac = context_.hardware_address(),
+        .vlan = options.vlan,
+        .source_address = interface_.address,
+        .destination_address = options.destination.address,
+        .source_port = options.destination.port,
+        .destination_port = options.destination.port,
+        .ttl = options.ttl,
+        .dscp = options.dscp,
+    };
+    return std::make_unique<Sender>(*this, addressing);
+}
+
+void XdpTransport::install_rules() noexcept
+{
+    installed_vid_ = receive_vid();
+    auto const ports = std::span<PortState* const>{ports_}.first(port_count_);
+    auto [count, error] = compile_rules(ports, installed_vid_, rules_);
+    if (auto installed = context_.set_rules(std::span{rules_}.first(count)); !installed) {
+        error = error ? error : installed.error();
+        for (auto* const port : ports) {
+            port->rule_error = port->rule_error ? port->rule_error : installed.error();  // a port past the room keeps that
+        }
+    }
+    rules_error_.store(error);
+}
+
+namespace {
+
+/// `port`'s group's rule into `rules` at `count`, advanced, unless an `earlier` port has the group (then its outcome):
+/// none, or too_many_filter_rules past MAX_GROUPS or the room in `rules`.
+auto rule_group(
+    std::span<XdpTransport::PortState* const> const earlier,
+    XdpTransport::PortState const& port,
+    std::span<statusbar::net::CompiledRule<32>> const rules,
+    size_t& count) noexcept -> std::error_code
+{
+    auto const address = [](XdpTransport::PortState const* other) { return other->destination.address; };
+    if (auto const same = std::ranges::find(earlier, port.destination.address, address); same != earlier.end()) {
+        return (*same)->rule_error;
+    }
+    if (count == std::min(rules.size(), XdpTransport::MAX_GROUPS)) {
+        return make_error_code(statusbar::net::XdpError::too_many_filter_rules);
+    }
+    rules[count++] = XdpTransport::group_rule(port.destination.address);
+    return {};
+}
+
+/// A rule per distinct group of `ports`, at most MAX_GROUPS, in `rules` from slot 0, and each port's rule_error
+/// said: how many, and whether all fit.
+auto compile_group_rules(
+    std::span<XdpTransport::PortState* const> const ports, std::span<statusbar::net::CompiledRule<32>> const rules) noexcept
+    -> std::pair<size_t, bool>
+{
+    size_t count = 0;
+    bool all = true;
+    for (size_t i = 0; i < ports.size(); ++i) {
+        ports[i]->rule_error = rule_group(ports.first(i), *ports[i], rules, count);
+        all = all && !ports[i]->rule_error;
+    }
+    return {count, all};
+}
+
+}  // namespace
+
+auto XdpTransport::compile_rules(
+    std::span<PortState* const> const ports,
+    std::optional<uint16_t> const vid,
+    std::span<statusbar::net::CompiledRule<32>> const rules) noexcept -> std::pair<size_t, std::error_code>
+{
+    // The tagged rule's slot is kept, so a port still to be retired cannot push it out.
+    auto [count, all] = compile_group_rules(ports, rules.first(rules.size() - (vid && !rules.empty() ? 1 : 0)));
+    if (vid && count < rules.size()) {
+        rules[count++] = tagged_groups_rule(*vid);  // last: a VID change touches only the tail
+    }
+    return {count, all ? std::error_code{} : make_error_code(statusbar::net::XdpError::too_many_filter_rules)};
+}
+
+void XdpTransport::release_held() noexcept
+{
+    for (size_t i = 0; i < held_count_; ++i) {
+        (void)context_.rx_release(held_[i]);
+    }
+    held_count_ = 0;
+}
+
+void XdpTransport::refill_tx_pool() noexcept
+{
+    while (tx_pool_.size() < TX_POOL) {
+        auto slot = context_.tx_start();
+        if (!slot) {
+            break;
+        }
+        (void)tx_pool_.put(*slot);
+    }
+}
+
+void XdpTransport::begin_tick() noexcept
+{
+    release_held();
+    if (update_ports() || receive_vid() != installed_vid_) {
+        install_rules();
+    }
+    update_rtcp_pipes();
+    start_cycle();
+    receive_frames();
+}
+
+auto XdpTransport::update_ports() noexcept -> bool
+{
+    // Ports come and go here only.
+    bool changed = false;
+    while (port_count_ < MAX_PORTS) {
+        auto state = added_.try_consume();
+        if (!state) {
+            break;
+        }
+        ports_[port_count_++] = *state;
+        changed = true;
+    }
+    for (size_t i = 0; i < port_count_;) {
+        if (ports_[i]->closed.load(std::memory_order_acquire) && retired_.try_publish(ports_[i])) {
+            ports_[i] = ports_[--port_count_];
+            changed = true;
+        } else {
+            ports_[i]->pending_count = 0;
+            ++i;
+        }
+    }
+    return changed;
+}
+
+auto XdpTransport::commit(statusbar::net::EthernetTxSlot const& slot, size_t const length, uint64_t const departure_ns) noexcept
+    -> bool
+{
+    // A pooled frame was claimed untimed (tx_start): on a socket with launch time every frame gets its
+    // time now, since the driver may otherwise reuse the previous frame's. It cannot fail: the socket
+    // is open and carries TX metadata.
+    if (context_.tx_launch_time()) {
+        uint64_t const departure = phc_clock_ ? departure_ns : 0;  // no PHC: untimed (the tick's reading is 0)
+        (void)context_.tx_set_launch_time(slot.handle, static_cast<int64_t>(launch_clock_.next(departure, tick_phc_ns_)));
+    }
+    return context_.tx_commit(slot.handle, length).has_value();  // a full ring frees the frame
+}
+
+void XdpTransport::start_cycle() noexcept
+{
+    // Reap TX completions, hold back the senders' frames, then offer the kernel the rest. The launch
+    // clock is read once here for the tick's commits.
+    tick_phc_ns_ = context_.tx_launch_time() ? statusbar::net::phc_now_ns(phc_clock_) : 0;
+    (void)context_.tx_complete();
+    refill_tx_pool();
+    (void)context_.fill_replenish();
+    context_.begin_cycle();
+}
+
+void XdpTransport::receive_frames() noexcept
+{
+    auto const ports = std::span<PortState* const>{ports_}.first(port_count_);
+    auto const pipes = std::span<RtcpPipe* const>{rtcp_pipes_}.first(rtcp_count_);
+    statusbar::net::RxTimePoint const now = statusbar::net::rx_clock_now();  // the pass's one read of the RX clock
+    while (held_count_ < RECEIVE_BATCH) {
+        auto slot = context_.rx_start(now);
+        if (!slot || !*slot) {
+            break;
+        }
+        auto const& rx = **slot;
+        if (dispatch_frame(rx.buffer, ports, pipes, refusals_)) {
+            held_[held_count_++] = rx.handle;
+        } else {
+            (void)context_.rx_release(rx.handle);
+        }
+    }
+}
+
+namespace {
+
+/// What offer_to_ports() did with a datagram.
+enum class Offered : uint8_t
+{
+    kept,       ///< a port kept it
+    unmatched,  ///< no port has its destination
+    refused,    ///< ports have it, and none kept it
+};
+
+/// What became of a datagram for `matched` ports, `kept` by one or not: a refusal counted once per frame,
+/// none for the stream's own RTCP on its RTP port (RFC 5761).
+auto outcome(
+    bool const matched, bool const kept, std::span<uint8_t const> const payload, bool const rtp, RefusalCounter& refusals) noexcept
+    -> Offered
+{
+    if (!matched || kept) {
+        return matched ? Offered::kept : Offered::unmatched;
+    }
+    if (!is_multiplexed_rtcp(payload)) {
+        refusals.count(rtp ? Refusal::port_full : Refusal::not_rtp);
+    }
+    return Offered::refused;
+}
+
+/// Offers an RTP datagram to the receive ports of `destination`; several receivers of one stream share it.
+auto offer_to_ports(
+    std::span<XdpTransport::PortState* const> const ports,
+    Endpoint const& destination,
+    Datagram const& datagram,
+    RefusalCounter& refusals) noexcept -> Offered
+{
+    bool const rtp = !is_multiplexed_rtcp(datagram.payload) && rtp::parse_rtp(datagram.payload).has_value();
+    bool matched = false;
+    bool kept = false;
+    for (auto* const port : ports) {
+        if (port->destination == destination && !port->closed.load(std::memory_order_relaxed)) {
+            matched = true;
+            kept = (rtp && port->offer(datagram)) || kept;
+        }
+    }
+    return outcome(matched, kept, datagram.payload, rtp, refusals);
+}
+
+/// Copies a datagram to the RTCP pipes of `destination`; true when one has it.
+auto offer_to_rtcp(
+    std::span<XdpTransport::RtcpPipe* const> const pipes, Endpoint const& destination, Datagram const& datagram) noexcept -> bool
+{
+    bool matched = false;
+    for (auto* const pipe : pipes) {
+        if (pipe->destination() == destination && !pipe->closed.load(std::memory_order_relaxed)) {
+            (void)pipe->offer(datagram);  // copied: the frame need not be held
+            matched = true;
+        }
+    }
+    return matched;
+}
+
+/// A frame's destination, and its datagram with its source.
+auto addressed(rtp::UdpFrame const& frame) noexcept -> std::pair<Endpoint, Datagram>
+{
+    auto const& a = frame.addressing;
+    return {
+        Endpoint{.address = a.destination_address, .port = a.destination_port},
+        Datagram{.payload = frame.datagram, .source = {.address = a.source_address, .port = a.source_port}},
+    };
+}
+
+}  // namespace
+
+auto XdpTransport::dispatch_frame(
+    std::span<uint8_t const> const frame,
+    std::span<PortState* const> const ports,
+    std::span<RtcpPipe* const> const pipes,
+    RefusalCounter& refusals) noexcept -> bool
+{
+    auto const udp = rtp::parse_udp_frame(frame);
+    if (!udp) {
+        refusals.count(Refusal::malformed);
+        return false;
+    }
+    auto const [destination, datagram] = addressed(*udp);
+    auto const offered = offer_to_ports(ports, destination, datagram, refusals);
+    if (!offer_to_rtcp(pipes, destination, datagram) && offered == Offered::unmatched) {
+        refusals.count(Refusal::unmatched);
+    }
+    return offered == Offered::kept;
+}
+
+void XdpTransport::end_tick() noexcept
+{
+    bool const ok = context_.tx_flush().has_value();
+    tx_health_.record(ok, ok ? 0 : context_.stats().tx_flush_errno);
+    if (reset_socket_stats_.exchange(false, std::memory_order_relaxed)) {
+        context_.reset_stats();
+    }
+    socket_stats_.store(context_.stats());
+}
+
+void XdpTransport::reset_counters() noexcept
+{
+    refusals_.reset();
+    tx_health_.reset_failures();
+    tx_pool_.reset_empty_count();
+    reset_socket_stats_.store(true, std::memory_order_relaxed);
+}
+
+}  // namespace padl::aes67

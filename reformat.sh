@@ -50,14 +50,14 @@ else
 fi
 
 # C/C++ sources
-find statusbar \
+find padl \
     \( -name '*.cpp' -or -name '*.cppm' -or -name '*.hpp' -or -name '*.c' -or -name '*.h' \) \
     -print0 | xargs -0 "$CLANG_FORMAT" $clang_args
 
 # CMake files
 if command -v cmake-format >/dev/null 2>&1; then
     cmake-format $cmake_args CMakeLists.txt
-    find statusbar -name CMakeLists.txt -print0 2>/dev/null | xargs -0 cmake-format $cmake_args
+    find padl -name CMakeLists.txt -print0 2>/dev/null | xargs -0 cmake-format $cmake_args
     find cmake -name '*.cmake' -print0 2>/dev/null | xargs -0 cmake-format $cmake_args
 fi
 

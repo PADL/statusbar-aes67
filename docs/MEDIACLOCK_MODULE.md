@@ -57,9 +57,9 @@ loss of the reference, and the next lock after it or after a source discontinuit
 ## Quick example
 
 ```cpp
-#include "statusbar/mediaclock/mediaclock_ptp_clock.hpp"
+#include "padl/mediaclock/mediaclock_ptp_clock.hpp"
 
-using statusbar::mediaclock::PtpMediaClock;
+using padl::mediaclock::PtpMediaClock;
 
 auto place(std::uint64_t ptp_now_ns, std::uint32_t rtp_ts, std::uint32_t offset) -> std::uint64_t
 {
@@ -76,11 +76,11 @@ A foreign domain: the fit on the control thread, the tick reading the published 
 
 ```cpp
 #include "statusbar/itc/itc_seqlock_value.hpp"
-#include "statusbar/mediaclock/mediaclock_timebase.hpp"
+#include "padl/mediaclock/mediaclock_timebase.hpp"
 
 #include <span>
 
-using namespace statusbar::mediaclock;
+using namespace padl::mediaclock;
 
 statusbar::itc::SeqlockValue<Timebase> published{Timebase::identity()};
 TimebaseEstimator fit{TimebaseEstimatorParams::avb_stream()};
@@ -104,8 +104,8 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 
 ## Headers
 
-- `statusbar/mediaclock/mediaclock_ptp_clock.hpp` — `PtpMediaClock`.
-- `statusbar/mediaclock/mediaclock_timebase.hpp` — `Timebase`, `ClockSample`, `TimebaseEstimatorParams`, `TimebaseEstimator`.
+- `padl/mediaclock/mediaclock_ptp_clock.hpp` — `PtpMediaClock`.
+- `padl/mediaclock/mediaclock_timebase.hpp` — `Timebase`, `ClockSample`, `TimebaseEstimatorParams`, `TimebaseEstimator`.
 
 ## Dependencies
 

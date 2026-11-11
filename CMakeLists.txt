@@ -17,7 +17,7 @@ endif()
 # Dependency packages — must be installed and discoverable.
 find_package(statusbar-core REQUIRED)
 
-add_subdirectory(statusbar)
+add_subdirectory(padl)
 
 # fuzz-smoke and fuzz-all over the *_fuzzer targets (no-op unless
 # ENABLE_FUZZING).
@@ -39,7 +39,7 @@ statusbar_prefix_tool_names()
 # Standalone install/export boilerplate lives in
 # statusbar_package_install_export (cmake/module.cmake); no-op under an outer
 # aggregate build.
-statusbar_package_install_export(NAME aes67)
+statusbar_package_install_export(NAME aes67 INCLUDE_DIR padl)
 
 # ---- packaging (CPack: TGZ + ZIP, plus DEB/RPM on Linux) ----
 if(NOT STATUSBAR_AGGREGATE_BUILD)

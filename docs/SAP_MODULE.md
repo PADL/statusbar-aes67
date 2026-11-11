@@ -28,7 +28,7 @@ thread.
 ## Quick example
 
 ```cpp
-#include "statusbar/sap/sap_receiver.hpp"
+#include "padl/sap/sap_receiver.hpp"
 
 using namespace statusbar;
 
@@ -49,8 +49,8 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 
 ## Headers
 
-- `statusbar/sap/sap.hpp` — packets, `SapMessage`, `SapAnnouncer`.
-- `statusbar/sap/sap_receiver.hpp` — `SessionKey`, `SapDirectory`, `SapReceiver`.
+- `padl/sap/sap.hpp` — packets, `SapMessage`, `SapAnnouncer`.
+- `padl/sap/sap_receiver.hpp` — `SessionKey`, `SapDirectory`, `SapReceiver`.
 
 ## Dependencies
 

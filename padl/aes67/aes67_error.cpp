@@ -1,0 +1,53 @@
+// Copyright 2026 PADL Software Pty Ltd
+// SPDX-License-Identifier: MIT
+
+#include "padl/aes67/aes67_error.hpp"
+
+namespace padl::aes67 {
+
+auto Aes67ErrorCategory::message(int const ev) const -> std::string
+{
+    switch (static_cast<Aes67Error>(ev)) {
+        case Aes67Error::no_media:
+            return "no such media in the session";
+        case Aes67Error::no_connection:
+            return "media has no connection address";
+        case Aes67Error::not_ptp_locked:
+            return "stream has no direct (PTP) media clock";
+        case Aes67Error::format_mismatch:
+            return "stream channels or sample rate differ from the configured format";
+        case Aes67Error::unsupported_format:
+            return "unsupported encoding or sample rate";
+        case Aes67Error::packet_too_large:
+            return "packet too large for a 1500-byte frame";
+        case Aes67Error::unsupported_destination:
+            return "destination not reachable by this transport";
+        case Aes67Error::invalid_address:
+            return "invalid IPv4 address";
+        case Aes67Error::interface_not_found:
+            return "interface not found or has no IPv4 address";
+        case Aes67Error::encoding_mismatch:
+            return "stream encoding (sample width) differs from the configured format";
+        case Aes67Error::rtcp_multiplexed:
+            return "RTCP multiplexed on the RTP port is not supported";
+        case Aes67Error::no_rtcp_peer:
+            return "the sender of a unicast stream is not known for RTCP";
+        case Aes67Error::not_configured:
+            return "no stream configured";
+        case Aes67Error::not_sender_clocked:
+            return "stream has no sender (asynchronous) media clock";
+        case Aes67Error::rss_not_steered:
+            return "RSS could not be steered to the AF_XDP queue";
+        case Aes67Error::foreign_destination:
+            return "unicast stream addressed to another host";
+    }
+    return "unknown aes67 error";
+}
+
+auto aes67_error_category() noexcept -> std::error_category const&
+{
+    static Aes67ErrorCategory const instance;
+    return instance;
+}
+
+}  // namespace padl::aes67

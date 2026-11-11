@@ -30,12 +30,12 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `ts_refclk_value()`, `media_clock_value()` — the text after `a=ts-refclk:` and `a=mediaclk:`, as written; the IPMX Info Block carries the same strings. `localmac_value()` — `localmac=` with a MAC (RFC 7273 Section 4.8; VSF TR-10-1 Section 10.4), for `ReferenceClocks::other`.
 - `Media::ipmx` — the primary format's fmtp declares `IPMX` (VSF TR-10-1 Section 10.1).
 - `channel_order_channels()` — the channels an ST 2110-30 channel order names, or nullopt for another form.
-- `SdpError` — `enum class`, category `statusbar.sdp`.
+- `SdpError` — `enum class`, category `padl.sdp`.
 
 ## Quick example
 
 ```cpp
-#include "statusbar/sdp/sdp.hpp"
+#include "padl/sdp/sdp.hpp"
 
 using namespace statusbar;
 
@@ -53,8 +53,8 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 
 ## Headers
 
-- `statusbar/sdp/sdp.hpp` — the session types, `parse()`, `parse_origin_line()`, `to_string()`, `ts_refclk_value()`, `media_clock_value()`.
-- `statusbar/sdp/sdp_error.hpp` — `SdpError`, `sdp_error_category()`, `make_error_code()`.
+- `padl/sdp/sdp.hpp` — the session types, `parse()`, `parse_origin_line()`, `to_string()`, `ts_refclk_value()`, `media_clock_value()`.
+- `padl/sdp/sdp_error.hpp` — `SdpError`, `sdp_error_category()`, `make_error_code()`.
 
 ## Dependencies
 

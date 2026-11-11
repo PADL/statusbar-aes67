@@ -1,0 +1,315 @@
+#pragma once
+
+// Copyright 2026 PADL Software Pty Ltd
+// SPDX-License-Identifier: MIT
+
+/// What an AES67 receiver or sender is: its stream format, its FrameHandler or FrameProvider (by
+/// PTP sample index, on the real-time thread, never allocating), its destination, counters, state,
+/// and the figures it publishes for its RTCP session.
+
+#include "padl/aes67/aes67_error.hpp"
+#include "padl/rtp/rtp_frame.hpp"
+#include "padl/rtp/rtp_header.hpp"
+#include "padl/sdp/sdp.hpp"
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
+#include "statusbar/ip/ip_ipv4_address.hpp"
+#include "statusbar/sg14/inplace_function.h"
+#include "statusbar/status/status.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
+namespace padl::aes67 {
+
+/// A stream as AES67 carries it: the rtpmap's encoding, channels and rate,
+/// and the ptime as frames per packet. A frame is one sample of every
+/// channel; on the wire it is the channels' samples in order.
+struct StreamFormat
+{
+    sdp::Encoding encoding{sdp::Encoding::l24};
+    uint16_t channels{1};
+    uint32_t sample_rate{48000};
+    uint32_t frames_per_packet{48};  ///< the ptime: 48 at 1 ms, 6 at 125 us (48 kHz)
+
+    [[nodiscard]] constexpr auto bytes_per_frame() const noexcept -> uint32_t { return channels * sdp::bytes_per_sample(encoding); }
+    [[nodiscard]] constexpr auto bytes_per_packet() const noexcept -> uint32_t { return bytes_per_frame() * frames_per_packet; }
+    /// The ptime in microseconds, as SDP writes it.
+    [[nodiscard]] constexpr auto packet_time_us() const noexcept -> uint32_t
+    {
+        return sample_rate == 0 ? 0 : static_cast<uint32_t>((uint64_t{frames_per_packet} * 1'000'000) / sample_rate);
+    }
+
+    auto operator==(StreamFormat const&) const noexcept -> bool = default;
+};
+
+//
+// Streams under SRP - AES67-2023 Annex C.1.1
+//
+
+/// An SRP traffic class; its measurement interval is IEEE 802.1Q-2022 Clause 34.4's.
+enum class SrClass : uint8_t
+{
+    a,  ///< 125 us
+    b,  ///< 250 us
+};
+
+/// The class measurement interval of `sr_class` in microseconds.
+[[nodiscard]] constexpr auto sr_class_interval_us(SrClass const sr_class) noexcept -> uint32_t
+{
+    switch (sr_class) {
+        case SrClass::a:
+            return 125;
+        case SrClass::b:
+            return 250;
+    }
+    return 0;
+}
+
+/// An MSRP TSpec (IEEE 802.1Q-2022 Clause 35.2.2.8.4).
+struct SrpTSpec
+{
+    /// MaxFrameSize past the payload. Clause 35.2.2.8.4 a): IPv4 (20), UDP (8) and RTP headers, no
+    /// Ethernet overhead (AES67-2023 Annex C.1.1.1), and one spare octet as Milan v1.2 Section 4.3.3.2 reserves.
+    static constexpr uint32_t FRAME_OVERHEAD = static_cast<uint32_t>(20 + 8 + rtp::RtpHeader::LENGTH + 1);
+
+    uint16_t max_frame_size{0};       ///< MaxFrameSize: octets from the IPv4 header on
+    uint16_t max_interval_frames{0};  ///< MaxIntervalFrames: frames per class measurement interval
+
+    auto operator==(SrpTSpec const&) const noexcept -> bool = default;
+};
+
+/// The frames per packet a stream at `sample_rate` sends under SRP in `sr_class`: the fewest whose packet time
+/// reaches the class measurement interval (IEEE 802.1Q-2022 Clause 34.4), as AES67-2023 Table 2 counts "125
+/// microseconds" (class A) and "250 microseconds" (class B) at 44.1, 48 and 96 kHz; at least one.
+[[nodiscard]] constexpr auto srp_frames_per_packet(uint32_t const sample_rate, SrClass const sr_class) noexcept -> uint32_t
+{
+    uint64_t const interval = uint64_t{sample_rate} * sr_class_interval_us(sr_class);
+    uint64_t const frames = (interval + 999'999) / 1'000'000;
+    return frames == 0 ? 1 : static_cast<uint32_t>(frames);
+}
+
+/// The TSpec of `format` sent in `sr_class` (AES67-2023 Annex C.1.1.1): MaxIntervalFrames is the packets that
+/// can start in one interval (1 at srp_frames_per_packet()); zero for an empty format.
+[[nodiscard]] constexpr auto srp_tspec(StreamFormat const& format, SrClass const sr_class = SrClass::a) noexcept -> SrpTSpec
+{
+    uint64_t const packet = uint64_t{format.frames_per_packet} * 1'000'000;
+    if (packet == 0 || format.bytes_per_packet() == 0) {
+        return {};
+    }
+    uint64_t const interval = uint64_t{format.sample_rate} * sr_class_interval_us(sr_class);
+    return {
+        .max_frame_size = static_cast<uint16_t>(SrpTSpec::FRAME_OVERHEAD + format.bytes_per_packet()),
+        .max_interval_frames = static_cast<uint16_t>((interval + packet - 1) / packet),
+    };
+}
+
+/// True when IPv4 groups `a` and `b` map to the same Ethernet group address (RFC 1112 Section
+/// 6.4), the same group included; false unless both are multicast.
+[[nodiscard]] constexpr auto multicast_mac_aliases(
+    statusbar::ip::IPv4Address const& a, statusbar::ip::IPv4Address const& b) noexcept -> bool
+{
+    return a.is_multicast() && b.is_multicast() && rtp::multicast_mac(a) == rtp::multicast_mac(b);
+}
+
+/// The media at `media_index`, its formats reordered to prefer `encoding` (else the primary, which
+/// check_media_format() refuses); fails no_media.
+[[nodiscard]] inline auto select_media(sdp::Session const& session, size_t const media_index, sdp::Encoding const encoding)
+    -> statusbar::StatusValue<sdp::Media>
+{
+    if (media_index >= session.media.size()) {
+        return statusbar::failure(Aes67Error::no_media);
+    }
+    auto media = session.media[media_index];
+    (void)media.prefer(encoding);
+    return media;
+}
+
+/// Fails encoding_mismatch or format_mismatch unless the media's encoding, channels and rate are `format`'s.
+[[nodiscard]] inline auto check_media_format(sdp::Media const& media, StreamFormat const& format) noexcept -> statusbar::Status
+{
+    if (media.encoding != format.encoding) {
+        return statusbar::failure(Aes67Error::encoding_mismatch);
+    }
+    if (media.channels != format.channels || media.sample_rate != format.sample_rate) {
+        return statusbar::failure(Aes67Error::format_mismatch);
+    }
+    return statusbar::success();
+}
+
+/// One silent sample of `encoding` as a big-endian word: zero for linear PCM; for AM824 the
+/// MBLA label 0x40 with a zero sample (IEC 61883-6 Clause 6.2), as a zero word is IEC 60958 data.
+[[nodiscard]] constexpr auto silence_word(sdp::Encoding const encoding) noexcept -> uint32_t
+{
+    return encoding == sdp::Encoding::am824 ? 0x4000'0000U : 0U;
+}
+
+/// Fill `out` (whole samples of `encoding`) with silence: zero bytes, or the AM824 word repeated.
+inline auto fill_silence(sdp::Encoding const encoding, std::span<uint8_t> const out) noexcept -> void
+{
+    uint32_t const word = silence_word(encoding);
+    if (word == 0 || out.size() < sizeof(word)) {
+        statusbar::span_zero(out);
+        return;
+    }
+    statusbar::span_store(out, statusbar::ieee::quadlet_t{word});
+    for (size_t filled = sizeof(word); filled < out.size(); filled *= 2) {
+        statusbar::span_copy(out.subspan(filled), out.first(filled));
+    }
+}
+
+/// A receiver's frames: `frames` frames from sample index `first_index`, the
+/// stream's wire bytes. `bytes` is valid only during the call.
+using FrameHandler =
+    statusbar::sg14::inplace_function<void(uint64_t first_index, uint32_t frames, std::span<uint8_t const> bytes), 64>;
+
+/// What a FrameProvider gave a sender.
+enum class Supply : uint8_t
+{
+    frames,   ///< `out` holds the frames
+    missing,  ///< the source does not have them: the sender sends silence and counts it lost
+    none,     ///< nothing feeds the sender: it sends silence, and nothing is lost
+};
+
+/// A sender's frames: fill `out` (exactly `frames` frames of the stream's
+/// format) from sample index `first_index`.
+using FrameProvider = statusbar::sg14::inplace_function<Supply(uint64_t first_index, uint32_t frames, std::span<uint8_t> out), 64>;
+
+/// Where a sender sends.
+struct Destination
+{
+    statusbar::ip::IPv4Address address;  ///< multicast or unicast
+    uint16_t port{5004};
+    uint8_t payload_type{96};
+    uint8_t ttl{sdp::Connection::DEFAULT_MULTICAST_TTL};  ///< the IPv4 TTL; only a group's goes in the SDP
+
+    auto operator==(Destination const&) const noexcept -> bool = default;
+};
+
+/// The PTP grandmaster a sender's ts-refclk names (AES67-2023 Clause 8.2): IEEE 1588-2008 unless the
+/// interface runs IEEE 802.1AS, whose grandmaster has the same EUI-64 and is written with no domain.
+struct Grandmaster
+{
+    statusbar::ieee::Eui64 identity{};
+    uint8_t domain{0};  ///< 0-127; 0 for IEEE 802.1AS
+    sdp::PtpVersion version{sdp::PtpVersion::ieee1588_2008};
+    bool traceable{false};  ///< its time is traceable to TAI (the grandmaster's timeTraceable)
+
+    /// The RFC 7273 reference that names it.
+    [[nodiscard]] auto reference() const -> sdp::PtpReference { return sdp::PtpReference::naming(identity, domain, version); }
+
+    /// The ts-refclk lines: reference(), then `ptp=<version>:traceable` while traceable (RFC 7273
+    /// Section 4.8; AES67-2023 Clause 8.2, Example 2).
+    [[nodiscard]] auto references() const -> sdp::ReferenceClocks
+    {
+        auto clocks = sdp::ReferenceClocks::of(reference());
+        if (traceable) {
+            clocks.ptp.push_back(sdp::PtpReference{.version = version, .traceable = true});
+        }
+        return clocks;
+    }
+
+    auto operator==(Grandmaster const&) const noexcept -> bool = default;
+};
+
+enum class State : uint8_t
+{
+    idle,     ///< not configured, or (a sender) configured but paused: no source feeds it (Sender::pause())
+    ready,    ///< configured, nothing received or sent yet
+    running,  ///< packets flowing
+    error,    ///< the transport refused the last configure(), refuses to send (Transport::send_error()) or cannot
+              ///< deliver a receiver's group (ReceivePort::error())
+};
+
+/// Why a receiver refused a packet.
+enum class DropReason : uint8_t
+{
+    not_rtp,       ///< not an RTP packet (RFC 3550 Section 5.1)
+    payload_type,  ///< not the SDP's payload type
+    size,          ///< an empty payload, not whole frames of the format, or more frames than the SDP's ptime
+    source,        ///< not from the SDP's source filter (RFC 4570), or another address with the live source's SSRC
+    ssrc,          ///< another SSRC while the learnt one is live
+    sequence,      ///< a duplicate, or a sequence jump not yet confirmed (RFC 3550 Appendix A.1)
+    no_offset,     ///< a sender-clocked stream's, before its offset is known
+};
+
+/// A receiver's refused packets by DropReason; Counters::dropped is their sum.
+struct DropCounts
+{
+    uint64_t not_rtp{0};
+    uint64_t payload_type{0};
+    uint64_t size{0};
+    uint64_t source{0};
+    uint64_t ssrc{0};
+    uint64_t sequence{0};
+    uint64_t no_offset{0};
+
+    /// The count for `reason`.
+    [[nodiscard]] constexpr auto operator[](DropReason const reason) noexcept -> uint64_t&
+    {
+        switch (reason) {
+            case DropReason::not_rtp:
+                return not_rtp;
+            case DropReason::payload_type:
+                return payload_type;
+            case DropReason::size:
+                return size;
+            case DropReason::source:
+                return source;
+            case DropReason::ssrc:
+                return ssrc;
+            case DropReason::sequence:
+                return sequence;
+            case DropReason::no_offset:
+                break;
+        }
+        return no_offset;
+    }
+
+    auto operator==(DropCounts const&) const noexcept -> bool = default;
+};
+
+struct Counters
+{
+    uint64_t packets{0};  ///< packets handed on (receiver) or sent (sender)
+    uint64_t frames{0};
+    uint64_t lost{0};     ///< receiver: frames in sequence gaps not yet filled; sender: frames the source lacked, or skipped
+    uint64_t late{0};     ///< receiver: frames that arrived out of order (still handed on)
+    uint64_t dropped{0};  ///< packets refused (receiver) or not sent (sender)
+    DropCounts drops;     ///< receiver: `dropped` by reason
+
+    auto operator==(Counters const&) const noexcept -> bool = default;
+};
+
+/// What a sender publishes for RTCP at the end of each tick (RFC 3550 Section 6.4.1 sender info).
+struct SendState
+{
+    uint32_t ssrc{0};         ///< 0 before the first tick after configure()
+    uint32_t packets{0};      ///< sent since configure(), mod 2^32
+    uint32_t octets{0};       ///< payload octets sent since configure(), mod 2^32
+    uint64_t first_index{0};  ///< the run's first packet (its first frame's index), sent or held for its first SR
+    uint64_t next_index{0};   ///< the next packet to send: first_index while that is held
+    bool sent{false};         ///< a packet of the run has gone: false while its first is held for its SR
+
+    auto operator==(SendState const&) const noexcept -> bool = default;
+};
+
+/// What a receiver publishes for RTCP after each drain that accepted a packet (RFC 3550 Section
+/// 6.4.1 report block inputs, cumulative; the session uses interval differences).
+struct ReceiveState
+{
+    uint32_t ssrc{0};
+    bool valid{false};                  ///< a source has been learnt
+    statusbar::ip::IPv4Address source;  ///< its address, or before one the SDP's source filter (0.0.0.0: neither)
+    uint32_t extended_max{0};           ///< rtp::RtpSequence::extended_max()
+    uint32_t expected{0};               ///< rtp::RtpSequence::expected()
+    uint32_t received{0};               ///< rtp::RtpSequence::received()
+    uint32_t jitter_x16{0};             ///< interarrival jitter, timestamp units x 16 (Appendix A.8)
+    uint32_t last_rtp_ts{0};            ///< the newest packet's RTP timestamp
+    uint64_t last_now_index{0};         ///< the drain's index when it arrived
+
+    auto operator==(ReceiveState const&) const noexcept -> bool = default;
+};
+
+}  // namespace padl::aes67

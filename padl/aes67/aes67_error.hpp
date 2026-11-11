@@ -1,0 +1,53 @@
+#pragma once
+
+// Copyright 2026 PADL Software Pty Ltd
+// SPDX-License-Identifier: MIT
+
+/// AES67 errors: Aes67Error and its `padl.aes67` category, an `is_error_code_enum`.
+
+#include <string>
+#include <system_error>
+#include <type_traits>
+
+namespace padl::aes67 {
+
+/// Why a receiver, sender or transport refused a request.
+enum class Aes67Error
+{
+    no_media = 1,             ///< the session has no media at that index
+    no_connection,            ///< the media has no connection address
+    not_ptp_locked,           ///< no direct media clock: the stream's timestamps are not PTP time
+    format_mismatch,          ///< the stream's channels or rate is not the configured format's
+    unsupported_format,       ///< a format or rate AES67 or the media clock cannot carry
+    packet_too_large,         ///< a packet would not fit a 1500-byte frame
+    unsupported_destination,  ///< a destination this transport cannot reach
+    invalid_address,          ///< not a dotted IPv4 address
+    interface_not_found,      ///< no such interface, or it has no IPv4 address
+    encoding_mismatch,        ///< no offered format has the configured encoding (sample layout and width)
+    rtcp_multiplexed,         ///< the SDP asks for RTCP on the RTP port (a=rtcp-mux), which AES67 never does
+    no_rtcp_peer,             ///< a unicast stream whose sender's address the SDP does not give
+    not_configured,           ///< the receiver or sender has no stream
+    not_sender_clocked,       ///< no `mediaclk:sender`: a receiver set to follow the sender's clock refuses it
+    rss_not_steered,          ///< a NIC with RSS whose buckets could not all be steered to the AF_XDP queue
+    foreign_destination,      ///< a unicast stream whose SDP sends it to another host (RFC 8866 Clause 5.7)
+};
+
+class Aes67ErrorCategory : public std::error_category
+{
+  public:
+    [[nodiscard]] auto name() const noexcept -> char const* override { return "padl.aes67"; }
+    [[nodiscard]] auto message(int ev) const -> std::string override;
+};
+
+[[nodiscard]] auto aes67_error_category() noexcept -> std::error_category const&;
+
+[[nodiscard]] inline auto make_error_code(Aes67Error const e) noexcept -> std::error_code
+{
+    return {static_cast<int>(e), aes67_error_category()};
+}
+
+}  // namespace padl::aes67
+
+template <>
+struct std::is_error_code_enum<padl::aes67::Aes67Error> : std::true_type
+{};

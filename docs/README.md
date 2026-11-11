@@ -2,7 +2,7 @@
 
 The `statusbar-aes67` package is the media clock, RTP, SDP, SAP and AES67 stream I/O an
 AES67/AVB bridge is built on. Each module is documented in its own overview file; pick a
-module for an orientation, then read its headers under `statusbar/<module>/`.
+module for an orientation, then read its headers under `padl/<module>/`.
 
 ## Module overviews
 

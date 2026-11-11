@@ -43,13 +43,13 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
   under SRP (AES67-2023 Annex C.1.1): the framing of its class's interval, its MSRP TSpec, and
   whether two groups share an Ethernet address. `SendOptions::vlan`, `SendPort::set_vlan()` and
   `Sender::set_vlan()` tag a stream; `XdpTransport::set_receive_vid()` receives tagged ones.
-- `Aes67Error` — `enum class`, category `statusbar.aes67`.
+- `Aes67Error` — `enum class`, category `padl.aes67`.
 
 ## Quick example
 
 ```cpp
-#include "statusbar/aes67/aes67_receiver.hpp"
-#include "statusbar/aes67/aes67_udp_transport.hpp"
+#include "padl/aes67/aes67_receiver.hpp"
+#include "padl/aes67/aes67_udp_transport.hpp"
 
 using namespace statusbar;
 
@@ -72,15 +72,15 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ## Headers
 
-- `statusbar/aes67/aes67_stream.hpp` — `StreamFormat`, callbacks, `Destination`, `Grandmaster`, `State`, `Counters`.
-- `statusbar/aes67/aes67_receiver.hpp` — `Receiver`.
-- `statusbar/aes67/aes67_sender.hpp` — `Sender`.
-- `statusbar/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
-- `statusbar/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
-- `statusbar/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
-- `statusbar/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
-- `statusbar/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`, `SenderReportTime`, `sender_clock_offset()`.
-- `statusbar/aes67/aes67_error.hpp` — `Aes67Error`.
+- `padl/aes67/aes67_stream.hpp` — `StreamFormat`, callbacks, `Destination`, `Grandmaster`, `State`, `Counters`.
+- `padl/aes67/aes67_receiver.hpp` — `Receiver`.
+- `padl/aes67/aes67_sender.hpp` — `Sender`.
+- `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
+- `padl/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
+- `padl/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
+- `padl/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
+- `padl/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`, `SenderReportTime`, `sender_clock_offset()`.
+- `padl/aes67/aes67_error.hpp` — `Aes67Error`.
 
 ## Dependencies
 
@@ -371,7 +371,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   too, but needs `CAP_NET_RAW` before Linux 5.7 and also pins the socket's sends.
   `aes67_veth_test` proves it on two veth pairs; it needs root, or runs unprivileged in a
   user and network namespace:
-  `unshare -rn sh -c 'ip link set lo up; build/statusbar_test statusbar/aes67/aes67_veth_test'`.
+  `unshare -rn sh -c 'ip link set lo up; build/statusbar_test padl/aes67/aes67_veth_test'`.
 - `receive_refusals()` counts a truncated datagram (longer than `MAX_DATAGRAM`) as
   `malformed`; one `IP_PKTINFO` puts on another address or interface (another group's on a
   shared port) is skipped uncounted, and the receiver checks the rest (`Counters::drops`).
