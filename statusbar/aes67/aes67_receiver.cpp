@@ -249,7 +249,7 @@ void Receiver::drain(uint64_t const now_index) noexcept
         return;
     }
     bool const backlog = receive_batches(now_index);
-    note_port_error();
+    notify_port_error();
     if (this_drain_.accepted && ssrc_) {
         receive_state_.store({
             .ssrc = *ssrc_,
@@ -266,7 +266,7 @@ void Receiver::drain(uint64_t const now_index) noexcept
     set_gate(now_index, backlog);
 }
 
-void Receiver::note_port_error() noexcept
+void Receiver::notify_port_error() noexcept
 {
     if (auto const error = port_->error()) {
         state_ = State::error;
@@ -327,7 +327,7 @@ void Receiver::accept(Datagram const& datagram, uint64_t const now_index, uint64
         drop(frames.error());
         return;
     }
-    note_arrival(packet->header.timestamp.get(), now_index);
+    notify_arrival(packet->header.timestamp.get(), now_index);
     if ((offset & OFFSET_SET) == 0) {
         drop(DropReason::no_offset);  // learnt, but not placed before the sender's first report
         return;
@@ -407,7 +407,7 @@ auto Receiver::admit_sequence(uint16_t const seq, uint32_t const frames) noexcep
     return place(seq, frames);
 }
 
-void Receiver::note_arrival(uint32_t const timestamp, uint64_t const now_index) noexcept
+void Receiver::notify_arrival(uint32_t const timestamp, uint64_t const now_index) noexcept
 {
     // RFC 3550 Appendix A.8 on the first packet of each drain (its index is the arrival time,
     // shared by the batch): transit = arrival - timestamp; J += (|D| - J) / 16, kept x16.

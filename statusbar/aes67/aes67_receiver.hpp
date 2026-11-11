@@ -132,7 +132,7 @@ class Receiver
         sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& received) const
         -> StatusValue<RtcpOptions>;
     /// State::error while the port reports one (ReceivePort::error()), ready again once it does not.
-    void note_port_error() noexcept;
+    void notify_port_error() noexcept;
     /// Receives and accepts up to MAX_BATCHES batches; true when every batch came back full (more may wait).
     [[nodiscard]] auto receive_batches(uint64_t now_index) noexcept -> bool;
     /// Sets the due-tick gate after a drain: open after a backlog, else a tick before the next packet is due.
@@ -152,7 +152,7 @@ class Receiver
     /// Validates the sequence number (RFC 3550 Appendix A.1) and places it; false to drop the packet.
     [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames) noexcept -> bool;
     /// Notes an accepted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.
-    void note_arrival(uint32_t timestamp, uint64_t now_index) noexcept;
+    void notify_arrival(uint32_t timestamp, uint64_t now_index) noexcept;
     /// Hands a placed packet to the handler at its sample index and counts it.
     void deliver(rtp::RtpPacket const& packet, uint32_t frames, uint64_t offset, uint64_t now_index) noexcept;
     /// Restarts the reorder window at `sequence`.
