@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -164,7 +165,7 @@ TEST(sap, the_origin_line_is_the_first_o_line_with_its_line_ending)
     EXPECT_TRUE(origin_line("").empty());
 }
 
-TEST(sap, an_announcement_longer_than_max_sap_packet_is_not_sent)
+TEST(sap, an_announcement_longer_than_max_sap_packet_is_refused)
 {
     Listener listener{49878};
     auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, 49878);
@@ -172,11 +173,32 @@ TEST(sap, an_announcement_longer_than_max_sap_packet_is_not_sent)
     if (!announcer) {
         return;
     }
-    (*announcer)->announce("long", session(std::string(MAX_SAP_PACKET, 'x')));
-    (*announcer)->tick(0);
+    auto& sap = **announcer;
+    auto const refused = sap.announce("long", session(std::string(MAX_SAP_PACKET, 'x')));
+    EXPECT_TRUE(!refused && refused.error() == std::errc::message_size);
+    EXPECT_EQ(sap.announced(), size_t{0});
+    sap.tick(0);
     EXPECT_TRUE(listener.quiet());
-    EXPECT_TRUE((*announcer)->withdraw("long").has_value());  // its deletion is its o= line alone
-    EXPECT_TRUE(listener.next().has_value());
+
+    // A refused replacement changes nothing: the key's announcement goes on as it was.
+    EXPECT_TRUE(sap.announce("out", session("Short")).has_value());
+    sap.tick(0);
+    auto const first = listener.next();
+    EXPECT_FALSE(sap.announce("out", session(std::string(MAX_SAP_PACKET, 'y'))).has_value());
+    sap.tick(SapAnnouncer::INTERVAL_NS);
+    auto const again = listener.next();
+    EXPECT_TRUE(first.has_value() && again.has_value() && *first == *again);
+}
+
+TEST(sap, only_the_version_and_message_type_are_written_as_given)
+{
+    SapHeader header{};
+    header.init(true, 7, IPv4Address{10, 0, 0, 1});
+    header.flags = static_cast<uint8_t>(header.flags.get() | 0x1BU);  // A, the reserved bit, E and C
+    std::array<uint8_t, 64> datagram{};
+    EXPECT_TRUE(serialize_sap_packet(header, "o=- 1 1 IN IP4 10.0.0.1\r\n", datagram).has_value());
+    EXPECT_EQ(datagram[0], uint8_t{0x24});
+    EXPECT_TRUE(parse_sap_packet(datagram).has_value());
 }
 
 TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
@@ -187,7 +209,7 @@ TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
     auto& sap = **announcer;
     EXPECT_EQ(sap.fd(), -1);
 
-    sap.announce("aes67-out-0", session("A"));
+    EXPECT_TRUE(sap.announce("aes67-out-0", session("A")).has_value());
     EXPECT_EQ(sap.announced(), size_t{1});
     int64_t const t0 = 1'000'000'000;
     sap.tick(t0);
@@ -207,10 +229,10 @@ TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
 
     // The same session again changes nothing; a changed one is a single announcement at the next tick, with a new
     // hash and no deletion before it (RFC 2974 Section 5).
-    sap.announce("aes67-out-0", session("A"));
+    EXPECT_TRUE(sap.announce("aes67-out-0", session("A")).has_value());
     sap.tick(t0 + SapAnnouncer::INTERVAL_NS + 1);
     EXPECT_TRUE(listener.quiet());
-    sap.announce("aes67-out-0", session("B"));
+    EXPECT_TRUE(sap.announce("aes67-out-0", session("B")).has_value());
     EXPECT_TRUE(listener.quiet());
     sap.tick(t0 + SapAnnouncer::INTERVAL_NS + 2);
     auto const changed = listener.next();
@@ -244,8 +266,8 @@ TEST(sap, withdraw_all_sends_every_deletion_at_once)
     auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, 49876);
     EXPECT_TRUE(announcer.has_value());
     auto& sap = **announcer;
-    sap.announce("aes67-out-0", session("A"));
-    sap.announce("aes67-out-1", session("B"));
+    EXPECT_TRUE(sap.announce("aes67-out-0", session("A")).has_value());
+    EXPECT_TRUE(sap.announce("aes67-out-1", session("B")).has_value());
     sap.tick(1'000'000'000);
     std::vector<uint16_t> hashes;
     for (int i = 0; i < 2; ++i) {
@@ -596,7 +618,7 @@ TEST(sap_receiver, receives_announcements_and_deletions)
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
     };
-    (*announcer)->announce("out", session("Loop"));
+    EXPECT_TRUE((*announcer)->announce("out", session("Loop")).has_value());
     (*announcer)->tick(0);
     pump(1);
     EXPECT_EQ(events.size(), size_t{1});
@@ -652,7 +674,7 @@ TEST(sap, an_announcer_sends_from_its_origin)
     if (!announcer) {
         return;
     }
-    (*announcer)->announce("out", session("From"));
+    EXPECT_TRUE((*announcer)->announce("out", session("From")).has_value());
     (*announcer)->tick(0);
     auto const from = listener.next_source();
     EXPECT_TRUE(from == (std::optional{IPv4Address{127, 0, 0, 2}}));
@@ -673,7 +695,7 @@ TEST(sap_receiver, expires_on_tick)
     if (!announcer) {
         return;
     }
-    (*announcer)->announce("out", session("Short"));
+    EXPECT_TRUE((*announcer)->announce("out", session("Short")).has_value());
     (*announcer)->tick(0);
     for (int tries = 0; tries < 200 && events.empty(); ++tries) {
         sap.on_ready(5'000);

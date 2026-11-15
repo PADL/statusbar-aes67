@@ -57,10 +57,13 @@ auto serialize_sap_packet(SapHeader const& header, std::string_view const sdp, s
     -> statusbar::StatusValue<size_t>
 {
     SapHeader fixed = header;
+    fixed.flags = static_cast<uint8_t>(header.flags.get() & SapHeader::SENT_FLAGS);
     fixed.auth_length = 0U;
     statusbar::BufferSerializerBuilderWithBuffer writer{datagram};
-    writer.append(fixed).append(statusbar::make_const_span(SAP_PAYLOAD_TYPE)).append(octet_t{0U});
-    if (!writer.append(statusbar::make_const_span(sdp))) {
+    if (!writer.append(fixed)
+             .append(statusbar::make_const_span(SAP_PAYLOAD_TYPE))
+             .append(octet_t{0U})
+             .append(statusbar::make_const_span(sdp))) {
         return statusbar::failure(writer.error());
     }
     return writer.position();

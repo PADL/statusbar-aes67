@@ -70,8 +70,10 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
   address their origin field names, which listeners require.
 - `withdraw()` sends the deletion at once, not at the next tick, so a caller shutting
   down may withdraw and close straight away. A deletion carries only the o= line. The
-  announcer writes into a buffer of `MAX_SAP_PACKET` octets, so a description longer than
-  a listener reads is not sent: `send()` fails and `tick()` skips it.
+  announcer writes into a buffer of `MAX_SAP_PACKET` octets, so `announce()` refuses a
+  description longer than a listener reads (`message_size`), leaving what was announced
+  under the key as it was. `serialize_sap_packet()` writes only the version and message type
+  bits it is given (`SapHeader::SENT_FLAGS`).
 - A session is known by its SDP origin (o= username, session id and address: RFC 8866
   Section 5.2's globally unique identifier). An announcement of a new session, or of a known one
   whose SDP changed (a new o= version, say), is `announced`; an unchanged

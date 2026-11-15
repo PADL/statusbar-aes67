@@ -44,7 +44,8 @@ class SapAnnouncer final : public statusbar::net::Pollable
 
     /// Announce `session` under `key` (a slot id, say), replacing what was announced under it; the next tick sends
     /// it. A changed session goes under a new message id hash, with no deletion first (RFC 2974 Section 5).
-    void announce(std::string const& key, sdp::Session const& session);
+    /// Fails message_size, changing nothing, when its packet would be longer than MAX_SAP_PACKET.
+    [[nodiscard]] auto announce(std::string const& key, sdp::Session const& session) -> statusbar::Status;
     /// Stop announcing `key`, sending its deletion now, not at the next tick (a caller shutting
     /// down may close straight after): the send's error, or success (also for a key not announced).
     [[nodiscard]] auto withdraw(std::string const& key) -> statusbar::Status;
@@ -69,6 +70,8 @@ class SapAnnouncer final : public statusbar::net::Pollable
         bool due{true};
     };
 
+    /// `text` stored under `key`: a new entry, or a changed one due at the next tick.
+    void store(std::string const& key, std::string text);
     /// `entry`'s announcement, or its deletion (its o= line alone): fails when it does not fit MAX_SAP_PACKET.
     [[nodiscard]] auto send(bool deletion, Entry const& entry) -> statusbar::Status;
 

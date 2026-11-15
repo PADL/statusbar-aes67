@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <system_error>
 #include <utility>
 
 #include <arpa/inet.h>
@@ -82,9 +83,18 @@ SapAnnouncer::SapAnnouncer(statusbar::net::FileDescriptor fd, statusbar::ip::IPv
     , origin_{origin}
 {}
 
-void SapAnnouncer::announce(std::string const& key, sdp::Session const& session)
+auto SapAnnouncer::announce(std::string const& key, sdp::Session const& session) -> statusbar::Status
 {
     std::string text = sdp::to_string(session);
+    if (sap_packet_length(text) > MAX_SAP_PACKET) {
+        return statusbar::failure(std::errc::message_size);
+    }
+    store(key, std::move(text));
+    return statusbar::success();
+}
+
+void SapAnnouncer::store(std::string const& key, std::string text)
+{
     auto const it = std::ranges::find(entries_, key, &Entry::key);
     if (it != entries_.end()) {
         if (it->sdp == text) {

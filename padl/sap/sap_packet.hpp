@@ -41,6 +41,9 @@ struct SapHeader
     /// The only SAP version
     static constexpr uint8_t VERSION = 1;
 
+    /// The flags serialize_sap_packet() writes as given: the version (V) and message type (T)
+    static constexpr uint8_t SENT_FLAGS = 0xE4;
+
     /// Byte 0: version[7:5] | address_type[4] | reserved[3] | message_type[2] | encrypted[1] | compressed[0]
     octet_t flags;
 
@@ -53,10 +56,15 @@ struct SapHeader
     /// Bytes 4-7: originating source
     quadlet_t origin;
 
+    /// The SAP version (V): VERSION in every packet this reads.
     [[nodiscard]] constexpr auto version() const noexcept -> uint8_t { return flags.get_bits(0xE0U, 5); }
+    /// Whether the originating source is IPv6 (A), which this does not read.
     [[nodiscard]] constexpr auto ipv6() const noexcept -> bool { return flags.has_flag(0x10U); }
+    /// Whether the message is a deletion (T), not an announcement.
     [[nodiscard]] constexpr auto deletion() const noexcept -> bool { return flags.has_flag(0x04U); }
+    /// Whether the payload is encrypted (E), which this does not read.
     [[nodiscard]] constexpr auto encrypted() const noexcept -> bool { return flags.has_flag(0x02U); }
+    /// Whether the payload is compressed (C), which this does not read.
     [[nodiscard]] constexpr auto compressed() const noexcept -> bool { return flags.has_flag(0x01U); }
 
     /// A version 1 header with an IPv4 origin, no authentication, encryption or compression.
@@ -79,8 +87,15 @@ static_assert(offsetof(SapHeader, auth_length) == 1, "auth_length must be at off
 static_assert(offsetof(SapHeader, message_id_hash) == 2, "message_id_hash must be at offset 2");
 static_assert(offsetof(SapHeader, origin) == 4, "origin must be at offset 4");
 
-/// Write a SAP packet into `datagram`: `header` with no authentication data (its length cleared), the payload type
-/// and `sdp`. Returns the packet length, or the buffer's error when it does not fit.
+/// The length of a SAP packet carrying `sdp` as serialize_sap_packet() writes it: header, payload type and text.
+[[nodiscard]] constexpr auto sap_packet_length(std::string_view const sdp) noexcept -> size_t
+{
+    return SapHeader::LENGTH + SAP_PAYLOAD_TYPE.size() + 1 + sdp.size();
+}
+
+/// Write a SAP packet into `datagram`: `header` with only its version and message type kept (SENT_FLAGS: never an
+/// IPv6 origin, encryption or compression) and no authentication data, the payload type and `sdp`. Returns the
+/// packet length, or the buffer's error when it does not fit.
 [[nodiscard]] auto serialize_sap_packet(SapHeader const& header, std::string_view sdp, std::span<uint8_t> datagram) noexcept
     -> statusbar::StatusValue<size_t>;
 
