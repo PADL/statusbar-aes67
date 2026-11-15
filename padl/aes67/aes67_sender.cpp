@@ -112,7 +112,7 @@ void Sender::seed_run()
 {
     std::random_device random;
     payload_.assign(format_.bytes_per_packet(), 0);
-    rng_ = ((uint64_t{random()} << 32U) | random()) | 1U;
+    rng_.seed((uint64_t{random()} << 32U) | random());
     ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);  // never 0, nor the last run's
     sequence_ = static_cast<uint16_t>(random());
     rtcp_counts_ = {};
@@ -479,10 +479,7 @@ void Sender::pause() noexcept
 
 auto Sender::next_random() noexcept -> uint32_t
 {
-    rng_ ^= rng_ >> 12U;
-    rng_ ^= rng_ << 25U;
-    rng_ ^= rng_ >> 27U;
-    return static_cast<uint32_t>((rng_ * 0x2545'F491'4F6C'DD1DULL) >> 32U);
+    return static_cast<uint32_t>(rng_() >> 32U);
 }
 
 auto Sender::fresh_ssrc() noexcept -> uint32_t

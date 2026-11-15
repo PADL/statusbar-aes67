@@ -41,7 +41,7 @@ class RtcpCadence
 class Rfc3550Interval final : public RtcpCadence
 {
   public:
-    Rfc3550Interval(rtp::RtcpIntervalParams const& params, uint32_t seed) noexcept
+    Rfc3550Interval(rtp::RtcpIntervalParams const& params, uint64_t seed) noexcept
         : params_{params}
         , rng_{seed}
     {}
@@ -54,7 +54,7 @@ class Rfc3550Interval final : public RtcpCadence
 
   private:
     rtp::RtcpIntervalParams params_;
-    std::minstd_rand rng_;
+    std::mt19937_64 rng_;
 };
 
 /// A sender report's pair (RFC 3550 Section 6.4.1): an RTP timestamp and the sender's Internal Clock time it names, from

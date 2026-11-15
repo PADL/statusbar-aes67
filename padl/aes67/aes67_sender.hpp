@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -225,7 +226,7 @@ class Sender
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
-    /// Draws from rng_ (xorshift64*, seeded by configure()): no syscall on the ticking thread.
+    /// Draws from rng_ (seeded by seed_run() from std::random_device): no syscall on the ticking thread.
     [[nodiscard]] auto next_random() noexcept -> uint32_t;
     /// A random SSRC, neither 0 nor the current one.
     [[nodiscard]] auto fresh_ssrc() noexcept -> uint32_t;
@@ -264,7 +265,7 @@ class Sender
     [[nodiscard]] auto media_description(statusbar::ip::IPv4Address const& origin, bool multicast) const -> sdp::Media;
 
     std::atomic<uint32_t> ssrc_{0};
-    uint64_t rng_{1};
+    std::mt19937_64 rng_;
     bool paused_{false};  ///< pause() since the last tick()
     bool started_{false};
     bool sender_clock_{false};
