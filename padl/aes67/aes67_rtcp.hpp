@@ -178,8 +178,6 @@ class RtcpSession
     /// When the session next wants a tick (PTP ns): a receiver's next report, or midway through a sender's next SR
     /// window; nullopt when nothing is due (a sender's next run is found by the next tick).
     [[nodiscard]] auto next_wake_ns(uint64_t now_ns) const noexcept -> std::optional<uint64_t>;
-    /// When a receiver's or an rfc3550 sender's next report is due (PTP ns); 0 before the first tick.
-    [[nodiscard]] auto next_report_ns() const noexcept -> uint64_t { return next_report_ns_; }
 
     [[nodiscard]] auto role() const noexcept -> Role { return role_; }
     /// This end's SSRC: the stream's for a sender, a random one for a receiver.

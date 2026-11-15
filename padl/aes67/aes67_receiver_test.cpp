@@ -304,7 +304,6 @@ TEST(aes67_receiver, accepts_an_eight_channel_stream_in_packets_of_up_to_its_pti
     }
     receiver.drain(index + 53);
 
-    EXPECT_EQ(receiver.max_frames(), FPP);
     EXPECT_EQ(sink.blocks.size(), sizes.size() - 1);
     EXPECT_EQ(receiver.counters().drops.size, uint64_t{1});
     EXPECT_EQ(receiver.counters().dropped, uint64_t{1});
@@ -363,7 +362,6 @@ TEST(aes67_receiver, a_packet_of_more_frames_than_the_maxptime_is_refused)
     session.media[0].packet_time_us = 125;
     session.media[0].max_packet_time_us = 1000;
     EXPECT_TRUE(receiver.configure(session));
-    EXPECT_EQ(receiver.max_frames(), FPP);  // the maxptime's, the longer
     uint64_t const base = 48'000ULL * 7000;
     auto packet = [&](uint16_t const seq, size_t const frames) {
         padl::rtp::RtpHeader header{};
@@ -446,7 +444,6 @@ TEST(aes67_receiver, polls_a_queuing_port_only_when_a_packet_can_be_due)
     // In steady state: from a tick before the next packet can be sent to the
     // tick it arrives, three polls per eight ticks.
     EXPECT_EQ(transport.receives - polls_at_start, size_t{8 * 3});
-    EXPECT_TRUE(receiver.skipped_polls() > 0);
 
     // A lost packet: polled every tick past due until the next one.
     size_t const before = transport.receives;

@@ -70,9 +70,6 @@ class Receiver
     /// Read what has arrived and hand it on, with indices about `now_index`
     /// (the media clock's index at the current PTP time), behind the due-tick gate.
     void drain(uint64_t now_index) noexcept;
-    /// Port receive() calls made and ticks skipped by the due-tick gate.
-    [[nodiscard]] auto polls() const noexcept -> uint64_t { return polls_; }
-    [[nodiscard]] auto skipped_polls() const noexcept -> uint64_t { return skipped_polls_; }
 
     [[nodiscard]] auto format() const noexcept -> StreamFormat const& { return format_; }
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
@@ -85,8 +82,6 @@ class Receiver
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     /// The SSRC learnt from the stream's first packet.
     [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t> { return ssrc_; }
-    /// The most frames a packet may hold: the SDP's ptime, or its maxptime when longer; larger ones fail size.
-    [[nodiscard]] auto max_frames() const noexcept -> uint32_t { return max_frames_; }
 
     /// Where this stream's RTCP goes and arrives (the SDP's a=rtcp, else port + 1), marked `dscp`:
     /// the DSCP this host would send a similar stream with (AES67-2023 Clause 6.2). Fails
@@ -194,8 +189,6 @@ class Receiver
     /// every tick), unless the clock went back past gate_set_at_.
     uint64_t next_poll_index_{0};
     uint64_t gate_set_at_{0};
-    uint64_t polls_{0};
-    uint64_t skipped_polls_{0};
     /// What the current drain has seen.
     struct DrainState
     {

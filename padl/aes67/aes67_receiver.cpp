@@ -248,7 +248,6 @@ void Receiver::drain(uint64_t const now_index) noexcept
     // The due-tick gate (UDP): skip until a packet can be there, unless the
     // clock stepped back past the gate's horizon.
     if (next_poll_index_ != 0 && now_index < next_poll_index_ && now_index >= gate_set_at_ && !transport_.drain_every_tick()) {
-        ++skipped_polls_;
         return;
     }
     bool const backlog = receive_batches(now_index);
@@ -289,7 +288,6 @@ auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
     uint64_t offset = offset_.load(std::memory_order_acquire);
     for (size_t round = 0; round < MAX_BATCHES; ++round) {
         size_t const n = port_->receive(batch_);
-        ++polls_;
         for (size_t i = 0; i < n; ++i) {
             if (sender_clock_) {
                 offset = offset_.load(std::memory_order_acquire);  // set, or cleared by a new source

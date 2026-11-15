@@ -218,7 +218,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   primary one; the encoding must be the receiver's (`encoding_mismatch`), and channels and
   rate too (`format_mismatch`). The receiver's ptime need not match the SDP's: each
   packet's frames are counted from its payload (AES67-2023 Clause 7.2), up to the SDP's
-  ptime, or its maxptime when longer (`max_frames()`); a longer packet fails `size`. Clause 7.2 says a receiver
+  ptime, or its maxptime when longer; a longer packet fails `size`. Clause 7.2 says a receiver
   should not rely on the SDP's packet time; a dedicated device bounds what one packet hands its sink by it all the same. A stream without a direct media clock is
   refused (`not_ptp_locked`): its timestamps are not PTP time.
 - Where it receives (`receive_endpoint()`, AES67-2023 Clauses 6.1.1 and 8.5.2, RFC 8866
@@ -258,12 +258,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   ticks instead of eight. The gate relies on the sender's timestamps: a sender stamping
   ahead of capture has its packets read up to a packet time late. Over XDP
   (`drain_every_tick()`), a port keeps datagrams only for the tick they arrived in, so
-  there is no gate. `polls()` and `skipped_polls()` count the calls made and skipped.
+  there is no gate.
 - Counters: `packets` and `frames` handed on; `lost`, frames in sequence gaps not (yet)
   filled; `late`, frames that arrived out of order (after a later packet), still handed
   on; `dropped`, packets refused, and `drops` the same by `DropReason`: `not_rtp` (no RTP
   header), `payload_type` (not the SDP's), `size` (empty, not whole frames, or more than
-  `max_frames()`), `source` (not the source filter's, RFC 4570, or the learnt SSRC from
+  the ptime or maxptime holds), `source` (not the source filter's, RFC 4570, or the learnt SSRC from
   another address), `ssrc` (another source while the learnt one is
   live), `sequence` (a duplicate, or a jump RFC 3550 Appendix A.1 has not confirmed) and
   `no_offset` (a sender-clocked stream before `set_offset()`). Checked in that order; a
