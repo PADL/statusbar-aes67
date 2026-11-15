@@ -78,8 +78,7 @@ constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
     if (auto reuse = statusbar::net::set_reuse_addr(fd); !reuse) {
         return reuse;
     }
-    sockaddr_in address{};  // sin_addr zero: INADDR_ANY
-    address.sin_family = AF_INET;
+    sockaddr_in address = statusbar::net::ipv4_sockaddr_in(statusbar::ip::IPv4Address{});  // INADDR_ANY
     address.sin_port = htons(port);
     if (::bind(fd, statusbar::net::sockaddr_cast(address), sizeof(address)) != 0) {
         return statusbar::failure(statusbar::net::errno_code());

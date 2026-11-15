@@ -74,10 +74,8 @@ auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -
 /// An IPv4 socket address.
 [[nodiscard]] auto socket_address(statusbar::ip::IPv4Address const& address, uint16_t const port) noexcept -> sockaddr_in
 {
-    sockaddr_in socket{};
-    socket.sin_family = AF_INET;
+    sockaddr_in socket = statusbar::net::ipv4_sockaddr_in(address);
     socket.sin_port = htons(port);
-    socket.sin_addr.s_addr = htonl(address.to_uint32());
     return socket;
 }
 

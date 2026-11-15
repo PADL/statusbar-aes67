@@ -4,7 +4,9 @@
 #include "padl/aes67/aes67_socket.hpp"
 
 #include "padl/aes67/aes67_error.hpp"
+#include "statusbar/net/net_interface_info.hpp"
 #include "statusbar/net/net_posix_util.hpp"
+#include "statusbar/net/net_socket.hpp"
 
 #include <ifaddrs.h>
 
@@ -275,8 +277,8 @@ auto is_local(InterfaceInfo const& interface, statusbar::ip::IPv4Address const& 
 auto find_interface(std::string_view const name) -> statusbar::StatusValue<InterfaceInfo>
 {
     std::string interface_name{name};
-    unsigned int const index = ::if_nametoindex(interface_name.c_str());
-    if (index == 0) {
+    auto const index = statusbar::net::interface_index(name);
+    if (!index) {
         return statusbar::failure(Aes67Error::interface_not_found);
     }
     auto addresses = interface_addresses(interface_name);
@@ -285,7 +287,7 @@ auto find_interface(std::string_view const name) -> statusbar::StatusValue<Inter
     }
     return InterfaceInfo{
         .name = std::move(interface_name),
-        .index = index,
+        .index = static_cast<unsigned int>(*index),
         .address = addresses->first.front(),
         .addresses = std::move(addresses->first),
         .loopback = addresses->second,
@@ -294,10 +296,8 @@ auto find_interface(std::string_view const name) -> statusbar::StatusValue<Inter
 
 auto to_sockaddr(Endpoint const& endpoint) noexcept -> sockaddr_in
 {
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
+    sockaddr_in address = statusbar::net::ipv4_sockaddr_in(endpoint.address);
     address.sin_port = htons(endpoint.port);
-    address.sin_addr.s_addr = htonl(endpoint.address.to_uint32());
     return address;
 }
 
