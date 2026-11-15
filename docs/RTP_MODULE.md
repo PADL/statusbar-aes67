@@ -65,6 +65,7 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 
 ## Headers
 
+- `padl/rtp/rtp.hpp` — the module header: every header below.
 - `padl/rtp/rtp_header.hpp` — `RtpHeader`, `RtpPacket`, `parse_rtp()`, `serialize_rtp()`, `serialize_rtp_header()`.
 - `padl/rtp/rtp_sequence.hpp` — `RtpSequence` (header-only).
 - `padl/rtp/rtp_frame.hpp` — `FrameAddressing`, `RtpFrame`, `UdpFrame`, `parse_udp_frame()`, `parse_rtp_frame()`, `serialize_rtp_frame()`, `serialize_rtp_frame_headers()`, `multicast_mac()`.

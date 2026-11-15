@@ -104,6 +104,7 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 
 ## Headers
 
+- `padl/mediaclock/mediaclock.hpp` — the module header: the two below.
 - `padl/mediaclock/mediaclock_ptp_clock.hpp` — `PtpMediaClock`.
 - `padl/mediaclock/mediaclock_timebase.hpp` — `Timebase`, `ClockSample`, `TimebaseEstimatorParams`, `TimebaseEstimator`.
 
