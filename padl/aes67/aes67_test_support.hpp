@@ -230,8 +230,9 @@ class LoopTransport final : public Transport
     std::optional<statusbar::ip::IPv4Address> joined_source;  ///< the last port's source-specific join, if it was one
 };
 
+/// A two-channel L24 stream to `destination`, PT 97, on a direct media clock at `offset` (none: not PTP-locked).
 inline auto stream_session(Endpoint const& destination, std::optional<uint32_t> const offset = 0) -> sdp::Session
-{
+{  // NOLINT(statusbar-block-statements): a crafted session, field by field
     sdp::Session session{};
     session.origin_address = "192.168.1.10";
     session.connection = sdp::Connection{.address = destination.address, .ttl = 32};
@@ -247,13 +248,21 @@ inline auto stream_session(Endpoint const& destination, std::optional<uint32_t> 
     return session;
 }
 
-inline auto rtp_packet(uint16_t const seq, uint32_t const timestamp, uint32_t const ssrc = 0x1234, uint8_t const pt = 97)
-    -> std::vector<uint8_t>
+/// FPP frames of STEREO_L24's pattern from index `timestamp`.
+inline auto pattern_payload(uint32_t const timestamp) -> std::vector<uint8_t>
 {
     std::vector<uint8_t> payload(size_t{FPP} * 6);
     for (size_t i = 0; i < payload.size(); ++i) {
         payload[i] = pattern(timestamp + (i / 6), i % 6);
     }
+    return payload;
+}
+
+/// An RTP packet of pattern_payload(`timestamp`).
+inline auto rtp_packet(uint16_t const seq, uint32_t const timestamp, uint32_t const ssrc = 0x1234, uint8_t const pt = 97)
+    -> std::vector<uint8_t>
+{
+    auto const payload = pattern_payload(timestamp);
     rtp::RtpHeader header{};
     header.init(pt, seq, timestamp, ssrc);
     std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
