@@ -19,7 +19,7 @@ thread.
 
 ## Key types
 
-- `SapHeader`, `serialize_sap_packet()` / `parse_sap_packet()` and `SapMessage` — the RFC 2974 §3 packet: version 1, IPv4 origin, no authentication, encryption or compression; written into a caller's buffer, read through `buffer`.
+- `SapHeader`, `serialize_sap_packet()` / `parse_sap_packet()` and `SapMessage` — the RFC 2974 Section 3 packet: version 1, IPv4 origin, no authentication, encryption or compression; written into a caller's buffer, read through `buffer`.
 - `SapAnnouncer` — announces sessions under caller-chosen keys; `announce()`, `withdraw()`, `withdraw_all()`.
 - `SapDirectory` — the announced sessions, keyed by `SessionKey`; `handle()` / `handle_packet()` yield `Event`s (`announced`, `deleted`, `timed_out`, `evicted`), `expire()`, `find(name, origin)`.
 - `SapReceiver` — the socket and the directory on a reactor; `set_handler()`.
@@ -64,7 +64,7 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 ## Notes & caveats
 
 - A changed session is announced again under a new message id hash, with no deletion
-  first (RFC 2974 §5); the new hash always differs from the old, and is never 0, which
+  first (RFC 2974 Section 5); the new hash always differs from the old, and is never 0, which
   RFC 2974 reserves for "no hash".
 - `SapAnnouncer::open()` binds its socket to the origin, so its packets leave from the
   address their origin field names, which listeners require.
@@ -73,23 +73,23 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
   announcer writes into a buffer of `MAX_SAP_PACKET` octets, so a description longer than
   a listener reads is not sent: `send()` fails and `tick()` skips it.
 - A session is known by its SDP origin (o= username, session id and address: RFC 8866
-  §5.2's globally unique identifier). An announcement of a new session, or of a known one
+  Section 5.2's globally unique identifier). An announcement of a new session, or of a known one
   whose SDP changed (a new o= version, say), is `announced`; an unchanged
   re-announcement only refreshes it.
 - `handle_packet()` is given the packet's IP source address, and `admit()` refuses a packet
-  whose SAP origin field names another host (RFC 2974 §6: the originating source), one
+  whose SAP origin field names another host (RFC 2974 Section 6: the originating source), one
   longer than `MAX_PACKET` (4096 octets: room for a large ST 2110-30 or ST 2022-7
-  description sent fragmented; RFC 2974 §6 only recommends under 1 KB), or one that is not
+  description sent fragmented; RFC 2974 Section 6 only recommends under 1 KB), or one that is not
   SAP. `SapReceiver` reads with `recvfrom()` into a buffer one octet longer and counts what
   `admit()` refuses in `dropped()`, so an announcement from the wrong host shows.
 - A deletion counts only from the SAP origin that announced the session, and not for an
   older version than the one announced: a sender that deleted a session before
   announcing its change, and a late copy of that deletion, must not remove it. A deletion
-  without an o= line names the announcement by origin and message id hash (RFC 2974 §5);
+  without an o= line names the announcement by origin and message id hash (RFC 2974 Section 5);
   an o= line that does not read names nothing.
 - A re-announcement likewise counts only from the announcing origin, whatever its
   version: a device whose version counter restarted is read at once.
-- Timeout: RFC 2974 §3.1 says ten of the sender's intervals or an hour, whichever is
+- Timeout: RFC 2974 Section 3.1 says ten of the sender's intervals or an hour, whichever is
   more. A source that is gone should show as gone within minutes, so the timeout is fixed,
   by default 15 minutes: two of the RFC's slowest starting intervals (300 s, plus up to a
   third of jitter), and thirty of AES67 devices' usual 30 s.
@@ -110,6 +110,6 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 
 ## Further reading
 
-- RFC 2974 §3, §3.1, §5, §6.
-- AES67-2023 §9 — discovery.
+- RFC 2974 Section 3, Section 3.1, Section 5, Section 6.
+- AES67-2023 Clause 9 — discovery.
 - [`sdp`](SDP_MODULE.md) — the payload.

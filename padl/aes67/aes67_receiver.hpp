@@ -28,7 +28,7 @@
 namespace padl::aes67 {
 
 /// Where a stream on `connection` arrives over `transport`: a group, or this host's address, as `c=` names it
-/// (RFC 8866 Clause 5.7); `transport.local_address()` when `c=` is the session's origin, the sender (AES67-2023
+/// (RFC 8866 Section 5.7); `transport.local_address()` when `c=` is the session's origin, the sender (AES67-2023
 /// Clause 8.5.2, an offer). Any other unicast `c=`, 0.0.0.0 among them, fails foreign_destination.
 [[nodiscard]] auto receive_endpoint(
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Transport const& transport)

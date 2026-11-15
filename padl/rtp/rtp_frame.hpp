@@ -58,7 +58,7 @@ struct UdpFrame
     return 14 + (tagged ? statusbar::ieee::VlanTag::LENGTH : 0) + 20 + 8;
 }
 
-/// The Ethernet group address an IPv4 multicast address maps to (RFC 1112 §6.4):
+/// The Ethernet group address an IPv4 multicast address maps to (RFC 1112 Section 6.4):
 /// 01:00:5e and the address's low 23 bits.
 [[nodiscard]] constexpr auto multicast_mac(statusbar::ip::IPv4Address const& group) noexcept -> statusbar::ieee::Eui48
 {

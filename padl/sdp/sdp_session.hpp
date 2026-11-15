@@ -167,7 +167,7 @@ struct SourceFilter
     auto operator==(SourceFilter const&) const noexcept -> bool = default;
 };
 
-/// The kinds of `a=mediaclk:` told apart (RFC 7273 §5).
+/// The kinds of `a=mediaclk:` told apart (RFC 7273 Section 5).
 enum class MediaClockKind : uint8_t
 {
     direct,  ///< `direct[=<offset>]`: the reference clock itself, offset
@@ -175,7 +175,7 @@ enum class MediaClockKind : uint8_t
     other,   ///< any other kind (`IEEE1722=<stream id>`, ...): read, written as `sender`
 };
 
-/// `a=mediaclk:` (RFC 7273 §5): `direct[=<offset>]` is the PTP clock itself, offset by `<offset>`
+/// `a=mediaclk:` (RFC 7273 Section 5): `direct[=<offset>]` is the PTP clock itself, offset by `<offset>`
 /// (0 when absent); any other kind is a clock not derived from PTP. Media level overrides session.
 struct MediaClock
 {

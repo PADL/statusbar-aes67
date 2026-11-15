@@ -27,7 +27,7 @@ class SapAnnouncer final : public statusbar::net::Pollable
 {
   public:
     static constexpr int64_t INTERVAL_NS = 30'000'000'000;
-    /// The administratively scoped SAP group (RFC 2974 §3)
+    /// The administratively scoped SAP group (RFC 2974 Section 3)
     static constexpr statusbar::ip::IPv4Address GROUP{239, 255, 255, 255};
     static constexpr uint16_t PORT = 9875;
 

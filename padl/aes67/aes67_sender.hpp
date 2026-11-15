@@ -78,7 +78,7 @@ class Sender
         return ((k % 8) * tick) % format.frames_per_packet;
     }
 
-    /// The SDP session id (o=), stable for the same stream across restarts (RFC 8866 §5.2). 0, the
+    /// The SDP session id (o=), stable for the same stream across restarts (RFC 8866 Section 5.2). 0, the
     /// default: the first configure() uses stable_session_id() of the origin address and the name.
     /// Call before configure(), off the real-time thread.
     void set_session_id(uint64_t const id) noexcept { session_id_ = id & SESSION_ID_MASK; }

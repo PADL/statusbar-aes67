@@ -74,25 +74,25 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   baseband sender's, Section 10.3) are read past and never written.
 
 - Several rtpmaps on one m= line: every offered payload type with a supported rtpmap is
-  kept. The primary format is the first on the m= line (RFC 8866 §5.14: the order of
+  kept. The primary format is the first on the m= line (RFC 8866 Section 5.14: the order of
   preference), not the first rtpmap line; the rest go to `alternatives` in m= line order,
   up to three, and further ones are dropped. The writer lists the alternatives on the m=
   line and as rtpmaps, so a parsed session writes back as it was offered. A consumer
   that needs one encoding calls `Media::prefer()` and then checks the primary format.
 - A media offering only other encodings, or only static payload types without an rtpmap
-  (RFC 3551 §6: 0-95), is skipped; if that leaves no audio media, `parse()` fails with
+  (RFC 3551 Section 6: 0-95), is skipped; if that leaves no audio media, `parse()` fails with
   `unsupported_encoding`. A dynamic payload type without an rtpmap is `missing_field`.
 - L32 (32-bit big-endian linear PCM, rtpmap `L32`) is not an AES67-2023 encoding: AES67
   mandates L16 and L24. It is the RAVENNA extension Merging and others announce, and is
   read case-insensitively and written as a peer of L16 and L24. AM824 is RAVENNA's AES3
   transport (IEC 61883-6 32-bit subframes, as ST 2110-31).
-- `ts-refclk` (RFC 7273 §4.8): the domain may be written bare (`:0`, as AES67 devices
+- `ts-refclk` (RFC 7273 Section 4.8): the domain may be written bare (`:0`, as AES67 devices
   do), as `domain-nmbr=0`, or left out (domain 0); a 2002 `domain-name=` is read as
   domain 0. `to_string()` writes it bare, 0 included, as Dante writes it, with the
   grandmaster as an upper-case EUI-64 in IEEE canonical form. RFC 7273 requires a
   grandmaster or `traceable`; `parse()` tolerates a bare version, keeps it as read
   (`PtpReference::text`) and `to_string()` writes it back so.
-- Several `ts-refclk` lines at one level are equivalent clocks (RFC 7273 §4.8), and every
+- Several `ts-refclk` lines at one level are equivalent clocks (RFC 7273 Section 4.8), and every
   one is kept, in order: the PTP references in `ReferenceClocks::ptp`, other sources
   (`localmac=`, `ntp=`, ...) as read in `ReferenceClocks::other`, up to
   `ReferenceClocks::MAX` each. AES67-2023 Clause 8.2 asks receivers to evaluate them all.
@@ -112,7 +112,7 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   and 802.1AS are one PTPv2 clock, so an 802.1AS reference and a 1588 one in domain 0 with
   the same grandmaster match (a boundary clock joins them into one domain, AES67-2023
   Annex D.1); IEEE 1588-2002 (PTPv1) matches only itself, and `traceable` nothing.
-- `mediaclk` (RFC 7273 §5): any kind other than `direct` (`sender`, `IEEE1722`) is a
+- `mediaclk` (RFC 7273 Section 5): any kind other than `direct` (`sender`, `IEEE1722`) is a
   clock that cannot be derived from PTP, and `effective_media_clock_offset()` is then
   `nullopt`. `MediaClock::kind()` tells `direct`, `sender` and `other` apart
   (`effective_media_clock()` gives the clock in force); `other` is written as `sender`. A media-level clock of either kind overrides a session-level one; a level
@@ -127,7 +127,7 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 - `to_string()` sanitises so its output always parses: line breaks in text fields become
   spaces, an empty username or one with a space is written `-`, and an origin address
   that is not one token as `0.0.0.0`. A unicast connection's TTL is dropped and a
-  multicast one always gets one (`DEFAULT_MULTICAST_TTL` when 0), as RFC 8866 §5.7
+  multicast one always gets one (`DEFAULT_MULTICAST_TTL` when 0), as RFC 8866 Section 5.7
   requires.
 - `a=rtcp:<port>[ IN IP4 <address>]` (RFC 3605) is read at media level into
   `Media::rtcp` and written when set; a sender leaves it unset, since the default (the
@@ -143,5 +143,5 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 ## Further reading
 
 - RFC 8866 — SDP; RFC 7273 — clock source signalling; RFC 4570 — source filters; RFC 3551, RFC 3190 — L16 and L24; RFC 3605 — the RTCP attribute.
-- AES67-2023 §8 — session description.
+- AES67-2023 Clause 8 — session description.
 - [`sap`](SAP_MODULE.md) — announcing and discovering these sessions.

@@ -56,7 +56,7 @@ void write_line(std::string& text, std::string_view const prefix, std::string_vi
 void write_connection(std::string& text, Connection const& connection)
 {
     text += "c=IN IP4 " + statusbar::ip::to_string(connection.address);
-    // RFC 8866 §5.7: a TTL only for, and always for, a multicast address
+    // RFC 8866 Section 5.7: a TTL only for, and always for, a multicast address
     if (connection.address.is_multicast()) {
         auto const ttl = connection.ttl != 0 ? connection.ttl : Connection::DEFAULT_MULTICAST_TTL;
         text += std::format("/{}", ttl);

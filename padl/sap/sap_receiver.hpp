@@ -29,7 +29,7 @@
 namespace padl::sap {
 
 /// A session's identity: its SDP origin's username, session id and address
-/// (RFC 8866 §5.2), which stay the same across versions.
+/// (RFC 8866 Section 5.2), which stay the same across versions.
 struct SessionKey
 {
     std::string username;
@@ -140,7 +140,7 @@ class SapDirectory
 class SapReceiver final : public statusbar::net::Pollable
 {
   public:
-    /// The SAP groups (RFC 2974 §3): administratively scoped (AES67's,
+    /// The SAP groups (RFC 2974 Section 3): administratively scoped (AES67's,
     /// first), organisation-local scope, and global scope.
     static constexpr std::array<statusbar::ip::IPv4Address, 3> GROUPS{{
         SapAnnouncer::GROUP,

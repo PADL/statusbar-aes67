@@ -9,7 +9,7 @@ PTP time fitted from its source's (PTP time, sample count) pairs.
 
 ## Overview
 
-AES67 streams use the PTP clock itself as the media clock (RFC 7273 §5.2): sample index
+AES67 streams use the PTP clock itself as the media clock (RFC 7273 Section 5.2): sample index
 `n` is presented at PTP time `n / fs`. A sample's index is therefore a pure function of
 PTP time, and every device on the same grandmaster agrees on it without exchanging
 anything. An RTP timestamp is the low 32 bits of the index plus the stream's direct
@@ -193,10 +193,10 @@ auto domain_index(std::int64_t ptp_now_ns, PtpMediaClock clock) -> std::uint64_t
 
 ## Further reading
 
-- RFC 7273 §5.2 — the `direct` media clock.
+- RFC 7273 Section 5.2 — the `direct` media clock.
 - AES67-2023 — media clock and RTP timestamp requirements.
-- RFC 7273 §5 — `mediaclk:sender`, a media clock the sender asserts.
-- RFC 3550 §6.4.1 — sender reports pairing an RTP timestamp with a wall-clock time.
-- VSF TR-10-1 §8.10.1 — IPMX sender reports, one every 10 ms.
-- Milan v1.2 §7.3 — the CRF stream.
+- RFC 7273 Section 5 — `mediaclk:sender`, a media clock the sender asserts.
+- RFC 3550 Section 6.4.1 — sender reports pairing an RTP timestamp with a wall-clock time.
+- VSF TR-10-1 Section 8.10.1 — IPMX sender reports, one every 10 ms.
+- Milan v1.2 Section 7.3 — the CRF stream.
 - [`aes67`](AES67_MODULE.md) — receivers and senders that address frames by this index.

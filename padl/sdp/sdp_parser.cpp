@@ -578,7 +578,7 @@ class Parser
     }
 
     /// Close the current audio media: kept with a supported rtpmap, dropped if it offers only other
-    /// encodings or only static payload types (RFC 3551 §6), an error for a dynamic one without rtpmap.
+    /// encodings or only static payload types (RFC 3551 Section 6), an error for a dynamic one without rtpmap.
     auto end_media() -> statusbar::Status
     {
         auto* const closing = std::exchange(media_, nullptr);
@@ -586,7 +586,7 @@ class Parser
             return statusbar::success();
         }
         if (!formats_.empty()) {
-            // RFC 8866 §5.14: the m= line's order is the order of preference
+            // RFC 8866 Section 5.14: the m= line's order is the order of preference
             auto const rank = [this](PayloadFormat const& f) {
                 return std::ranges::find(offered_, f.payload_type) - offered_.begin();
             };

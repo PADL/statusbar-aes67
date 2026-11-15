@@ -3,7 +3,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RTP - the RFC 3550 §5.1 fixed header, as AES67 streams carry it, parsed from and written to
+/// RTP - the RFC 3550 Section 5.1 fixed header, as AES67 streams carry it, parsed from and written to
 /// a UDP payload, so a socket and a raw path (AF_XDP) share the code.
 
 #include "statusbar/buffer/buffer.hpp"

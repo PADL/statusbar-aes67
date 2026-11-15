@@ -3,7 +3,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// The PTP-locked media clock of RFC 7273 §5.2 `mediaclk:direct`: sample index n is presented at
+/// The PTP-locked media clock of RFC 7273 Section 5.2 `mediaclk:direct`: sample index n is presented at
 /// PTP time n / fs, so every device on one grandmaster agrees on it. Exact integer arithmetic; the
 /// 48 kHz family only (fs a multiple of 24 kHz).
 
@@ -65,7 +65,7 @@ class PtpMediaClock
     }
 
     /// The RTP timestamp of sample n in a stream whose media clock is
-    /// `direct=<offset>` (RFC 7273 §5.2): the low 32 bits of n + offset.
+    /// `direct=<offset>` (RFC 7273 Section 5.2): the low 32 bits of n + offset.
     [[nodiscard]] static constexpr auto rtp_timestamp(uint64_t index, uint32_t offset) noexcept -> uint32_t
     {
         return static_cast<uint32_t>(index) + offset;

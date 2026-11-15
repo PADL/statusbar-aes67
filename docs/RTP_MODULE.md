@@ -4,8 +4,8 @@
 
 RFC 3550 RTP for AES67: the fixed header as a wire struct, parsing and writing a packet
 in a UDP payload, sequence validation and loss accounting, and RTP inside a raw
-Ethernet/IPv4/UDP frame for AF_XDP paths. RTCP (RFC 3550 §6): SR, RR, SDES and BYE,
-compound packets, the IPMX Info Block (VSF TR-10-1 §8.7, TR-10-3 §11), PTP truncated
+Ethernet/IPv4/UDP frame for AF_XDP paths. RTCP (RFC 3550 Section 6): SR, RR, SDES and BYE,
+compound packets, the IPMX Info Block (VSF TR-10-1 Section 8.7, TR-10-3 Section 11), PTP truncated
 time and the report interval.
 
 ## Overview
@@ -32,13 +32,13 @@ nanoseconds and injects the random generator.
 - `RtpSequence` — one source's sequence state (RFC 3550 Appendix A.1) and its counts (Appendix A.3: `expected()`, `received()`).
 - `FrameAddressing` — the MACs, optional VLAN tag, IPv4 addresses, UDP ports, TTL and DSCP around a packet in a frame.
 - `RtpFrame` — a parsed frame: its addressing, its UDP payload and the RTP packet; `UdpFrame` — the same without the RTP parse (`parse_udp_frame()`, for RTCP).
-- `multicast_mac()` — an IPv4 group's Ethernet address (RFC 1112 §6.4); `rtp_frame_overhead()` — 42 or 46 bytes.
-- `RtcpHeader`, `SenderInfo`, `ReportBlock` — the RFC 3550 §6.4.1 wire structs.
+- `multicast_mac()` — an IPv4 group's Ethernet address (RFC 1112 Section 6.4); `rtp_frame_overhead()` — 42 or 46 bytes.
+- `RtcpHeader`, `SenderInfo`, `ReportBlock` — the RFC 3550 Section 6.4.1 wire structs.
 - `RtcpCompound` — what `parse_rtcp()` found: the first SR, RR, SDES chunk and BYE, as views (`RtcpSenderReport`, `RtcpReceiverReport`, `RtcpSdes`, `RtcpBye`).
 - `RtcpWriter` — sticky-error, chained writer of SR, RR, SDES (CNAME, NAME) and BYE.
 - `IpmxInfoBlock`, `IpmxPcmMediaInfo` — the IPMX Info Block and its PCM Media Info Block.
 - `PtpTruncated` — an SR time field as IPMX fills it: PTP seconds mod 2³² and nanoseconds.
-- `RtcpIntervalParams` — the inputs of the §6.3.1 interval.
+- `RtcpIntervalParams` — the inputs of the Section 6.3.1 interval.
 
 ## Quick example
 
@@ -101,21 +101,21 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
   session forms its loss figures from the two.
 - `parse_rtcp()` applies RFC 3550 Appendix A.2: version 2 throughout, an SR or RR first
   and unpadded, padding only on the last sub-packet, lengths summing to the datagram. A bare SR (what
-  IPMX sends) passes; APP, XR and other types are skipped, as TR-10-1 §8.7 asks IPMX
+  IPMX sends) passes; APP, XR and other types are skipped, as TR-10-1 Section 8.7 asks IPMX
   receivers to tolerate. Only the first chunk of an SDES packet is read.
 - The SR's 64-bit time field is whatever the sender wrote. The library writes only the
-  PTP truncated form (TR-10-1 §8.7 Figure 2: seconds, then nanoseconds), and a reader
+  PTP truncated form (TR-10-1 Section 8.7 Figure 2: seconds, then nanoseconds), and a reader
   reads it as such only when the SR carries an IPMX Info Block (tag 0x5831), never by
   looking at the values. The field is the sender's Internal Clock in that format: PTP time
-  only when the sender's `ts-refclk` names a PTP grandmaster, not with `localmac` (§10.4).
+  only when the sender's `ts-refclk` names a PTP grandmaster, not with `localmac` (Section 10.4).
   There is no NTP form and no UTC offset.
 - An RR's LSR echoes the middle 32 bits of the SR's field; for a PTP-form SR its low
   half is nanoseconds ÷ 65536, not 1/65536 s. A sender therefore keeps the PTP time of
   each SR it sent, finds it by the echoed LSR, and computes the round trip with
   `rtt_ns()` (arrival − sent − DLSR); DLSR's 15.26 µs unit is the resolution.
-- `rtcp_interval()` is §6.3.1 without reconsideration or member tables (§6.3.3–6.3.7):
+- `rtcp_interval()` is Section 6.3.1 without reconsideration or member tables (Section 6.3.3–6.3.7):
   the caller states the members and senders it assumes. The first report uses half the
-  minimum (§6.2); every interval is randomised in [0.5, 1.5) and divided by e − 3/2.
+  minimum (Section 6.2); every interval is randomised in [0.5, 1.5) and divided by e − 3/2.
 - `serialize_ipmx_info_block()` NUL-pads `ts-refclk` to 64 bytes and `mediaclk` to 12; a
   string that fills its field has no NUL. The channel-order string is padded to 32 bits.
 - Fuzzing: `rtp_parse_fuzzer` (`parse_rtp()`), `rtp_rtcp_parse_fuzzer` (`parse_rtcp()` and the IPMX
@@ -124,7 +124,7 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 
 ## Further reading
 
-- RFC 3550 §5.1, §6 (§6.1 compound packets, §6.3.1 interval, §6.4 SR/RR, §6.5 SDES, §6.6 BYE), Appendix A.1–A.3, A.7.
-- VSF TR-10-1:2024 §8.7 (IPMX SR, Info Block, PTP truncated time); VSF TR-10-3:2024 §11–12 (PCM Media Info Block, the example SR the tests use).
-- RFC 1112 §6.4 — IPv4 multicast to Ethernet address mapping.
+- RFC 3550 Section 5.1, Section 6 (Section 6.1 compound packets, Section 6.3.1 interval, Section 6.4 SR/RR, Section 6.5 SDES, Section 6.6 BYE), Appendix A.1–A.3, A.7.
+- VSF TR-10-1:2024 Section 8.7 (IPMX SR, Info Block, PTP truncated time); VSF TR-10-3:2024 Section 11–12 (PCM Media Info Block, the example SR the tests use).
+- RFC 1112 Section 6.4 — IPv4 multicast to Ethernet address mapping.
 - [`aes67`](AES67_MODULE.md) — the transports built on these functions.

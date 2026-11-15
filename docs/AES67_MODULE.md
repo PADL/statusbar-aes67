@@ -37,7 +37,7 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
 - `RtcpSession` — `open_sender()`, `open_receiver()`, `on_ready(now)`, `tick(now)`, `close()`, `stats()`, `set_timebase()`; `RtcpSessionOptions` (CNAME, receiver DSCP, a sender's `SenderReports`, the RFC 3550 cadence, `on_sender_report`), `RtcpStats`.
 - `SenderReportTime`, `sender_clock_offset()` — a received SR's (RTP timestamp, PTP time) pair, and the RTP offset it gives a sender-clocked stream in a clock domain.
-- `RtcpCadence` — when a receiver's next report goes; `Rfc3550Interval` implements RFC 3550 §6.3.1.
+- `RtcpCadence` — when a receiver's next report goes; `Rfc3550Interval` implements RFC 3550 Section 6.3.1.
 - `SendState`, `ReceiveState` — what a sender and a receiver publish for their session.
 - `SrClass`, `SrpTSpec`, `srp_frames_per_packet()`, `srp_tspec()`, `multicast_mac_aliases()` — a stream
   under SRP (AES67-2023 Annex C.1.1): the framing of its class's interval, its MSRP TSpec, and
@@ -170,7 +170,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `session()` gives origin the transport's interface address, the group with its TTL, the
   encoding, channels, rate and ptime, `ts-refclk:ptp=IEEE1588-2008:<EUI-64>:<domain>` and
   `clock-domain:PTPv2 <domain>` from `set_grandmaster()` (none set: `ts-refclk:localmac=` with
-  `Transport::local_mac()`, the sender's own clock, VSF TR-10-1 §10.4; `references()`), `mediaclk:direct=0`, a source
+  `Transport::local_mac()`, the sender's own clock, VSF TR-10-1 Section 10.4; `references()`), `mediaclk:direct=0`, a source
   filter naming this host for a multicast group, and `a=recvonly`, as AES67's examples and
   Dante write it. A `Grandmaster` whose `version` is `ieee802_1as` is written
   `ts-refclk:ptp=IEEE802.1AS-2011:<EUI-64>` with no domain and no `clock-domain`
@@ -195,13 +195,13 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   while it is on, bumps the session version.
 - While an ipmx `RtcpSession` holds the sender (a `Sender::ReportHold` from `hold_reports()`, which the session owns
   while open; the holds are counted, so one session closing lifts no other's), `session()` declares IPMX in
-  the fmtp (`a=fmtp:<pt> IPMX`, after any channel order; VSF TR-10-1 §10.1): its SRs then follow §8.10.1. The
+  the fmtp (`a=fmtp:<pt> IPMX`, after any channel order; VSF TR-10-1 Section 10.1): its SRs then follow Section 8.10.1. The
   declaration appearing or going bumps the session version. Without a session the SDP is AES67's alone.
 - A clock domain other than PTP: the caller ticks the sender with the domain's index
   (`PtpMediaClock::index_at(timebase.to_domain(ptp_now))`, `mediaclock::Timebase`), which
   advances 5 to 7 frames a tick at 48 kHz for a domain within 100s of ppm; `tick()` needs no
   change and sends every packet once, 0, 1 or 2 a tick. `set_sender_clock(true)` makes the
-  SDP say `mediaclk:sender` (RFC 7273 §5) instead of `direct=0`, which would claim the RTP
+  SDP say `mediaclk:sender` (RFC 7273 Section 5) instead of `direct=0`, which would claim the RTP
   timestamps are PTP time; `ts-refclk` and `clock-domain` still name the grandmaster, the
   reference the sender reports are in. Such a stream needs its `RtcpSession` with
   `set_timebase()`: the SR is the only statement of its clock.
@@ -271,8 +271,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ### RTCP
 
-- Scope: RFC 3550 §6 as a dedicated device needs it. A sender's session sends, on VSF TR-10-1
-  §8.10.1's schedule, one compound packet per report: an SR, then SDES with its CNAME (§6.1 wants the
+- Scope: RFC 3550 Section 6 as a dedicated device needs it. A sender's session sends, on VSF TR-10-1
+  Section 8.10.1's schedule, one compound packet per report: an SR, then SDES with its CNAME (Section 6.1 wants the
   CNAME in every compound packet). A receiver's sends an RR with one report block about
   the stream, then SDES. Both send an empty RR, SDES and BYE on `close()` or destruction; a sender's
   session also sends one, at its next `tick()`, for the SSRC it last saw sending once that is gone
@@ -280,12 +280,12 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   a run has sent, so a clock step that moves `next_index` back onto `first_index` is not a stop), and then none on
   `close()` unless it sent again. The BYE is built on the reactor, never the real-time thread.
   Out of scope: an RFC 3550 wall-clock NTP mode, APP, SDES items past CNAME, RTCP-XR,
-  timer reconsideration and member tables (§6.3.3–6.3.7), and RTP/RTCP multiplexing (RFC
+  timer reconsideration and member tables (Section 6.3.3–6.3.7), and RTP/RTCP multiplexing (RFC
   5761).
-- A sender's schedule is `RtcpSessionOptions::reports`: `rfc3550` (the default) sends an SR at RFC 3550 §6.3.1's
+- A sender's schedule is `RtcpSessionOptions::reports`: `rfc3550` (the default) sends an SR at RFC 3550 Section 6.3.1's
   randomised interval (Tmin `SENDER_INTERVAL_MS`, 1 s), naming the next packet to send, with no first-packet hold and
   no IPMX declaration; `ipmx` follows TR-10-1 below. Both carry the Info Block, which says how the time field reads.
-- The `ipmx` schedule (VSF TR-10-1 §8.10.1): one SR for a run's first packet, then one every N = int(10 ms / ptime)
+- The `ipmx` schedule (VSF TR-10-1 Section 8.10.1): one SR for a run's first packet, then one every N = int(10 ms / ptime)
   packets (`REPORT_SPACING_US`; 10 at 1 ms, 80 at 125 µs), each naming its packet's RTP timestamp and sent before
   that packet and after the one N before. The sender places a run's first packet `FIRST_REPORT_LEAD_US` (20 ms)
   ahead, publishes it (`SendState::first_index`), and sends it when due, whether or not its SR went: audio never
@@ -295,10 +295,10 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   timer. One whose packet left first (the caller late) is passed over; a clock step back restarts the grid. A run
   paused before its first packet sent none and gets no BYE. About 100 SRs a second of about
   180 octets: 0.15 Mbit/s against a 9 Mbit/s 8-channel L24 stream.
-- One SR form: the time field is the sender's clock in the PTP truncated format (TR-10-1 §8.7: seconds mod 2³²,
+- One SR form: the time field is the sender's clock in the PTP truncated format (TR-10-1 Section 8.7: seconds mod 2³²,
   then nanoseconds) and the SR always carries the IPMX Info Block with the PCM Media Info Block. The field is PTP
-  time when `ts-refclk` names a PTP grandmaster; under `localmac` it is the sender's free-running clock (§7.1,
-  §10.4). AES67-2023 §6.3 asks only for RFC 3550 §6 and prescribes no derivation of the field, and no AES67
+  time when `ts-refclk` names a PTP grandmaster; under `localmac` it is the sender's free-running clock (Section 7.1,
+  Section 10.4). AES67-2023 Clause 6.3 asks only for RFC 3550 Section 6 and prescribes no derivation of the field, and no AES67
   receiver synchronises from it. The pair is exact: the field is the time the SR's packet's first sample is
   sampled (`time_for(index)`), the RTP timestamp that sample's (`mediaclk:direct=0`).
 - The packet's time is the sender's own: with no timebase it is written unconverted, so a sender ticked with
@@ -324,14 +324,14 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   send a similar stream with. Table 1's defaults are AF41 (34) for media and EF (46) for
   clock; `DSCP_MEDIA` is 34, and a caller on a network with another policy sets its own
   (Dante marks media EF, 46).
-- A receiver's interval keeps RFC 3550 §6.2's 5 s fixed minimum; an `rfc3550` sender's a chosen 1 s. `Rfc3550Interval` applies §6.3.1 with two
+- A receiver's interval keeps RFC 3550 Section 6.2's 5 s fixed minimum; an `rfc3550` sender's a chosen 1 s. `Rfc3550Interval` applies Section 6.3.1 with two
   members and one sender over 5 % of the stream's bandwidth (the share never binds at AES67 rates), halves the
   first interval, and randomises each. Receivers reporting are not counted into it.
 - Round trip: an RR echoes the middle bits of the SR's field, which for the PTP form are
   not RFC 3550's 1/65536 s units, so the sender keeps the PTP time of its last
   `SR_HISTORY` SRs (128, 1.28 s of them) and finds the one an RR's LSR names; the RTT is arrival − that time −
   DLSR, resolved to DLSR's 15.26 µs.
-- Jitter (RFC 3550 §6.4.1, Appendix A.8) is computed in `Receiver::accept()` from the
+- Jitter (RFC 3550 Section 6.4.1, Appendix A.8) is computed in `Receiver::accept()` from the
   drain's index as the arrival time, so it is quantised to one tick (125 µs, 6 samples at
   48 kHz), and only the first packet of each drain counts: packets drained together share
   an arrival time, and their timestamp gaps would read as jitter. A diagnostic, not a
@@ -344,7 +344,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   neither it reads nothing, and after the first packet only the stream's SSRC counts. Its
   SRs drive a sender-clocked stream's offset, so no other host may send them. A sender's
   "remote" is whichever receiver reported on its stream last.
-- The CNAME is the caller's: RFC 3550 §6.5.1's `user@host` shape, as
+- The CNAME is the caller's: RFC 3550 Section 6.5.1's `user@host` shape, as
   `<identity>@<address>`, at most 255 bytes.
 - `Receiver::rtcp_options()` reads the endpoint from the SDP: `a=rtcp:` when given,
   else the media's address at port + 1. An `a=rtcp:` unicast address is where reports go
@@ -549,9 +549,9 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 
 ## Further reading
 
-- AES67-2023 — interoperability requirements for audio over IP (§6.2 DSCP, §6.3 transport and RTCP).
+- AES67-2023 — interoperability requirements for audio over IP (Clause 6.2 DSCP, Clause 6.3 transport and RTCP).
 - RFC 3550 — RTP and RTCP; RFC 3605 — the RTCP attribute; RFC 7273 — clock source signalling; RFC 4570 — source filters.
-- VSF TR-10-1:2024 §8.7, §8.10.1, §10.1 and §10.4, and TR-10-3:2024 §11 — the IPMX SR, its schedule, the SDP
+- VSF TR-10-1:2024 Section 8.7, Section 8.10.1, Section 10.1 and Section 10.4, and TR-10-3:2024 Section 11 — the IPMX SR, its schedule, the SDP
   declaration and `localmac`, and the Info Block.
 - [`mediaclock`](MEDIACLOCK_MODULE.md), [`rtp`](RTP_MODULE.md), [`sdp`](SDP_MODULE.md), [`sap`](SAP_MODULE.md).
 - statusbar-core `net` module — `XdpContext`, `CompiledRule`, sockets.
