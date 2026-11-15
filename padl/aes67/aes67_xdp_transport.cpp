@@ -322,19 +322,6 @@ auto XdpTransport::tagged_groups_rule(uint16_t const vid) noexcept -> statusbar:
     return rule;
 }
 
-namespace {
-
-/// `interface`'s RSS table back to `before` when steering to `queue` changed it (the socket did not open).
-void put_back_rss(
-    std::string_view const interface, statusbar::StatusValue<statusbar::net::RssIndirection> const& before, uint32_t const queue)
-{
-    if (before && !statusbar::net::rss_steered_to(*before, queue)) {
-        (void)statusbar::net::set_rss_indirection(interface, *before);  // best effort: the open has failed already
-    }
-}
-
-}  // namespace
-
 auto XdpTransport::steer_rss(std::string_view const interface, uint32_t const queue) -> statusbar::Status
 {
     return statusbar::net::set_rss_indirection_all(interface, queue).transform([](statusbar::net::RssIndirection const&) {});
@@ -362,17 +349,17 @@ auto XdpTransport::unopened() -> std::unique_ptr<XdpTransport>
 
 auto XdpTransport::open_steered(Options const& options) -> statusbar::Status
 {
-    // Steered first, so a refusal attaches nothing (on igb an attach resets the adapter). The table is written in
-    // one ioctl: a refused steer leaves it as it was, and a socket that then fails to open puts it back.
-    auto const before = statusbar::net::set_rss_indirection_all(interface_.name, queue_);
-    rss_status_ = before.transform([](statusbar::net::RssIndirection const&) {});
+    // Steered first, so a refusal attaches nothing (on igb an attach resets the adapter). A socket that then fails
+    // to open puts the table back as the guard goes; an open socket keeps the NIC steered for its life.
+    auto steering = statusbar::net::RssSteering::steer(rss_control_, interface_.name, queue_);
+    rss_status_ = steering.transform([](statusbar::net::RssSteering const&) {});
     if (auto const verdict = rss_verdict(rss_status_); !verdict) {
         return verdict;
     }
     auto opened = context_.open(
         config_for(interface_.name, with_launch_time(options, [this] { return probe_launch_time(interface_.index); })));
-    if (!opened) {
-        put_back_rss(interface_.name, before, queue_);
+    if (opened && steering) {
+        steering->release();
     }
     return opened;
 }

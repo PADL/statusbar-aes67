@@ -513,7 +513,8 @@ class XdpTransport final : public Transport
 
     InterfaceInfo interface_;
     statusbar::net::XdpContext context_;
-    uint32_t queue_{QUEUE};  ///< the queue open() bound
+    uint32_t queue_{QUEUE};                   ///< the queue open() bound
+    statusbar::net::RssEthtool rss_control_;  ///< the NIC open() steers through (net::RssSteering's control)
     statusbar::Status rss_status_;
     std::error_code launch_time_error_;
 
