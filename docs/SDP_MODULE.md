@@ -53,7 +53,8 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 
 ## Headers
 
-- `padl/sdp/sdp.hpp` — the session types, `parse()`, `parse_origin_line()`, `to_string()`, `ts_refclk_value()`, `media_clock_value()`.
+- `padl/sdp/sdp.hpp` — the module header: the two below.
+- `padl/sdp/sdp_session.hpp` — the session types, `parse()`, `parse_origin_line()`, `to_string()`, `ts_refclk_value()`, `media_clock_value()`.
 - `padl/sdp/sdp_error.hpp` — `SdpError`, `sdp_error_category()`, `make_error_code()`.
 
 ## Dependencies

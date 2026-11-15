@@ -7,7 +7,7 @@
 /// 239.255.255.255:9875 every 30 s with a deletion on withdraw. A net::Pollable that only sends
 /// (fd() is -1, the work is in tick()); announce() and withdraw() run on the reactor thread.
 
-#include "padl/sdp/sdp.hpp"
+#include "padl/sdp/sdp_session.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"

@@ -8,7 +8,7 @@
 /// it, for receivers that subscribe to a session by its name (s=).
 
 #include "padl/sap/sap.hpp"
-#include "padl/sdp/sdp.hpp"
+#include "padl/sdp/sdp_session.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_socket.hpp"

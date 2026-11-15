@@ -6,7 +6,7 @@
 
 #include "padl/sap/sap.hpp"
 #include "padl/sap/sap_receiver.hpp"
-#include "padl/sdp/sdp.hpp"
+#include "padl/sdp/sdp_session.hpp"
 
 #include <cstddef>
 #include <cstdint>

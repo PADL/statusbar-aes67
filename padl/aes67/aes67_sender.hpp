@@ -9,7 +9,7 @@
 
 #include "padl/aes67/aes67_stream.hpp"
 #include "padl/aes67/aes67_transport.hpp"
-#include "padl/sdp/sdp.hpp"
+#include "padl/sdp/sdp_session.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/status/status.hpp"
 

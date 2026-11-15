@@ -5,7 +5,7 @@
 /// reference clocks in force (RFC 7273 Section 4.8) compares consistently, and a media's channel order
 /// (ST 2110-30 Section 6.2.2) and maxptime are well formed and survive to_string() and parse() again.
 
-#include "padl/sdp/sdp.hpp"
+#include "padl/sdp/sdp_session.hpp"
 
 #include <cstddef>
 #include <cstdint>
