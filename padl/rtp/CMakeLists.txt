@@ -18,11 +18,12 @@ statusbar_add_module(
   statusbar::status
   TESTS
   rtp_frame_test.cpp
+  rtp_header_test.cpp
   rtp_rtcp_interval_test.cpp
   rtp_rtcp_ipmx_test.cpp
   rtp_rtcp_packet_test.cpp
   rtp_rtcp_time_test.cpp
-  rtp_test.cpp)
+  rtp_sequence_test.cpp)
 
 # Fuzz harnesses (built only when -DENABLE_FUZZING=ON).
 add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtp_frame_parse_fuzzer.cpp)

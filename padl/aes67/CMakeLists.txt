@@ -22,7 +22,10 @@ statusbar_add_module(
   statusbar::sdp
   statusbar::status
   TESTS
+  aes67_receiver_test.cpp
   aes67_rtcp_test.cpp
-  aes67_test.cpp
+  aes67_sender_test.cpp
+  aes67_stream_test.cpp
+  aes67_udp_test.cpp
   aes67_veth_test.cpp
   aes67_xdp_test.cpp)
