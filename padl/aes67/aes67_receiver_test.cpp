@@ -36,6 +36,18 @@ using namespace statusbar;
 using namespace padl::aes67;
 using statusbar::ip::IPv4Address;
 
+namespace {
+
+/// Every byte of `block` is the pattern for its index.
+inline void expect_pattern(Received const& block)
+{
+    for (size_t i = 0; i < block.bytes.size(); ++i) {
+        EXPECT_EQ(block.bytes[i], pattern(block.first_index + (i / 6), i % 6));
+    }
+}
+
+}  // namespace
+
 TEST(aes67_receiver, a_receiver_following_the_senders_clock_refuses_a_direct_stream)
 {
     LoopTransport transport;

@@ -11,7 +11,6 @@
 #include "padl/aes67/aes67_transport.hpp"
 #include "padl/rtp/rtp_header.hpp"
 #include "statusbar/buffer/span_utils.hpp"
-#include "statusbar/test/test.hpp"
 
 #include <unistd.h>
 
@@ -25,6 +24,7 @@
 
 namespace padl::aes67 {
 
+/// Frames per packet: a 1 ms ptime at 48 kHz.
 inline constexpr uint32_t FPP = 48;
 
 /// A loopback address of this process's own, 127.(1-64).x.y from the pid: the suite runs in
@@ -45,10 +45,13 @@ inline auto own_group() -> statusbar::ip::IPv4Address
         239, static_cast<uint8_t>(64 + ((pid >> 16U) % 64)), static_cast<uint8_t>(pid >> 8U), static_cast<uint8_t>(pid)};
 }
 
+/// A PTP grandmaster in domain 0, for senders to name.
 inline Grandmaster const GRANDMASTER{.identity = *statusbar::ieee::eui64_from_string("00-1D-C1-FF-FE-12-34-56"), .domain = 0};
 
+/// Two channels of L24 at 48 kHz, FPP frames per packet.
 inline constexpr StreamFormat STEREO_L24{
     .encoding = sdp::Encoding::l24, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP};
+/// Two channels of L32 at 48 kHz, FPP frames per packet.
 inline constexpr StreamFormat STEREO_L32{
     .encoding = sdp::Encoding::l32, .channels = 2, .sample_rate = 48000, .frames_per_packet = FPP};
 
@@ -62,10 +65,12 @@ inline auto pattern(uint64_t const index, size_t const b) -> uint8_t
 class PatternSource
 {
   public:
+    /// A source of `frame_bytes` octets a frame.
     explicit PatternSource(uint32_t const frame_bytes)
         : frame_bytes_{frame_bytes}
     {}
 
+    /// A FrameProvider that pull()s from this source, which must outlive it.
     auto provider() -> FrameProvider
     {
         return [this](uint64_t const first_index, uint32_t const frames, std::span<uint8_t> const out) {
@@ -73,6 +78,7 @@ class PatternSource
         };
     }
 
+    /// `frames` frames of the pattern from `first_index` into `out`; false for refuse_index.
     auto pull(uint64_t const first_index, uint32_t const frames, std::span<uint8_t> const out) noexcept -> bool
     {
         ++pulls;
@@ -87,50 +93,57 @@ class PatternSource
         return true;
     }
 
-    uint64_t refuse_index{UINT64_MAX};
-    size_t pulls{0};
+    uint64_t refuse_index{UINT64_MAX};  ///< the first index pull() refuses
+    size_t pulls{0};                    ///< pull() calls
 
   private:
     uint32_t frame_bytes_;
 };
 
+/// A block a receiver handed on: its first index, its frame count and a copy of its bytes.
 struct Received
 {
-    uint64_t first_index;
-    uint32_t frames;
-    std::vector<uint8_t> bytes;
+    uint64_t first_index;        ///< the index of its first frame
+    uint32_t frames;             ///< its frame count
+    std::vector<uint8_t> bytes;  ///< its payload
 };
 
+/// Records every block a receiver hands on.
 class RecordingSink
 {
   public:
+    /// A FrameHandler appending to blocks; this sink must outlive it.
     auto handler() -> FrameHandler
     {
         return [this](uint64_t const first_index, uint32_t const frames, std::span<uint8_t const> const bytes) {
             blocks.push_back({first_index, frames, {bytes.begin(), bytes.end()}});
         };
     }
-    std::vector<Received> blocks;
+    std::vector<Received> blocks;  ///< every block, in order
 };
 
 /// A transport in memory: what senders send, receivers receive.
 class LoopTransport final : public Transport
 {
   public:
+    /// A packet a send port sent, for the receive ports of its destination.
     struct Packet
     {
-        Endpoint destination;
-        std::vector<uint8_t> bytes;
+        Endpoint destination;                            ///< where it was sent
+        std::vector<uint8_t> bytes;                      ///< the whole RTP packet
         std::optional<statusbar::ieee::VlanTag> vlan{};  ///< the port's tag when it was sent
     };
 
+    /// A receive port: the queued packets for its destination, from `source`.
     class Rx final : public ReceivePort
     {
       public:
+        /// A port on `t` for `d`; `t` must outlive it.
         Rx(LoopTransport& t, Endpoint const& d)
             : transport{t}
             , destination{d}
         {}
+        /// The queued packets for its destination, others dropped; each held until the next call.
         auto receive(std::span<Datagram> const out) noexcept -> size_t override
         {
             ++transport.receives;
@@ -147,19 +160,23 @@ class LoopTransport final : public Transport
             }
             return n;
         }
+        /// The transport's port_error.
         [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.port_error; }
-        LoopTransport& transport;
-        Endpoint destination;
-        std::deque<std::vector<uint8_t>> held;
+        LoopTransport& transport;               ///< where its packets come from
+        Endpoint destination;                   ///< what it receives
+        std::deque<std::vector<uint8_t>> held;  ///< the datagrams the last receive() returned
     };
 
+    /// A send port: every packet queued for its destination.
     class Tx final : public SendPort
     {
       public:
+        /// A port on `t` to `d`; `t` must outlive it.
         Tx(LoopTransport& t, Endpoint const& d)
             : transport{t}
             , destination{d}
         {}
+        /// The packet queued, or false (render not called) when the transport refuses.
         auto send_rendered(rtp::RtpHeader const& header, size_t const payload_length, PayloadRenderer const& render) noexcept
             -> bool override
         {
@@ -174,6 +191,7 @@ class LoopTransport final : public Transport
             transport.queue.push_back({destination, std::move(bytes), transport.vlan});
             return true;
         }
+        /// send_rendered(), its departure recorded in departures.
         auto send_rendered_at(
             rtp::RtpHeader const& header,
             size_t const payload_length,
@@ -183,7 +201,9 @@ class LoopTransport final : public Transport
             transport.departures.push_back(departure_ns);
             return send_rendered(header, payload_length, render);
         }
+        /// Nothing batched: 0.
         auto flush() noexcept -> size_t override { return 0; }
+        /// The tag recorded in vlan; refused, as a socket refuses it, under refuse_tag.
         auto set_vlan(std::optional<statusbar::ieee::VlanTag> const& vlan) noexcept -> statusbar::Status override
         {
             if (transport.refuse_tag && vlan) {
@@ -192,33 +212,40 @@ class LoopTransport final : public Transport
             transport.vlan = vlan;
             return statusbar::success();
         }
-        LoopTransport& transport;
-        Endpoint destination;
+        LoopTransport& transport;  ///< where its packets go
+        Endpoint destination;      ///< where it sends
     };
 
+    /// The source address its packets arrive from.
     [[nodiscard]] auto local_address() const noexcept -> statusbar::ip::IPv4Address override { return source.address; }
+    /// An Rx for `destination`, joined for any source.
     auto open_receive(Endpoint const& destination) -> statusbar::StatusValue<std::unique_ptr<ReceivePort>> override
     {
         joined_source.reset();
         return std::make_unique<Rx>(*this, destination);
     }
+    /// An Rx for `destination`, joined for `from` alone (joined_source).
     auto open_receive_from(Endpoint const& destination, statusbar::ip::IPv4Address const& from)
         -> statusbar::StatusValue<std::unique_ptr<ReceivePort>> override
     {
         joined_source = from;
         return std::make_unique<Rx>(*this, destination);
     }
+    /// A Tx to the options' destination, with their tag.
     auto open_send(SendOptions const& options) -> statusbar::StatusValue<std::unique_ptr<SendPort>> override
     {
         vlan = options.vlan;
         return std::make_unique<Tx>(*this, options.destination);
     }
 
+    /// failing.
     [[nodiscard]] auto send_error() const noexcept -> std::error_code override { return failing; }
+    /// every_tick.
     [[nodiscard]] auto drain_every_tick() const noexcept -> bool override { return every_tick; }
 
-    std::deque<Packet> queue;
+    std::deque<Packet> queue;          ///< sent and not yet received
     std::vector<uint64_t> departures;  ///< each packet's departure as the sender gave it
+    /// The address and port every packet arrives from.
     Endpoint source{.address = statusbar::ip::IPv4Address{192, 168, 1, 10}, .port = 5004};
     bool refuse{false};                                       ///< every send_rendered() finds no TX buffer
     std::error_code failing;                                  ///< send_error()
@@ -268,13 +295,6 @@ inline auto rtp_packet(uint16_t const seq, uint32_t const timestamp, uint32_t co
     std::vector<uint8_t> bytes(rtp::RtpHeader::LENGTH + payload.size());
     (void)rtp::serialize_rtp(header, payload, bytes);
     return bytes;
-}
-
-inline void expect_pattern(Received const& block)
-{
-    for (size_t i = 0; i < block.bytes.size(); ++i) {
-        EXPECT_EQ(block.bytes[i], pattern(block.first_index + (i / 6), i % 6));
-    }
 }
 
 /// Whether every big-endian word of `bytes` is `word`.
