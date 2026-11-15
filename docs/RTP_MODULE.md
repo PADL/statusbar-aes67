@@ -72,7 +72,7 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 - `padl/rtp/rtp_rtcp_packet.hpp` — the RTCP wire structs, `parse_rtcp()`, `RtcpWriter`, `padded_to_word()`.
 - `padl/rtp/rtp_error.hpp` — `RtpError` (`padl.rtp`), what `RtcpWriter::status()` reports.
 - `padl/rtp/rtp_rtcp_ipmx.hpp` — `IpmxInfoBlock`, `serialize_ipmx_info_block()`, `parse_ipmx_info_block()`.
-- `padl/rtp/rtp_rtcp_time.hpp` — `ptp_truncated_from_ns()`, `ns_from_ptp_truncated()`, `lsr_of()`, `dlsr_from_ns()`, `rtt_ns()` (header-only, constexpr).
+- `padl/rtp/rtp_rtcp_time.hpp` — `ptp_truncated_from_ns()`, `ns_from_ptp_truncated()`, `lsr_for()`, `dlsr_from_ns()`, `rtt_ns()` (header-only, constexpr).
 - `padl/rtp/rtp_rtcp_interval.hpp` — `deterministic_rtcp_interval()`, `rtcp_interval()` (header-only, constexpr).
 
 ## Dependencies

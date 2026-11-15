@@ -50,7 +50,7 @@ static_assert(WINDOW <= 128);
 }
 
 /// The most frames a packet of `media` holds: its ptime's, or its maxptime's when longer (RFC 8866 Sections 6.4, 6.5).
-[[nodiscard]] auto max_frames_of(sdp::Media const& media) noexcept -> uint32_t
+[[nodiscard]] auto max_frames_for(sdp::Media const& media) noexcept -> uint32_t
 {
     uint64_t const us = std::max(media.packet_time_us, media.max_packet_time_us.value_or(0));
     return static_cast<uint32_t>(std::max<uint64_t>(((us * media.sample_rate) + 999'999) / 1'000'000, 1));
@@ -114,7 +114,7 @@ void Receiver::apply_media(
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
 {
     payload_type_ = media.payload_type;
-    max_frames_ = max_frames_of(media);
+    max_frames_ = max_frames_for(media);
     offset_.store(initial_offset(session.effective_media_clock(media)), std::memory_order_release);
     set_source_filter(session, media, connection, endpoint);
     set_rtcp(session, media, connection, endpoint);
@@ -181,7 +181,7 @@ auto Receiver::rtcp_options_for(
     }
     Endpoint const endpoint = media.rtcp
         ? Endpoint{.address = media.rtcp->address.value_or(received.address), .port = media.rtcp->port}
-        : rtcp_endpoint_of(received);
+        : rtcp_endpoint_for(received);
     RtcpOptions options{
         .destination = endpoint,
         .local = {},

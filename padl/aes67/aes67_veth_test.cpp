@@ -154,7 +154,7 @@ auto sent_and_received(XdpTransport& sending, SendPort& sender, XdpTransport& re
 }
 
 /// `interface`'s MAC address (SIOCGIFHWADDR, which a network namespace answers and sysfs may not).
-auto mac_of(std::string const& interface) -> std::optional<ieee::Eui48>
+auto mac_for(std::string const& interface) -> std::optional<ieee::Eui48>
 {
     ifreq request{};
     if (!net::ifreq_ioctl(interface, SIOCGIFHWADDR, request)) {
@@ -355,7 +355,7 @@ TEST(aes67_veth, an_offer_is_received_at_the_interface_from_its_sender_alone)
     }
     VethPair const pair{"a67oveth1", "a67oveth0", "10.238.0.2/24"};
     auto transport = pair.ok() ? UdpTransport::open("a67oveth1") : StatusValue<std::unique_ptr<UdpTransport>>{nullptr};
-    auto const mac = mac_of("a67oveth1");
+    auto const mac = mac_for("a67oveth1");
     if (!transport || !*transport || !mac) {
         std::println("  skipped: cannot create a veth pair");
         return;

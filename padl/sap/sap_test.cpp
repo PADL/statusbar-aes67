@@ -283,7 +283,7 @@ auto dante_session(std::string const& name, uint64_t const version, std::string 
 }
 
 /// The port a socket is bound to.
-auto port_of(int const fd) -> uint16_t
+auto port_for(int const fd) -> uint16_t
 {
     sockaddr_in address{};
     socklen_t length = sizeof(address);
@@ -585,7 +585,7 @@ TEST(sap_receiver, receives_announcements_and_deletions)
     EXPECT_TRUE(sap.fd() >= 0);
     std::vector<SapDirectory::Event> events;
     sap.set_handler([&events](SapDirectory::Event const& event) { events.push_back(event); });
-    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, port_of(sap.fd()));
+    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, port_for(sap.fd()));
     EXPECT_TRUE(announcer.has_value());
     if (!announcer) {
         return;
@@ -625,7 +625,7 @@ TEST(sap_receiver, a_forged_long_or_malformed_datagram_is_dropped_and_counted)
     net::FileDescriptor const sender{::socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0)};
     sockaddr_in to{};
     to.sin_family = AF_INET;
-    to.sin_port = htons(port_of(sap.fd()));
+    to.sin_port = htons(port_for(sap.fd()));
     to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     EXPECT_TRUE(::sendto(sender.get(), packet.data(), packet.size(), 0, net::sockaddr_cast(to), sizeof(to)) > 0);
     // A packet longer than MAX_PACKET from its origin (cut at MAX_PACKET + 1 on reading), and one that is not SAP.
@@ -668,7 +668,7 @@ TEST(sap_receiver, expires_on_tick)
     auto& sap = **receiver;
     std::vector<SapDirectory::Event> events;
     sap.set_handler([&events](SapDirectory::Event const& event) { events.push_back(event); });
-    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, port_of(sap.fd()));
+    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, port_for(sap.fd()));
     EXPECT_TRUE(announcer.has_value());
     if (!announcer) {
         return;

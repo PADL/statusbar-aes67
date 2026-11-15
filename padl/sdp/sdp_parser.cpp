@@ -759,7 +759,7 @@ class Parser
         if (!payload_type || !std::ranges::contains(offered_, *payload_type)) {
             return statusbar::success();
         }
-        merge(parameters_of(*payload_type), format_parameters(rest));
+        merge(parameters_for(*payload_type), format_parameters(rest));
         return statusbar::success();
     }
 
@@ -771,7 +771,7 @@ class Parser
     }
 
     /// The fmtp parameters gathered for `payload_type`, an empty entry when none yet.
-    auto parameters_of(uint8_t const payload_type) -> PayloadParameters&
+    auto parameters_for(uint8_t const payload_type) -> PayloadParameters&
     {
         auto const it = std::ranges::find(parameters_, payload_type, &PayloadParameters::payload_type);
         return it != parameters_.end() ? *it : parameters_.emplace_back(PayloadParameters{.payload_type = payload_type});

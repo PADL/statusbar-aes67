@@ -200,7 +200,7 @@ class RtcpSession
 
     RtcpSession(Role role, Sender* sender, Receiver const* receiver, std::unique_ptr<RtcpPort> port, RtcpSessionOptions options);
     /// The stream's format: the sender's, else the receiver's.
-    [[nodiscard]] static auto format_of(Sender const* sender, Receiver const* receiver) noexcept -> StreamFormat const&;
+    [[nodiscard]] static auto format_for(Sender const* sender, Receiver const* receiver) noexcept -> StreamFormat const&;
 
     /// A packet's first sample index, the time it names (PTP ns), and the measured rate an SR carries.
     struct ReportTime

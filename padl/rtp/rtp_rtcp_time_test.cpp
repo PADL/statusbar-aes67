@@ -53,8 +53,8 @@ TEST(rtcp_time, nanoseconds_of_a_second_or_more_are_refused)
 
 TEST(rtcp_time, lsr_is_the_middle_of_the_time_field)
 {
-    static_assert(lsr_of(0x1234'5678, 0x9ABC'DEF0) == 0x5678'9ABCU);
-    EXPECT_EQ(lsr_of(1666377592, 777737730), uint32_t{((1666377592U & 0xFFFFU) << 16U) | (777737730U >> 16U)});
+    static_assert(lsr_for(0x1234'5678, 0x9ABC'DEF0) == 0x5678'9ABCU);
+    EXPECT_EQ(lsr_for(1666377592, 777737730), uint32_t{((1666377592U & 0xFFFFU) << 16U) | (777737730U >> 16U)});
 }
 
 TEST(rtcp_time, dlsr_is_in_65536ths_of_a_second)

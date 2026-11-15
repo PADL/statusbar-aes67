@@ -36,7 +36,7 @@ struct Endpoint
 };
 
 /// The RTCP endpoint beside a stream's: the same address, the next port (RFC 3550 Section 11).
-[[nodiscard]] constexpr auto rtcp_endpoint_of(Endpoint const& media) noexcept -> Endpoint
+[[nodiscard]] constexpr auto rtcp_endpoint_for(Endpoint const& media) noexcept -> Endpoint
 {
     return {.address = media.address, .port = static_cast<uint16_t>(media.port + 1)};
 }

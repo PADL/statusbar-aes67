@@ -51,7 +51,7 @@ auto default_cadence(StreamFormat const& format, uint64_t const minimum_ns, bool
 }
 
 /// The Info Block's `ts-refclk` (VSF TR-10-1 Section 8.7): the SDP's first value, empty when it has none.
-[[nodiscard]] auto ts_refclk_of(sdp::ReferenceClocks const& clocks) -> std::string
+[[nodiscard]] auto ts_refclk_for(sdp::ReferenceClocks const& clocks) -> std::string
 {
     if (!clocks.ptp.empty()) {
         return sdp::ts_refclk_value(clocks.ptp.front());
@@ -142,15 +142,15 @@ RtcpSession::RtcpSession(
     , receiver_{receiver}
     , port_{std::move(port)}
     , options_{std::move(options)}
-    , sample_rate_{format_of(sender, receiver).sample_rate}
+    , sample_rate_{format_for(sender, receiver).sample_rate}
     , minimum_ns_{uint64_t{role == Role::sender ? SENDER_INTERVAL_MS : RECEIVER_INTERVAL_MS} * NS_PER_MS}
-    , report_stride_{report_stride(format_of(sender, receiver))}
+    , report_stride_{report_stride(format_for(sender, receiver))}
 {
     if (ipmx()) {
         hold_ = sender_->hold_reports();
     }
     if (!ipmx() && !options_.cadence) {
-        options_.cadence = default_cadence(format_of(sender, receiver), minimum_ns_, role_ == Role::sender);
+        options_.cadence = default_cadence(format_for(sender, receiver), minimum_ns_, role_ == Role::sender);
     }
     std::random_device random;
     own_ssrc_ = role_ == Role::receiver ? random() : 0;
@@ -161,7 +161,7 @@ RtcpSession::~RtcpSession()
     close();
 }
 
-auto RtcpSession::format_of(Sender const* const sender, Receiver const* const receiver) noexcept -> StreamFormat const&
+auto RtcpSession::format_for(Sender const* const sender, Receiver const* const receiver) noexcept -> StreamFormat const&
 {
     return sender != nullptr ? sender->format() : receiver->format();
 }
@@ -366,9 +366,9 @@ auto RtcpSession::report_time(uint64_t const index) const noexcept -> std::optio
         return std::nullopt;
     }
     if (timebase_ == nullptr) {  // the index is the sender's clock's own: its time, unconverted
-        return ReportTime{.index = index, .time_ns = clock->time_of(index), .measured_rate = sample_rate_};
+        return ReportTime{.index = index, .time_ns = clock->time_for(index), .measured_rate = sample_rate_};
     }
-    return domain_report_time(clock->time_of(index), index);
+    return domain_report_time(clock->time_for(index), index);
 }
 
 auto RtcpSession::domain_report_time(uint64_t const domain_ns, uint64_t const index) const noexcept -> std::optional<ReportTime>
@@ -402,7 +402,7 @@ void RtcpSession::write_sender_report(rtp::RtcpWriter& writer, SendState const& 
     };
     refresh_info_block(at.measured_rate);
     writer.sender_report(state.ssrc, info, {}, info_block_);
-    sent_[sent_next_] = {.lsr = rtp::lsr_of(truncated.seconds, truncated.nanoseconds), .sent_ns = now_ns};
+    sent_[sent_next_] = {.lsr = rtp::lsr_for(truncated.seconds, truncated.nanoseconds), .sent_ns = now_ns};
     sent_next_ = (sent_next_ + 1) % SR_HISTORY;
 }
 
@@ -422,7 +422,7 @@ void RtcpSession::refresh_info_block(uint32_t const measured_sample_rate)
 
 void RtcpSession::rebuild_info_block(uint8_t const version, uint32_t const measured_sample_rate)
 {
-    std::string const ts_refclk = ts_refclk_of(sender_->references());
+    std::string const ts_refclk = ts_refclk_for(sender_->references());
     std::string const mediaclk = sdp::media_clock_value(sender_->media_clock());
     std::string const order = sender_->channel_order();
     rtp::IpmxInfoBlock const block{
@@ -599,7 +599,7 @@ void RtcpSession::notify_stream_sr(rtp::RtcpSenderReport const& sr, uint64_t con
 {
     ++stats_.sr_received;
     last_sr_ =
-        LastSenderReport{.lsr = rtp::lsr_of(sr.info.ntp_msw.get(), sr.info.ntp_lsw.get()), .ssrc = sr.ssrc, .arrival_ns = now_ns};
+        LastSenderReport{.lsr = rtp::lsr_for(sr.info.ntp_msw.get(), sr.info.ntp_lsw.get()), .ssrc = sr.ssrc, .arrival_ns = now_ns};
     stats_.remote_ssrc = sr.ssrc;
     stats_.remote_bye = false;
     notify_sender_report(sr, now_ns);

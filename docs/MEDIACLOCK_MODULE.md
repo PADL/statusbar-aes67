@@ -13,7 +13,7 @@ AES67 streams use the PTP clock itself as the media clock (RFC 7273 §5.2): samp
 `n` is presented at PTP time `n / fs`. A sample's index is therefore a pure function of
 PTP time, and every device on the same grandmaster agrees on it without exchanging
 anything. An RTP timestamp is the low 32 bits of the index plus the stream's direct
-offset; an AVTP presentation time is `time_of(index)` modulo 2^32 ns. A bridge maps a
+offset; an AVTP presentation time is `time_for(index)` modulo 2^32 ns. A bridge maps a
 sample from one wire to the other with this arithmetic alone: no rate estimation, no
 anchoring, no state.
 
@@ -40,7 +40,7 @@ loss of the reference, and the next lock after it or after a source discontinuit
 
 - `PtpMediaClock` — the clock for one sample rate; `make(fs)` returns `nullopt` for a rate it does not support.
   - `index_at(ptp_ns)` — the latest sample presented at or before a PTP time.
-  - `time_of(index)` — the PTP time a sample is presented, rounded up to the nanosecond; `index_at(time_of(n)) == n`.
+  - `time_for(index)` — the PTP time a sample is presented, rounded up to the nanosecond; `index_at(time_for(n)) == n`.
   - `unwrap(timestamp, reference)` — the full index of a 32-bit wire timestamp nearest a reference index.
   - `rtp_timestamp(index, offset)` / `index_of_rtp(timestamp, offset, reference)` — RTP timestamps under `mediaclk:direct=<offset>`.
   - `avtp_timestamp(index)` — a sample's AVTP presentation time, mod 2^32 ns.

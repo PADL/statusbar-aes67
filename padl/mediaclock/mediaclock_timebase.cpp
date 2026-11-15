@@ -18,7 +18,7 @@ namespace {
 constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
 
 /// Source time of frame `count` at `rate_hz`, rounded to the nanosecond, without overflow.
-[[nodiscard]] constexpr auto source_ns_of(std::uint64_t count, std::uint32_t rate_hz) noexcept -> std::int64_t
+[[nodiscard]] constexpr auto source_ns_for(std::uint64_t count, std::uint32_t rate_hz) noexcept -> std::int64_t
 {
     std::uint64_t const seconds = count / rate_hz;
     std::uint64_t const frames = count % rate_hz;
@@ -37,7 +37,7 @@ constexpr std::uint64_t NS_PER_SECOND = 1'000'000'000;
     auto const whole = static_cast<std::uint64_t>(ns);
     std::uint64_t const frames =
         ((whole / NS_PER_SECOND) * rate_hz) + ((((whole % NS_PER_SECOND) * rate_hz) + (NS_PER_SECOND / 2)) / NS_PER_SECOND);
-    return source_ns_of(frames, rate_hz);
+    return source_ns_for(frames, rate_hz);
 }
 
 }  // namespace
@@ -211,7 +211,7 @@ auto TimebaseEstimator::feed(ClockSample const& sample) noexcept -> void
     }
     track_source(sample);
     Pair const p{
-        .reference_ns = static_cast<std::int64_t>(sample.reference_ns), .source_ns = source_ns_of(sample.count, sample.rate_hz)};
+        .reference_ns = static_cast<std::int64_t>(sample.reference_ns), .source_ns = source_ns_for(sample.count, sample.rate_hz)};
     if (!accept_reference(p.reference_ns) || screen_step(p)) {
         return;
     }

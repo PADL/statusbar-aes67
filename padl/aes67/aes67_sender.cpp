@@ -297,7 +297,7 @@ auto Sender::rtcp_options() const noexcept -> std::optional<RtcpOptions>
         return std::nullopt;
     }
     return RtcpOptions{
-        .destination = rtcp_endpoint_of({.address = destination_.address, .port = destination_.port}),
+        .destination = rtcp_endpoint_for({.address = destination_.address, .port = destination_.port}),
         .local = {},
         .ttl = destination_.ttl,
         .dscp = dscp_,

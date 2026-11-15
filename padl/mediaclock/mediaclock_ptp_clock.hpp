@@ -47,8 +47,8 @@ class PtpMediaClock
     }
 
     /// The PTP time sample n is presented, rounded up to the nanosecond:
-    /// ceil(n * 1e9 / fs). index_at(time_of(n)) == n for every n.
-    [[nodiscard]] constexpr auto time_of(std::uint64_t index) const noexcept -> std::uint64_t
+    /// ceil(n * 1e9 / fs). index_at(time_for(n)) == n for every n.
+    [[nodiscard]] constexpr auto time_for(std::uint64_t index) const noexcept -> std::uint64_t
     {
         std::uint64_t const seconds = index / fs_;
         std::uint64_t const samples = index % fs_;
@@ -82,7 +82,7 @@ class PtpMediaClock
     /// The AVTP timestamp of sample n: its PTP presentation time, mod 2^32 ns.
     [[nodiscard]] constexpr auto avtp_timestamp(std::uint64_t index) const noexcept -> std::uint32_t
     {
-        return static_cast<std::uint32_t>(time_of(index));
+        return static_cast<std::uint32_t>(time_for(index));
     }
 
   private:

@@ -20,7 +20,7 @@ namespace {
 
 /// The message id hash of `sdp`, never `previous` (RFC 2974 Section 5: a modified session has a new one) nor 0,
 /// which means "no hash".
-auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -> uint16_t
+auto hash_for(std::string_view const sdp, uint16_t const previous = 0) noexcept -> uint16_t
 {
     auto const h = std::hash<std::string_view>{}(sdp);
     auto value = static_cast<uint16_t>(h ^ (h >> 16U) ^ (h >> 32U) ^ (h >> 48U));
@@ -91,12 +91,12 @@ void SapAnnouncer::announce(std::string const& key, sdp::Session const& session)
             return;
         }
         it->sdp = std::move(text);  // RFC 2974 Section 5: re-announced under a new hash, no deletion
-        it->hash = hash_of(it->sdp, it->hash);
+        it->hash = hash_for(it->sdp, it->hash);
         it->due = true;
         return;
     }
     Entry entry{.key = key, .sdp = std::move(text)};
-    entry.hash = hash_of(entry.sdp);
+    entry.hash = hash_for(entry.sdp);
     entries_.push_back(std::move(entry));
 }
 

@@ -241,29 +241,29 @@ TEST(sdp, keeps_the_ptp_clock_among_others)
 
 TEST(sdp, reads_every_rfc_7273_form)
 {
-    auto clock_of = [](std::string_view refclk, std::string_view mediaclk) {
+    auto clock_for = [](std::string_view refclk, std::string_view mediaclk) {
         std::string text{DANTE};
         text.replace(text.find("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:0"), 43, refclk);
         text.replace(text.find("direct=1266592257"), 17, mediaclk);
         return parse(text);
     };
-    auto const nmbr = clock_of("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:domain-nmbr=5", "direct");
+    auto const nmbr = clock_for("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:domain-nmbr=5", "direct");
     EXPECT_TRUE(nmbr.has_value());
     EXPECT_EQ(nmbr->media.at(0).clocks.ptp.front().domain, uint8_t{5});
     EXPECT_EQ(nmbr->effective_media_clock_offset(nmbr->media.at(0)).value_or(1), uint32_t{0});
 
-    auto const version_only = clock_of("ptp=IEEE802.1AS-2011", "direct=7 rate=48000/1");
+    auto const version_only = clock_for("ptp=IEEE802.1AS-2011", "direct=7 rate=48000/1");
     EXPECT_TRUE(version_only.has_value());
     EXPECT_TRUE(version_only->media.at(0).clocks.ptp.front().version == PtpVersion::ieee802_1as);
     EXPECT_FALSE(version_only->media.at(0).clocks.ptp.front().grandmaster.has_value());
     EXPECT_EQ(version_only->effective_media_clock_offset(version_only->media.at(0)).value_or(0), uint32_t{7});
 
-    auto const named = clock_of("ptp=IEEE1588-2002:00-1D-C1-FF-FE-0E-10-C4:domain-name=_DFLT", "direct=1");
+    auto const named = clock_for("ptp=IEEE1588-2002:00-1D-C1-FF-FE-0E-10-C4:domain-name=_DFLT", "direct=1");
     EXPECT_TRUE(named.has_value());
     EXPECT_EQ(named->media.at(0).clocks.ptp.front().domain, uint8_t{0});
     EXPECT_TRUE(named->media.at(0).clocks.ptp.front().version == PtpVersion::ieee1588_2002);
 
-    EXPECT_FALSE(clock_of("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:128", "direct").has_value());
+    EXPECT_FALSE(clock_for("ptp=IEEE1588-2008:00-1D-C1-FF-FE-0E-10-C4:128", "direct").has_value());
 }
 
 TEST(sdp, reads_source_filters_at_either_level)
@@ -672,19 +672,19 @@ TEST(sdp_ts_refclk, an_802_1as_reference_is_written_without_a_domain)
 
 TEST(sdp_ts_refclk, each_version_token_reads)
 {
-    auto version_of = [](std::string_view const token) {
+    auto version_for = [](std::string_view const token) {
         std::string text{DANTE};
         text.replace(text.find("IEEE1588-2008"), 13, token);
         auto const session = parse(text);
         return session ? std::optional{session->media.at(0).clocks.ptp.front()} : std::nullopt;
     };
-    EXPECT_TRUE(version_of("IEEE1588-2002")->version == PtpVersion::ieee1588_2002);
-    EXPECT_TRUE(version_of("IEEE1588-2019")->version == PtpVersion::ieee1588_2019);
-    EXPECT_TRUE(version_of("IEEE802.1AS-2011")->version == PtpVersion::ieee802_1as);
-    EXPECT_TRUE(version_of("IEEE802.1AS-2020")->version == PtpVersion::ieee802_1as);  // the unregistered spelling
-    EXPECT_TRUE(version_of("IEEE1588-2030")->version == PtpVersion::other);
-    EXPECT_FALSE(version_of("IEEE1588-2030")->grandmaster.has_value());  // kept unparsed, as read
-    EXPECT_EQ(version_of("IEEE1588-2030")->text, std::string{"ptp=IEEE1588-2030:00-1D-C1-FF-FE-0E-10-C4:0"});
+    EXPECT_TRUE(version_for("IEEE1588-2002")->version == PtpVersion::ieee1588_2002);
+    EXPECT_TRUE(version_for("IEEE1588-2019")->version == PtpVersion::ieee1588_2019);
+    EXPECT_TRUE(version_for("IEEE802.1AS-2011")->version == PtpVersion::ieee802_1as);
+    EXPECT_TRUE(version_for("IEEE802.1AS-2020")->version == PtpVersion::ieee802_1as);  // the unregistered spelling
+    EXPECT_TRUE(version_for("IEEE1588-2030")->version == PtpVersion::other);
+    EXPECT_FALSE(version_for("IEEE1588-2030")->grandmaster.has_value());  // kept unparsed, as read
+    EXPECT_EQ(version_for("IEEE1588-2030")->text, std::string{"ptp=IEEE1588-2030:00-1D-C1-FF-FE-0E-10-C4:0"});
 }
 
 TEST(sdp_ts_refclk, an_802_1as_reference_written_with_a_domain_reads_as_domain_zero)

@@ -49,9 +49,9 @@ TEST(mediaclock_ptp_clock, time_of_inverts_index_at)
         auto const clock = PtpMediaClock::make(fs).value();
         std::uint64_t const base = clock.index_at(NOW_NS);
         for (std::uint64_t n = base; n < base + (3 * fs); n += 7) {
-            std::uint64_t const t = clock.time_of(n);
+            std::uint64_t const t = clock.time_for(n);
             EXPECT_EQ(clock.index_at(t), n);
-            EXPECT_EQ(clock.index_at(t - 1), n - 1);  // time_of is the first ns of sample n
+            EXPECT_EQ(clock.index_at(t - 1), n - 1);  // time_for is the first ns of sample n
         }
     }
 }
@@ -85,7 +85,7 @@ TEST(mediaclock_ptp_clock, rtp_timestamps_carry_the_direct_offset)
     EXPECT_EQ(PtpMediaClock::index_of_rtp(rtp + 6, OFFSET, n), n + 6);  // the next 125 us packet
     EXPECT_EQ(PtpMediaClock::rtp_timestamp(n, 0), static_cast<std::uint32_t>(n));
     // the same sample on the AVB side: its presentation time, mod 2^32
-    EXPECT_EQ(clock.avtp_timestamp(n), static_cast<std::uint32_t>(clock.time_of(n)));
+    EXPECT_EQ(clock.avtp_timestamp(n), static_cast<std::uint32_t>(clock.time_for(n)));
     EXPECT_EQ(clock.avtp_timestamp(n + 6) - clock.avtp_timestamp(n), std::uint32_t{125'000});
 }
 

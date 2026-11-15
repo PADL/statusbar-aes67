@@ -104,7 +104,7 @@ class Source
     auto set_jitter(std::int64_t const ns) noexcept -> void { jitter_ns_ = ns; }
 
     /// PTP time of frame `count` of the current epoch, without jitter.
-    [[nodiscard]] auto ptp_of_frame(std::uint64_t count) const noexcept -> std::int64_t { return ptp_of(count); }
+    [[nodiscard]] auto ptp_of_frame(std::uint64_t count) const noexcept -> std::int64_t { return ptp_for(count); }
 
     auto outliers(int n, std::int64_t extra_ns) noexcept -> void
     {
@@ -113,7 +113,7 @@ class Source
     }
 
   private:
-    [[nodiscard]] auto ptp_of(std::uint64_t count) const noexcept -> std::int64_t
+    [[nodiscard]] auto ptp_for(std::uint64_t count) const noexcept -> std::int64_t
     {
         double const s = static_cast<double>(count - base_count_) * 1e9 / rate_hz_;
         return base_ptp_ + std::llround(s / (1.0 + rate_offset_));
@@ -121,12 +121,12 @@ class Source
 
     [[nodiscard]] auto next_reference() const noexcept -> std::int64_t
     {
-        return ptp_of(next_) + jitter_ + (outliers_ > 0 ? outlier_ns_ : 0);
+        return ptp_for(next_) + jitter_ + (outliers_ > 0 ? outlier_ns_ : 0);
     }
 
     auto rebase() noexcept -> void
     {
-        base_ptp_ = ptp_of(next_);
+        base_ptp_ = ptp_for(next_);
         base_count_ = next_;
     }
 
@@ -536,8 +536,8 @@ auto off_frame_grid_ns(std::int64_t const d) -> std::int64_t
     auto const clock = PtpMediaClock::make(48000);
     auto const t = static_cast<std::uint64_t>(d);
     std::uint64_t const below = clock->index_at(t);
-    auto const low = static_cast<std::int64_t>(clock->time_of(below));
-    auto const high = static_cast<std::int64_t>(clock->time_of(below + 1));
+    auto const low = static_cast<std::int64_t>(clock->time_for(below));
+    auto const high = static_cast<std::int64_t>(clock->time_for(below + 1));
     return std::min(d - low, high - d);
 }
 
@@ -938,14 +938,14 @@ TEST(mediaclock_timebase, a_randomised_rfc_3550_sender_locks_once_and_stays_lock
     constexpr double RATE_OFFSET = 17e-6;
     std::uint32_t rng = 0x2468ACE1U;
     std::uint64_t count = 0;
-    auto const ptp_of = [](std::uint64_t const frames) {
+    auto const ptp_for = [](std::uint64_t const frames) {
         return NOW_NS + std::llround(static_cast<double>(frames) * 1e9 / (48000.0 * (1.0 + RATE_OFFSET)));
     };
     int locks = 0;
     bool was_locked = false;
     for (std::int64_t now = NOW_NS; now < NOW_NS + (3'600'000 * MS); now += PASS_NS) {
-        for (; ptp_of(count) <= now;) {
-            fit.feed(ClockSample{static_cast<std::uint64_t>(ptp_of(count)), count, 48000, 1});
+        for (; ptp_for(count) <= now;) {
+            fit.feed(ClockSample{static_cast<std::uint64_t>(ptp_for(count)), count, 48000, 1});
             rng ^= rng << 13U;
             rng ^= rng >> 17U;
             rng ^= rng << 5U;

@@ -76,7 +76,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `padl/aes67/aes67_stream.hpp` — `StreamFormat`, callbacks, `Destination`, `Grandmaster`, `State`, `Counters`.
 - `padl/aes67/aes67_receiver.hpp` — `Receiver`.
 - `padl/aes67/aes67_sender.hpp` — `Sender`.
-- `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_of()`.
+- `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_for()`.
 - `padl/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `padl/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
 - `padl/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
@@ -300,7 +300,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
   time when `ts-refclk` names a PTP grandmaster; under `localmac` it is the sender's free-running clock (§7.1,
   §10.4). AES67-2023 §6.3 asks only for RFC 3550 §6 and prescribes no derivation of the field, and no AES67
   receiver synchronises from it. The pair is exact: the field is the time the SR's packet's first sample is
-  sampled (`time_of(index)`), the RTP timestamp that sample's (`mediaclk:direct=0`).
+  sampled (`time_for(index)`), the RTP timestamp that sample's (`mediaclk:direct=0`).
 - The packet's time is the sender's own: with no timebase it is written unconverted, so a sender ticked with
   another PTP's index (a member interface's) reports that PTP's time, whatever the reactor's clock reads. A sender
   in another clock domain (`set_timebase()`, read per report): the SR maps the packet's domain time to PTP time

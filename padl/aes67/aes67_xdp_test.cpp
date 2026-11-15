@@ -650,7 +650,7 @@ TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
 {
     Endpoint const stream{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
     XdpTransport::PortState port{stream, net::FileDescriptor{}};
-    XdpTransport::RtcpPipe pipe{rtcp_endpoint_of(stream)};
+    XdpTransport::RtcpPipe pipe{rtcp_endpoint_for(stream)};
     std::array<XdpTransport::PortState*, 1> const ports{&port};
     std::array<XdpTransport::RtcpPipe*, 1> const pipes{&pipe};
     RefusalCounter refusals;
@@ -662,7 +662,7 @@ TEST(aes67_xdp, each_refused_frame_is_counted_under_its_reason)
     EXPECT_TRUE(offer(whole));
     EXPECT_FALSE(offer(std::vector<uint8_t>(whole.begin(), whole.begin() + 100)));  // malformed: cut short
     EXPECT_FALSE(offer(rtp_frame_to({.address = stream.address, .port = 5008})));   // unmatched: no port
-    EXPECT_FALSE(offer(rtp_frame_to(rtcp_endpoint_of(stream))));                    // the RTCP pipe's: not refused
+    EXPECT_FALSE(offer(rtp_frame_to(rtcp_endpoint_for(stream))));                   // the RTCP pipe's: not refused
     auto not_rtp = whole;
     not_rtp[padl::rtp::rtp_frame_overhead(false)] = 0x00;  // RTP version 0
     EXPECT_FALSE(offer(not_rtp));

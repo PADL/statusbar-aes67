@@ -50,7 +50,7 @@ struct PtpTruncated
 
 /// The middle 32 bits of an SR's 64-bit time field, as an RR's LSR echoes them, whatever the field
 /// holds (RFC 3550 Section 6.4.1).
-[[nodiscard]] constexpr auto lsr_of(uint32_t const msw, uint32_t const lsw) noexcept -> uint32_t
+[[nodiscard]] constexpr auto lsr_for(uint32_t const msw, uint32_t const lsw) noexcept -> uint32_t
 {
     return (msw << 16U) | (lsw >> 16U);
 }
