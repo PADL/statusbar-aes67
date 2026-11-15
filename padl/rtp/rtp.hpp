@@ -3,11 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// RTP module header - RFC 3550 RTP and RTCP as AES67 streams carry them.
-///
-/// Bundles the RTP header, sequence validation and raw frames, the RTCP packets with the IPMX
-/// Info Block, the RTCP time conversions and interval, and the module's errors. Include the
-/// specific sub-header when only one is needed.
+/// RTP module header (RFC 3550): the RTP header, sequence validation and raw frames, RTCP with the
+/// IPMX Info Block, its time and interval, and the errors. Include a sub-header for only one.
 
 #include "padl/rtp/rtp_error.hpp"
 #include "padl/rtp/rtp_frame.hpp"
