@@ -1,7 +1,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "padl/rtp/rtcp_packet.hpp"
+#include "padl/rtp/rtp_rtcp_packet.hpp"
 
 #include "padl/rtp/rtp_error.hpp"
 #include "statusbar/test/test.hpp"
@@ -268,4 +268,4 @@ TEST(rtcp_packet, sdes_carries_a_name_after_the_cname)
     EXPECT_EQ(compound->sdes->name, std::string_view{"Stage left"});
 }
 
-TEST_MAIN(padl_rtp, rtcp_packet_test)
+TEST_MAIN(padl_rtp, rtp_rtcp_packet_test)

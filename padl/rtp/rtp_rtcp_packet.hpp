@@ -145,7 +145,7 @@ struct RtcpReportBlocks
 };
 
 /// A parsed SR. `extension` is the profile-specific extension (RFC 3550 Section 6.4.3) after the
-/// report blocks, padding excluded: an IPMX sender's Info Block (rtcp_ipmx.hpp).
+/// report blocks, padding excluded: an IPMX sender's Info Block (rtp_rtcp_ipmx.hpp).
 struct RtcpSenderReport
 {
     uint32_t ssrc{0};

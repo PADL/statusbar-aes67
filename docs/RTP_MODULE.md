@@ -68,11 +68,11 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 - `padl/rtp/rtp_header.hpp` — `RtpHeader`, `RtpPacket`, `parse_rtp()`, `serialize_rtp()`, `serialize_rtp_header()`.
 - `padl/rtp/rtp_sequence.hpp` — `RtpSequence` (header-only).
 - `padl/rtp/rtp_frame.hpp` — `FrameAddressing`, `RtpFrame`, `UdpFrame`, `parse_udp_frame()`, `parse_rtp_frame()`, `serialize_rtp_frame()`, `serialize_rtp_frame_headers()`, `multicast_mac()`.
-- `padl/rtp/rtcp_packet.hpp` — the RTCP wire structs, `parse_rtcp()`, `RtcpWriter`, `padded_to_word()`.
+- `padl/rtp/rtp_rtcp_packet.hpp` — the RTCP wire structs, `parse_rtcp()`, `RtcpWriter`, `padded_to_word()`.
 - `padl/rtp/rtp_error.hpp` — `RtpError` (`padl.rtp`), what `RtcpWriter::status()` reports.
-- `padl/rtp/rtcp_ipmx.hpp` — `IpmxInfoBlock`, `serialize_ipmx_info_block()`, `parse_ipmx_info_block()`.
-- `padl/rtp/rtcp_time.hpp` — `ptp_truncated_from_ns()`, `ns_from_ptp_truncated()`, `lsr_of()`, `dlsr_from_ns()`, `rtt_ns()` (header-only, constexpr).
-- `padl/rtp/rtcp_interval.hpp` — `deterministic_rtcp_interval()`, `rtcp_interval()` (header-only, constexpr).
+- `padl/rtp/rtp_rtcp_ipmx.hpp` — `IpmxInfoBlock`, `serialize_ipmx_info_block()`, `parse_ipmx_info_block()`.
+- `padl/rtp/rtp_rtcp_time.hpp` — `ptp_truncated_from_ns()`, `ns_from_ptp_truncated()`, `lsr_of()`, `dlsr_from_ns()`, `rtt_ns()` (header-only, constexpr).
+- `padl/rtp/rtp_rtcp_interval.hpp` — `deterministic_rtcp_interval()`, `rtcp_interval()` (header-only, constexpr).
 
 ## Dependencies
 
@@ -117,7 +117,7 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
   minimum (§6.2); every interval is randomised in [0.5, 1.5) and divided by e − 3/2.
 - `serialize_ipmx_info_block()` NUL-pads `ts-refclk` to 64 bytes and `mediaclk` to 12; a
   string that fills its field has no NUL. The channel-order string is padded to 32 bits.
-- Fuzzing: `rtp_parse_fuzzer` (`parse_rtp()`), `rtcp_parse_fuzzer` (`parse_rtcp()` and the IPMX
+- Fuzzing: `rtp_parse_fuzzer` (`parse_rtp()`), `rtp_rtcp_parse_fuzzer` (`parse_rtcp()` and the IPMX
   Info Block) and `rtp_frame_parse_fuzzer`; seeds for the first two, an SR with an Info Block
   among them, are in `fuzz/seeds/<fuzzer>/`.
 

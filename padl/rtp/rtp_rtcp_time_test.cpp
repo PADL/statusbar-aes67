@@ -1,7 +1,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "padl/rtp/rtcp_time.hpp"
+#include "padl/rtp/rtp_rtcp_time.hpp"
 
 #include "statusbar/test/test.hpp"
 
@@ -80,4 +80,4 @@ TEST(rtcp_time, the_round_trip_is_arrival_less_send_less_the_receivers_hold)
     EXPECT_FALSE(rtt_ns(EXAMPLE_NS - 1, EXAMPLE_NS, 0).has_value());
 }
 
-TEST_MAIN(padl_rtp, rtcp_time_test)
+TEST_MAIN(padl_rtp, rtp_rtcp_time_test)

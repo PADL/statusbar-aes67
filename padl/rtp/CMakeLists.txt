@@ -5,11 +5,11 @@ statusbar_add_module(
   NAME
   rtp
   SOURCES
-  rtcp_ipmx.cpp
-  rtcp_packet.cpp
-  rtp_frame.cpp
   rtp_error.cpp
+  rtp_frame.cpp
   rtp_header.cpp
+  rtp_rtcp_ipmx.cpp
+  rtp_rtcp_packet.cpp
   DEPS
   statusbar::buffer
   statusbar::checksum
@@ -17,14 +17,14 @@ statusbar_add_module(
   statusbar::ip
   statusbar::status
   TESTS
-  rtcp_interval_test.cpp
-  rtcp_ipmx_test.cpp
-  rtcp_packet_test.cpp
-  rtcp_time_test.cpp
   rtp_frame_test.cpp
+  rtp_rtcp_interval_test.cpp
+  rtp_rtcp_ipmx_test.cpp
+  rtp_rtcp_packet_test.cpp
+  rtp_rtcp_time_test.cpp
   rtp_test.cpp)
 
 # Fuzz harnesses (built only when -DENABLE_FUZZING=ON).
-add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtcp_parse_fuzzer.cpp)
 add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtp_frame_parse_fuzzer.cpp)
 add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtp_parse_fuzzer.cpp)
+add_aes67_fuzzer(${CMAKE_CURRENT_LIST_DIR}/rtp_rtcp_parse_fuzzer.cpp)

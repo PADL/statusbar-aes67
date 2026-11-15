@@ -1,9 +1,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "padl/rtp/rtcp_ipmx.hpp"
+#include "padl/rtp/rtp_rtcp_ipmx.hpp"
 
-#include "padl/rtp/rtcp_packet.hpp"
+#include "padl/rtp/rtp_rtcp_packet.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -193,4 +193,4 @@ TEST(rtcp_ipmx, unknown_media_info_blocks_are_skipped)
     EXPECT_EQ(parsed->pcm->measured_sample_rate, uint32_t{47952});
 }
 
-TEST_MAIN(padl_rtp, rtcp_ipmx_test)
+TEST_MAIN(padl_rtp, rtp_rtcp_ipmx_test)

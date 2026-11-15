@@ -4,8 +4,8 @@
 /// libFuzzer harness for rtp::parse_rtcp and, on an SR's extension, rtp::parse_ipmx_info_block.
 /// Neither may crash or read out of bounds; every view they return must lie inside the input.
 
-#include "padl/rtp/rtcp_ipmx.hpp"
-#include "padl/rtp/rtcp_packet.hpp"
+#include "padl/rtp/rtp_rtcp_ipmx.hpp"
+#include "padl/rtp/rtp_rtcp_packet.hpp"
 
 #include <cstddef>
 #include <cstdint>

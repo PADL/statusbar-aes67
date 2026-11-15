@@ -1,7 +1,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "padl/rtp/rtcp_interval.hpp"
+#include "padl/rtp/rtp_rtcp_interval.hpp"
 
 #include "statusbar/test/test.hpp"
 
@@ -97,4 +97,4 @@ TEST(rtcp_interval, a_64_bit_draw_stays_within_one_and_a_half)
     EXPECT_TRUE(rtcp_interval(p, rng) <= static_cast<uint64_t>(1.5 * static_cast<double>(SECOND) / COMPENSATION));
 }
 
-TEST_MAIN(padl_rtp, rtcp_interval_test)
+TEST_MAIN(padl_rtp, rtp_rtcp_interval_test)

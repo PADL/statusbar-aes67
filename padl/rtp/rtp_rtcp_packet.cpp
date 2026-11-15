@@ -1,7 +1,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "padl/rtp/rtcp_packet.hpp"
+#include "padl/rtp/rtp_rtcp_packet.hpp"
 
 #include "padl/rtp/rtp_error.hpp"
 
