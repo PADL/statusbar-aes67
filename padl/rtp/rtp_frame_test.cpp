@@ -3,12 +3,14 @@
 
 #include "padl/rtp/rtp_frame.hpp"
 
+#include "statusbar/checksum/checksum_ones_complement.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 using namespace statusbar;
@@ -38,14 +40,7 @@ void fix_checksum(std::vector<uint8_t>& frame, size_t const ip)
     size_t const length = size_t{frame[ip] & 0x0FU} * 4;
     frame[ip + 10] = 0;
     frame[ip + 11] = 0;
-    uint32_t sum = 0;
-    for (size_t i = 0; i < length; i += 2) {
-        sum += static_cast<uint32_t>((frame[ip + i] << 8U) | frame[ip + i + 1]);
-    }
-    while ((sum >> 16U) != 0) {
-        sum = (sum & 0xFFFFU) + (sum >> 16U);
-    }
-    sum = ~sum & 0xFFFFU;
+    uint16_t const sum = statusbar::checksum::internet_checksum16(std::span{frame}.subspan(ip, length));
     frame[ip + 10] = static_cast<uint8_t>(sum >> 8U);
     frame[ip + 11] = static_cast<uint8_t>(sum);
 }

@@ -3,6 +3,7 @@
 
 #include "padl/rtp/rtp_frame.hpp"
 
+#include "statusbar/checksum/checksum_ones_complement.hpp"
 #include "statusbar/ip/ip_ipv4.hpp"
 #include "statusbar/ip/ip_udp.hpp"
 
@@ -16,20 +17,6 @@ namespace {
 constexpr uint16_t ETHERTYPE_IPV4 = 0x0800;
 constexpr uint16_t IPV4_MORE_FRAGMENTS = 0x2000;
 constexpr uint16_t IPV4_FRAGMENT_OFFSET = 0x1FFF;
-
-/// The ones' complement sum of a header, options included; 0 when its
-/// checksum field is right (RFC 791, RFC 1071).
-auto header_checksum(std::span<uint8_t const> const header) noexcept -> uint16_t
-{
-    uint32_t sum = 0;
-    for (size_t i = 0; i + 1 < header.size(); i += 2) {
-        sum += static_cast<uint32_t>((header[i] << 8U) | header[i + 1]);
-    }
-    while ((sum >> 16U) != 0) {
-        sum = (sum & 0xFFFFU) + (sum >> 16U);
-    }
-    return static_cast<uint16_t>(~sum);
-}
 
 /// True when the header is an unfragmented IPv4 header carrying UDP.
 [[nodiscard]] auto is_unfragmented_udp(statusbar::ip::IPv4Header const& ipv4) noexcept -> bool
@@ -45,7 +32,7 @@ auto header_checksum(std::span<uint8_t const> const header) noexcept -> uint16_t
     size_t const header_length = ipv4.header_length();
     size_t const total_length = ipv4.total_length.get();
     return total_length >= header_length + statusbar::ip::UdpHeader::LENGTH && total_length <= packet.size() &&
-        header_checksum(packet.first(header_length)) == 0;
+        statusbar::checksum::internet_checksum_ok(packet.first(header_length));
 }
 
 /// Parses and validates the IPv4 header at the reader's position; std::nullopt when it is not a whole UDP datagram.

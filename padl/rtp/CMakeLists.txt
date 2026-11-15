@@ -12,6 +12,7 @@ statusbar_add_module(
   rtp_header.cpp
   DEPS
   statusbar::buffer
+  statusbar::checksum
   statusbar::ieee
   statusbar::ip
   statusbar::status
