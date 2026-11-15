@@ -4,6 +4,8 @@
 #include "padl/sap/sap.hpp"
 
 #include "padl/sap/sap_receiver.hpp"
+#include "padl/sap/sap_test_support.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -12,7 +14,9 @@
 #include <chrono>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -123,6 +127,56 @@ TEST(sap, packet_round_trips)
     bad[0] = 0x30;  // IPv6 origin flag
     EXPECT_FALSE(parse_sap_packet(bad).has_value());
     EXPECT_FALSE(parse_sap_packet(std::span{packet}.first(7)).has_value());
+}
+
+TEST(sap, the_header_is_written_in_network_order_and_another_version_is_refused)
+{
+    auto const packet = make_sap_packet(true, 0x1234, IPv4Address{10, 20, 30, 40}, "o=- 1 1 IN IP4 10.20.30.40\r\n");
+    std::array<uint8_t, SapHeader::LENGTH> const header{0x24, 0, 0x12, 0x34, 10, 20, 30, 40};
+    EXPECT_TRUE(std::ranges::equal(std::span{packet}.first(SapHeader::LENGTH), header));
+    EXPECT_EQ(
+        std::string{statusbar::as_string_view(std::span{packet}.subspan(SapHeader::LENGTH, SAP_PAYLOAD_TYPE.size()))},
+        std::string{SAP_PAYLOAD_TYPE});
+    EXPECT_EQ(packet[SapHeader::LENGTH + SAP_PAYLOAD_TYPE.size()], uint8_t{0});
+
+    auto version_2 = packet;
+    version_2[0] = 0x44;
+    EXPECT_FALSE(parse_sap_packet(version_2).has_value());
+    auto no_room_for_authentication = packet;
+    no_room_for_authentication[1] = 64;  // 256 octets of authentication data, more than the packet holds
+    EXPECT_FALSE(parse_sap_packet(no_room_for_authentication).has_value());
+    auto reserved = packet;
+    reserved[0] |= 0x08U;  // the reserved bit is ignored
+    EXPECT_TRUE(parse_sap_packet(reserved).has_value());
+
+    std::array<uint8_t, SapHeader::LENGTH + 4> small{};
+    SapHeader fields{};
+    fields.init(false, 1, IPv4Address{10, 0, 0, 1});
+    EXPECT_FALSE(serialize_sap_packet(fields, "v=0\r\n", small).has_value());
+}
+
+TEST(sap, the_origin_line_is_the_first_o_line_with_its_line_ending)
+{
+    EXPECT_EQ(origin_line("v=0\r\no=- 1 2 IN IP4 10.0.0.1\r\ns=x\r\n"), std::string_view{"o=- 1 2 IN IP4 10.0.0.1\r\n"});
+    EXPECT_EQ(origin_line("o=- 1 2 IN IP4 10.0.0.1"), std::string_view{"o=- 1 2 IN IP4 10.0.0.1"});
+    EXPECT_EQ(origin_line("s=x\no=a 1 2 IN IP4 h\n"), std::string_view{"o=a 1 2 IN IP4 h\n"});
+    EXPECT_TRUE(origin_line("v=0\r\ns=x\r\n").empty());
+    EXPECT_TRUE(origin_line("").empty());
+}
+
+TEST(sap, an_announcement_longer_than_max_sap_packet_is_not_sent)
+{
+    Listener listener{49878};
+    auto announcer = SapAnnouncer::open(0, IPv4Address{127, 0, 0, 1}, IPv4Address{127, 0, 0, 1}, 49878);
+    EXPECT_TRUE(announcer.has_value());
+    if (!announcer) {
+        return;
+    }
+    (*announcer)->announce("long", session(std::string(MAX_SAP_PACKET, 'x')));
+    (*announcer)->tick(0);
+    EXPECT_TRUE(listener.quiet());
+    EXPECT_TRUE((*announcer)->withdraw("long").has_value());  // its deletion is its o= line alone
+    EXPECT_TRUE(listener.next().has_value());
 }
 
 TEST(sap, announces_on_schedule_and_deletes_on_withdraw)
@@ -428,12 +482,12 @@ TEST(sap_directory, finds_by_name_and_origin)
     EXPECT_TRUE(directory.find("Named", "10.10.32.9") != nullptr);
     EXPECT_TRUE(directory.find("Named", "avio.local") != nullptr);
 
-    auto const line = origin_line_of("v=0\r\no=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\ns=x\r\n");
+    auto const line = read_origin_line("v=0\r\no=jdoe 2890844526 2890842807 IN IP4 10.47.16.5\r\ns=x\r\n");
     EXPECT_TRUE(
         line.has_value() && line->key.username == "jdoe" && line->key.session_id == 2890844526ULL &&
         line->key.address == "10.47.16.5" && line->version == 2890842807ULL);
-    EXPECT_FALSE(origin_line_of("o=jdoe x 1 IN IP4 10.47.16.5\n").has_value());
-    EXPECT_FALSE(origin_line_of("s=nothing\n").has_value());
+    EXPECT_FALSE(read_origin_line("o=jdoe x 1 IN IP4 10.47.16.5\n").has_value());
+    EXPECT_FALSE(read_origin_line("s=nothing\n").has_value());
 }
 
 TEST(sap_directory, a_forged_origin_announcement_or_deletion_is_ignored)

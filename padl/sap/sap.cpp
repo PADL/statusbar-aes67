@@ -21,25 +21,6 @@ namespace padl::sap {
 
 namespace {
 
-constexpr uint8_t SAP_V1 = 0x20;          // V=1
-constexpr uint8_t SAP_IPV6 = 0x10;        // A
-constexpr uint8_t SAP_DELETION = 0x04;    // T
-constexpr uint8_t SAP_ENCRYPTED = 0x02;   // E
-constexpr uint8_t SAP_COMPRESSED = 0x01;  // C
-
-/// The "o=" line of an SDP text, which a deletion carries (RFC 2974 §3).
-auto origin_line(std::string_view const sdp) -> std::string_view
-{
-    auto const end = sdp.find('\n');
-    auto line = sdp.substr(0, end == std::string_view::npos ? sdp.size() : end + 1);
-    if (line.starts_with("v=")) {
-        auto const rest = sdp.substr(line.size());
-        auto const end2 = rest.find('\n');
-        line = rest.substr(0, end2 == std::string_view::npos ? rest.size() : end2 + 1);
-    }
-    return line;
-}
-
 /// The message id hash of `sdp`, never `previous` (RFC 2974 Section 5: a modified session has a new one) nor 0,
 /// which means "no hash".
 auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -> uint16_t
@@ -50,30 +31,43 @@ auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -
     return value == 0 ? uint16_t{1} : value;
 }
 
-/// A version 1 header with no IPv6 origin, encryption or compression, and room for its authentication data.
-[[nodiscard]] auto is_supported_header(std::span<uint8_t const> const packet) noexcept -> bool
+/// A version 1 header with no IPv6 origin, encryption or compression.
+[[nodiscard]] auto is_supported_header(SapHeader const& header) noexcept -> bool
 {
-    if (packet.size() < 8) {
-        return false;
-    }
-    uint8_t const flags = packet[0];
-    return (flags & 0xE0U) == SAP_V1 && (flags & (SAP_IPV6 | SAP_ENCRYPTED | SAP_COMPRESSED)) == 0 &&
-        packet.size() >= 8 + (size_t{packet[1]} * 4);
+    return header.version() == SapHeader::VERSION && !header.ipv6() && !header.encrypted() && !header.compressed();
 }
 
-/// Parses the optional payload type from `rest`: SDP text starts "v=0" (a deletion's may be only its "o="
-/// line, or nothing), anything else is a NUL-terminated type. False when the NUL is missing.
-[[nodiscard]] auto parse_payload_type(std::string_view& rest, std::string& payload_type) -> bool
+/// The message a supported header at the start of `packet` begins: the offset past its authentication data, or
+/// nullopt.
+[[nodiscard]] auto parse_header(std::span<uint8_t const> const packet, SapMessage& message) noexcept -> std::optional<size_t>
 {
-    if (rest.empty() || rest.starts_with("v=") || rest.starts_with("o=")) {
-        return true;
+    SapHeader header{};
+    statusbar::BufferDeserializerBuilder reader{packet};
+    reader.parse(&header);
+    if (!reader || !is_supported_header(header) || !reader.skip(size_t{header.auth_length.get()} * 4)) {
+        return std::nullopt;
     }
-    auto const nul = rest.find('\0');
-    if (nul == std::string_view::npos) {
-        return false;
+    message = SapMessage{
+        .deletion = header.deletion(),
+        .message_id_hash = header.message_id_hash.get(),
+        .origin = statusbar::ip::IPv4Address{header.origin.get()},
+    };
+    return reader.position();
+}
+
+/// The optional payload type and the SDP text from `rest`: SDP text starts "v=0" (a deletion's may be only its "o="
+/// line, or nothing), anything else is a NUL-terminated type. False when the NUL is missing.
+[[nodiscard]] auto parse_payload(std::string_view rest, SapMessage& message) -> bool
+{
+    if (!rest.empty() && !rest.starts_with("v=") && !rest.starts_with("o=")) {
+        auto const nul = rest.find('\0');
+        if (nul == std::string_view::npos) {
+            return false;
+        }
+        message.payload_type = std::string{rest.substr(0, nul)};
+        rest.remove_prefix(nul + 1);
     }
-    payload_type = std::string{rest.substr(0, nul)};
-    rest.remove_prefix(nul + 1);
+    message.sdp = rest;
     return true;
 }
 
@@ -106,41 +100,40 @@ auto hash_of(std::string_view const sdp, uint16_t const previous = 0) noexcept -
 
 }  // namespace
 
-auto make_sap_packet(
-    bool const deletion, uint16_t const message_id_hash, statusbar::ip::IPv4Address const& origin, std::string_view const sdp)
-    -> std::vector<uint8_t>
-{  // NOLINT(statusbar-block-statements): the RFC 2974 Section 3 header, field by field
-    std::vector<uint8_t> packet;
-    packet.reserve(8 + SAP_PAYLOAD_TYPE.size() + 1 + sdp.size());
-    packet.push_back(static_cast<uint8_t>(SAP_V1 | (deletion ? SAP_DELETION : 0U)));
-    packet.push_back(0);  // authentication length
-    packet.push_back(static_cast<uint8_t>(message_id_hash >> 8U));
-    packet.push_back(static_cast<uint8_t>(message_id_hash));
-    for (size_t i = 0; i < 4; ++i) {
-        packet.push_back(origin.octet(i));
+auto serialize_sap_packet(SapHeader const& header, std::string_view const sdp, std::span<uint8_t> const datagram) noexcept
+    -> statusbar::StatusValue<size_t>
+{
+    SapHeader fixed = header;
+    fixed.auth_length = 0U;
+    statusbar::BufferSerializerBuilderWithBuffer writer{datagram};
+    writer.append(fixed).append(statusbar::make_const_span(SAP_PAYLOAD_TYPE)).append(octet_t{0U});
+    if (!writer.append(statusbar::make_const_span(sdp))) {
+        return statusbar::failure(writer.error());
     }
-    packet.insert(packet.end(), SAP_PAYLOAD_TYPE.begin(), SAP_PAYLOAD_TYPE.end());
-    packet.push_back(0);
-    packet.insert(packet.end(), sdp.begin(), sdp.end());
-    return packet;
+    return writer.position();
 }
 
 auto parse_sap_packet(std::span<uint8_t const> const packet) -> std::optional<SapMessage>
 {
-    if (!is_supported_header(packet)) {
+    SapMessage message{};
+    auto const offset = parse_header(packet, message);
+    if (!offset || !parse_payload(statusbar::as_string_view(packet.subspan(*offset)), message)) {
         return std::nullopt;
     }
-    SapMessage message{
-        .deletion = (packet[0] & SAP_DELETION) != 0,
-        .message_id_hash = static_cast<uint16_t>((packet[2] << 8U) | packet[3]),
-        .origin = statusbar::ip::IPv4Address{packet[4], packet[5], packet[6], packet[7]},
-    };
-    std::string_view rest = statusbar::as_string_view(packet.subspan(8 + (size_t{packet[1]} * 4)));
-    if (!parse_payload_type(rest, message.payload_type)) {
-        return std::nullopt;
-    }
-    message.sdp = rest;
     return message;
+}
+
+auto origin_line(std::string_view sdp) noexcept -> std::string_view
+{
+    while (!sdp.empty()) {
+        auto const end = sdp.find('\n');
+        auto const line = sdp.substr(0, end == std::string_view::npos ? sdp.size() : end + 1);
+        if (line.starts_with("o=")) {
+            return line;
+        }
+        sdp.remove_prefix(line.size());
+    }
+    return {};
 }
 
 auto SapAnnouncer::open(
@@ -230,8 +223,13 @@ void SapAnnouncer::tick(int64_t const now_ns)
 
 auto SapAnnouncer::send(bool const deletion, Entry const& entry) -> statusbar::Status
 {
-    auto const packet = make_sap_packet(deletion, entry.hash, origin_, deletion ? origin_line(entry.sdp) : entry.sdp);
-    if (::send(fd_.get(), packet.data(), packet.size(), MSG_DONTWAIT) < 0) {
+    SapHeader header{};
+    header.init(deletion, entry.hash, origin_);
+    auto const length = serialize_sap_packet(header, deletion ? origin_line(entry.sdp) : entry.sdp, packet_);
+    if (!length) {
+        return statusbar::forward_failure(length);
+    }
+    if (::send(fd_.get(), packet_.data(), *length, MSG_DONTWAIT) < 0) {
         return statusbar::failure(statusbar::net::errno_code());
     }
     return statusbar::success();

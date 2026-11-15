@@ -47,9 +47,9 @@ struct OriginLine
     uint64_t version{0};
 };
 
-/// The o= line of an SDP text, read as sdp::parse() reads it, or nullopt if
+/// The o= line of an SDP text (origin_line()), read as sdp::parse() reads it, or nullopt if
 /// it has none that reads.
-[[nodiscard]] auto origin_line_of(std::string_view sdp) -> std::optional<OriginLine>;
+[[nodiscard]] auto read_origin_line(std::string_view sdp) -> std::optional<OriginLine>;
 
 /// Whether `session`, announced from SAP origin `sap_origin`, is the one a
 /// subscription to session name `name` means: its s= is `name`, and, when
@@ -68,9 +68,8 @@ class SapDirectory
     static constexpr size_t MAX_SESSIONS = 1024;
     /// The most sessions one origin keeps; a new one past them evicts that origin's least recent.
     static constexpr size_t MAX_SESSIONS_PER_ORIGIN = 128;
-    /// The largest SAP packet read: room for a large ST 2110-30 or ST 2022-7 description, sent fragmented (RFC 2974
-    /// Section 6 only recommends under 1 KB); Session::MAX_MEDIA bounds what its SDP parses to.
-    static constexpr size_t MAX_PACKET = 4096;
+    /// The largest SAP packet read (MAX_SAP_PACKET); Session::MAX_MEDIA bounds what its SDP parses to.
+    static constexpr size_t MAX_PACKET = MAX_SAP_PACKET;
 
     enum class Kind : uint8_t
     {

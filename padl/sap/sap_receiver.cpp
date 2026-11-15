@@ -21,12 +21,12 @@ namespace {
 
 constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
 
-/// Reads the next line from `text`, without its CR LF or LF.
-[[nodiscard]] auto next_line(std::string_view& text) noexcept -> std::string_view
+/// `line` without its LF or CR LF.
+[[nodiscard]] auto without_line_ending(std::string_view line) noexcept -> std::string_view
 {
-    auto const end = text.find('\n');
-    auto line = text.substr(0, end);
-    text.remove_prefix(end == std::string_view::npos ? text.size() : end + 1);
+    if (line.ends_with('\n')) {
+        line.remove_suffix(1);
+    }
     if (line.ends_with('\r')) {
         line.remove_suffix(1);
     }
@@ -131,20 +131,14 @@ auto session_key(sdp::Session const& session) -> SessionKey
     return {.username = session.username, .session_id = session.session_id, .address = session.origin_address};
 }
 
-auto origin_line_of(std::string_view sdp) -> std::optional<OriginLine>
+auto read_origin_line(std::string_view const sdp) -> std::optional<OriginLine>
 {
-    while (!sdp.empty()) {
-        auto const line = next_line(sdp);
-        if (!line.starts_with("o=")) {
-            continue;
-        }
-        sdp::Session session;
-        if (!sdp::parse_origin_line(line.substr(2), session)) {
-            return std::nullopt;
-        }
-        return OriginLine{.key = session_key(session), .version = session.session_version};
+    auto const line = without_line_ending(origin_line(sdp));
+    sdp::Session session;
+    if (line.empty() || !sdp::parse_origin_line(line.substr(2), session)) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    return OriginLine{.key = session_key(session), .version = session.session_version};
 }
 
 auto subscription_matches(
@@ -176,8 +170,8 @@ auto SapDirectory::handle(SapMessage const& message, int64_t const now_ns) -> st
 
 auto SapDirectory::deleted_entry(SapMessage const& message) -> std::vector<Entry>::iterator
 {
-    auto const line = origin_line_of(message.sdp);
-    if (!line && (message.sdp.starts_with("o=") || message.sdp.find("\no=") != std::string_view::npos)) {
+    auto const line = read_origin_line(message.sdp);
+    if (!line && !origin_line(message.sdp).empty()) {
         return entries_.end();  // an o= line that does not read names nothing
     }
     return std::ranges::find_if(entries_, [&](Entry const& entry) { return deletion_names(entry, message, line); });

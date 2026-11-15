@@ -9,6 +9,7 @@ statusbar_add_module(
   sap_receiver.cpp
   DEPS
   statusbar::buffer
+  statusbar::ieee
   statusbar::ip
   statusbar::net
   statusbar::sdp

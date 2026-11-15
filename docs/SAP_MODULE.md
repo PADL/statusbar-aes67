@@ -19,11 +19,12 @@ thread.
 
 ## Key types
 
-- `make_sap_packet()` / `parse_sap_packet()` and `SapMessage` — the RFC 2974 §3 packet: version 1, IPv4 origin, no authentication, encryption or compression.
+- `SapHeader`, `serialize_sap_packet()` / `parse_sap_packet()` and `SapMessage` — the RFC 2974 §3 packet: version 1, IPv4 origin, no authentication, encryption or compression; written into a caller's buffer, read through `buffer`.
 - `SapAnnouncer` — announces sessions under caller-chosen keys; `announce()`, `withdraw()`, `withdraw_all()`.
 - `SapDirectory` — the announced sessions, keyed by `SessionKey`; `handle()` / `handle_packet()` yield `Event`s (`announced`, `deleted`, `timed_out`, `evicted`), `expire()`, `find(name, origin)`.
 - `SapReceiver` — the socket and the directory on a reactor; `set_handler()`.
-- `SessionKey`, `session_key()`, `origin_line_of()`, `subscription_matches()` — a session's identity and the subscription rule.
+- `origin_line()`, the raw o= line a deletion carries, and `read_origin_line()`, it parsed.
+- `SessionKey`, `session_key()`, `subscription_matches()` — a session's identity and the subscription rule.
 
 ## Quick example
 
@@ -49,12 +50,12 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 
 ## Headers
 
-- `padl/sap/sap.hpp` — packets, `SapMessage`, `SapAnnouncer`.
+- `padl/sap/sap.hpp` — `SapHeader`, packets, `SapMessage`, `SapAnnouncer`.
 - `padl/sap/sap_receiver.hpp` — `SessionKey`, `SapDirectory`, `SapReceiver`.
 
 ## Dependencies
 
-- **Statusbar modules:** [`sdp`](SDP_MODULE.md), `ip`, `net` (`Pollable`, sockets, group joins), `status`.
+- **Statusbar modules:** [`sdp`](SDP_MODULE.md), `buffer`, `ieee`, `ip`, `net` (`Pollable`, sockets, group joins), `status`.
 - **System / external:** `<vector>`, `<string>`, `<functional>`.
 
 ## Notes & caveats
@@ -65,7 +66,9 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 - `SapAnnouncer::open()` binds its socket to the origin, so its packets leave from the
   address their origin field names, which listeners require.
 - `withdraw()` sends the deletion at once, not at the next tick, so a caller shutting
-  down may withdraw and close straight away. A deletion carries only the o= line.
+  down may withdraw and close straight away. A deletion carries only the o= line. The
+  announcer writes into a buffer of `MAX_SAP_PACKET` octets, so a description longer than
+  a listener reads is not sent: `send()` fails and `tick()` skips it.
 - A session is known by its SDP origin (o= username, session id and address: RFC 8866
   §5.2's globally unique identifier). An announcement of a new session, or of a known one
   whose SDP changed (a new o= version, say), is `announced`; an unchanged
@@ -99,7 +102,7 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
   inside `on_ready()` and `tick()`: it may read `directory()` but must not destroy the
   receiver or replace the handler.
 - Fuzzing: `sap_directory_fuzzer` feeds packets through `SapDirectory::handle_packet()` (with
-  `sdp::parse()`, `origin_line_of()` and `sdp::to_string()` on what parses); its seeds are in
+  `sdp::parse()`, `origin_line()`, `read_origin_line()` and `sdp::to_string()` on what parses); its seeds are in
   `fuzz/seeds/sap_directory_fuzzer/` (`sap_directory_fuzzer fuzz/seeds/sap_directory_fuzzer`).
 
 ## Further reading

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 /// libFuzzer harness for SapDirectory::handle_packet (parse_sap_packet, sdp::parse, updates, deletions, eviction and
-/// expiry) and, on what parses, origin_line_of() and sdp::to_string(). None may crash; the directory stays bounded.
+/// expiry) and, on what parses, origin_line(), read_origin_line() and sdp::to_string(). None may crash; the directory stays bounded.
 
 #include "padl/sap/sap.hpp"
 #include "padl/sap/sap_receiver.hpp"
@@ -32,7 +32,8 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
     bool const forged = size % 7 == 0;  // now and then from another host than its origin field names
     (void)directory.handle_packet(input, message && !forged ? message->origin : statusbar::ip::IPv4Address{10, 0, 0, 9}, now_ns);
     if (message) {
-        (void)padl::sap::origin_line_of(message->sdp);
+        (void)padl::sap::origin_line(message->sdp);
+        (void)padl::sap::read_origin_line(message->sdp);
         if (auto const session = padl::sdp::parse(message->sdp)) {
             (void)padl::sdp::to_string(*session);
         }
