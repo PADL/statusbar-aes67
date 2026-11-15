@@ -3,13 +3,21 @@
 statusbar_package_module_init()
 
 # Helper: build a libFuzzer harness (Linux) or standalone driver (macOS) for the
-# package's parsers. Mirrors avb's add_avb_fuzzer.
+# package's parsers. Mirrors avb's add_avb_fuzzer. Fuzz from an ENABLE_ASAN build,
+# whose libraries carry ASan and libFuzzer's coverage (core's fuzzing.cmake);
+# without it, fuzz_asan_options.cpp turns off the container-overflow checks the
+# uninstrumented libraries would trip.
 function(add_aes67_fuzzer source_file)
   if(NOT ENABLE_FUZZING)
     return()
   endif()
   get_filename_component(FUZZ_NAME ${source_file} NAME_WE)
   add_executable(${FUZZ_NAME} ${source_file})
+  if(NOT ENABLE_ASAN)
+    target_sources(
+      ${FUZZ_NAME}
+      PRIVATE ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../fuzz/fuzz_asan_options.cpp)
+  endif()
   target_link_libraries(${FUZZ_NAME} PRIVATE statusbar)
   if(APPLE)
     target_compile_options(${FUZZ_NAME} PRIVATE -fsanitize=address,undefined

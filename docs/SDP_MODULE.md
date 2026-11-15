@@ -138,7 +138,9 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
   ignored and never written: the RTCP interval is not derived from them.
 - `Media::frames_per_packet()` rounds the ptime to whole frames, since a sender may write
   125 µs as `0.12`.
-- Fuzzing: `sdp_parse_fuzzer`, seeded from `fuzz/seeds/sdp_parse_fuzzer/`.
+- Fuzzing: `sdp_parse_fuzzer`, seeded from `fuzz/seeds/sdp_parse_fuzzer/`. Fuzz from a
+  `-DENABLE_ASAN=ON` build, whose libraries carry ASan too; elsewhere the fuzzers run without
+  container-overflow checks (`fuzz/fuzz_asan_options.cpp`), which uninstrumented libraries trip.
 
 ## Further reading
 
