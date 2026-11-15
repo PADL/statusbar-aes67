@@ -7,7 +7,8 @@
 /// caller gives the time), and SapReceiver, the net::Pollable that joins the SAP groups and feeds
 /// it, for receivers that subscribe to a session by its name (s=).
 
-#include "padl/sap/sap.hpp"
+#include "padl/sap/sap_announcer.hpp"
+#include "padl/sap/sap_packet.hpp"
 #include "padl/sdp/sdp_session.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 #include "statusbar/net/net_message_reactor.hpp"

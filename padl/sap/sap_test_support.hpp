@@ -6,7 +6,7 @@
 /// Test support: SAP packets as SapAnnouncer writes them, for the tests of SAP listeners (sap, the
 /// bridge's control server).
 
-#include "padl/sap/sap.hpp"
+#include "padl/sap/sap_packet.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 
 #include <cstdint>

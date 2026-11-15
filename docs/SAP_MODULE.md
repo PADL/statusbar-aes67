@@ -50,8 +50,11 @@ auto watch(unsigned int interface_index) -> StatusValue<std::unique_ptr<sap::Sap
 
 ## Headers
 
-- `padl/sap/sap.hpp` — `SapHeader`, packets, `SapMessage`, `SapAnnouncer`.
-- `padl/sap/sap_receiver.hpp` — `SessionKey`, `SapDirectory`, `SapReceiver`.
+- `padl/sap/sap.hpp` — the module header: the three below.
+- `padl/sap/sap_packet.hpp` — `SapHeader`, `serialize_sap_packet()`, `parse_sap_packet()`, `SapMessage`, `origin_line()`.
+- `padl/sap/sap_announcer.hpp` — `SapAnnouncer`.
+- `padl/sap/sap_receiver.hpp` — `SessionKey`, `read_origin_line()`, `SapDirectory`, `SapReceiver`.
+- `padl/sap/sap_test_support.hpp` — `make_sap_packet()`, a packet as a vector, for listeners' tests.
 
 ## Dependencies
 

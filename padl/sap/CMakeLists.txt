@@ -5,7 +5,8 @@ statusbar_add_module(
   NAME
   sap
   SOURCES
-  sap.cpp
+  sap_announcer.cpp
+  sap_packet.cpp
   sap_receiver.cpp
   DEPS
   statusbar::buffer

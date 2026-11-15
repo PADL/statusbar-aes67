@@ -1,8 +1,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-#include "padl/sap/sap.hpp"
-
+#include "padl/sap/sap_announcer.hpp"
+#include "padl/sap/sap_packet.hpp"
 #include "padl/sap/sap_receiver.hpp"
 #include "padl/sap/sap_test_support.hpp"
 #include "statusbar/buffer/span_utils.hpp"

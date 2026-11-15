@@ -4,7 +4,7 @@
 /// libFuzzer harness for SapDirectory::handle_packet (parse_sap_packet, sdp::parse, updates, deletions, eviction and
 /// expiry) and, on what parses, origin_line(), read_origin_line() and sdp::to_string(). None may crash; the directory stays bounded.
 
-#include "padl/sap/sap.hpp"
+#include "padl/sap/sap_packet.hpp"
 #include "padl/sap/sap_receiver.hpp"
 #include "padl/sdp/sdp_session.hpp"
 
