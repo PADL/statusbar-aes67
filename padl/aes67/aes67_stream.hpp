@@ -146,7 +146,7 @@ struct SrpTSpec
 }
 
 /// Fill `out` (whole samples of `encoding`) with silence: zero bytes, or the AM824 word repeated.
-inline auto fill_silence(sdp::Encoding const encoding, std::span<uint8_t> const out) noexcept -> void
+inline void fill_silence(sdp::Encoding const encoding, std::span<uint8_t> const out) noexcept
 {
     uint32_t const word = silence_word(encoding);
     if (word == 0 || out.size() < sizeof(word)) {

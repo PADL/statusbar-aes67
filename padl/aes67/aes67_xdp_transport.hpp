@@ -349,7 +349,7 @@ class XdpTransport final : public Transport
     [[nodiscard]] auto launch_clock() const noexcept -> LaunchClock const& { return launch_clock_; }
     /// The sending PHC's clock, which stamps an untimed frame and tells whether a frame is late (net::phc_now_ns);
     /// without one every frame is untimed (0), lead or none. Control thread, before ticking starts.
-    auto set_phc_clock(statusbar::net::ClockFn phc) noexcept -> void { phc_clock_ = std::move(phc); }
+    void set_phc_clock(statusbar::net::ClockFn phc) noexcept { phc_clock_ = std::move(phc); }
     /// Redirect groups' frames tagged with `vid` (an SR class VID) as well as untagged ones, or untagged
     /// only (nullopt), from the next tick. Control thread; a TCAM too small for it: rules_status().
     void set_receive_vid(std::optional<uint16_t> const vid) noexcept

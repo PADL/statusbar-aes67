@@ -374,7 +374,7 @@ TEST(aes67_sender, waits_out_the_send_offset)
 
     uint64_t const base = 48'000ULL * 1000;  // a multiple of 48
     sender.tick(base + 47 + 99, 0);          // [base, base + 48) is one frame short of due
-    std::size_t const before = transport.queue.size();
+    size_t const before = transport.queue.size();
     sender.tick(base + 47 + 100, 0);  // due now
     EXPECT_EQ(transport.queue.size(), before + 1);
     EXPECT_EQ(padl::rtp::parse_rtp(transport.queue.back().bytes)->header.timestamp.get(), static_cast<uint32_t>(base));
