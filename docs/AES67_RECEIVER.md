@@ -43,8 +43,12 @@ what it refuses; the module overview is [AES67_MODULE.md](AES67_MODULE.md).
   until the learnt source has been silent for a second; a host copying the SSRC cannot
   reset the sequence. The sequence is
   tracked with `rtp::RtpSequence`; a new source's probation packets are handed on too, and
-  only an unconfirmed jump of a validated source is dropped. The payload goes to the
-  `FrameHandler` as is.
+  only an unconfirmed jump of a validated source is dropped. A packet of the learnt source
+  arriving more than `MAX_DROPOUT` packets' frames after its last restarts the sequence
+  first, counting nothing lost: a sender restarted under the same SSRC starts its sequence
+  anywhere, and one that kept sending through a dropout that long may have wrapped it. A
+  dropout shorter than that counts exactly. `configure()` and a new source start afresh too.
+  The payload goes to the `FrameHandler` as is.
 - Due-tick gate: over a queuing transport (UDP), `drain()` skips the port until a tick
   before the next packet can have been sent (after `[i, i + n)`, the next is sent no
   earlier than index `i + 2n`), then asks every tick until one comes. It never waits more

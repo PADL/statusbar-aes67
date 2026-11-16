@@ -98,6 +98,8 @@ class Receiver
     /// Account a validated packet's place in the sequence; false to drop it.
     auto place(uint16_t sequence, uint32_t frames) noexcept -> bool;
     void reset_stream() noexcept;
+    /// Forgets the sequence and its reorder window: the next packet starts them afresh, counting nothing lost.
+    void restart_sequence() noexcept;
     /// From configure(), the media validated: open the port where receive_endpoint() says and set the stream up from
     /// the SDP; on failure State::error and error().
     [[nodiscard]] auto open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
@@ -141,12 +143,13 @@ class Receiver
     /// Why the packet's payload type, size or source is not this stream's; nullopt when it is.
     [[nodiscard]] auto check_payload(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address const& source) const noexcept
         -> std::optional<DropReason>;
-    /// Learns the SSRC and its address, or adopts a new pair after the learnt source fell silent; else why the packet
-    /// is dropped.
+    /// Learns the SSRC and its address, or adopts a new pair after the learnt source fell silent: the frames since the
+    /// source's last packet (0 for a new one, or after a clock step back); else why the packet is dropped.
     [[nodiscard]] auto admit_source(uint32_t ssrc, statusbar::ip::IPv4Address const& source, uint64_t now_index) noexcept
-        -> std::expected<void, DropReason>;
-    /// Validates the sequence number (RFC 3550 Appendix A.1) and places it; false to drop the packet.
-    [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames) noexcept -> bool;
+        -> std::expected<uint64_t, DropReason>;
+    /// Validates the sequence number (RFC 3550 Appendix A.1) and places it, the sequence restarted first after a silence
+    /// of `silent` frames past RtpSequence::MAX_DROPOUT packets; false to drop the packet.
+    [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames, uint64_t silent) noexcept -> bool;
     /// Notes an accepted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.
     void notify_arrival(uint32_t timestamp, uint64_t now_index) noexcept;
     /// Hands a placed packet to the handler at its sample index and counts it.

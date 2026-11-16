@@ -364,6 +364,39 @@ TEST(aes67_receiver, the_ssrc_from_another_address_is_refused_while_the_learnt_s
     EXPECT_EQ(receiver.counters().packets, uint64_t{4});
 }
 
+// A gap counts its frames and a wrap from 65535 to 0 nothing; the learnt source resuming after a silence past
+// RtpSequence::MAX_DROPOUT packets (restarted, its sequence anywhere) counts nothing, as after a resubscription.
+TEST(aes67_receiver, a_source_resuming_after_a_long_silence_counts_nothing_lost)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    transport.every_tick = true;  // each packet is received in its own drain, at its own index
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    uint64_t const base = 48'000ULL * 9000;
+    auto send = [&](uint64_t const n, uint16_t const seq) {
+        transport.queue.push_back({group, rtp_packet(seq, static_cast<uint32_t>(base + (n * FPP)))});
+        receiver.drain(base + (n * FPP));
+    };
+    send(0, 65533);
+    send(1, 65534);
+    send(3, 0);  // 65535 lost, across the wrap
+    send(4, 1);
+    EXPECT_EQ(receiver.counters().lost, uint64_t{FPP});
+    uint64_t const resumed = 5 + padl::rtp::RtpSequence::MAX_DROPOUT;
+    send(resumed, 500);  // a step of 499 had counted 498 packets
+    send(resumed + 1, 501);
+    send(resumed + 3, 503);
+    EXPECT_EQ(receiver.counters().lost, uint64_t{2 * FPP});
+    EXPECT_EQ(receiver.counters().packets, uint64_t{7});
+    EXPECT_TRUE(receiver.configure(stream_session(group)));  // resubscribed
+    send(resumed + 4, 40'000);
+    send(resumed + 5, 40'001);
+    EXPECT_EQ(receiver.counters().lost, uint64_t{2 * FPP});
+    EXPECT_EQ(receiver.counters().packets, uint64_t{9});
+}
+
 TEST(aes67_receiver, a_packet_of_more_frames_than_the_maxptime_is_refused)
 {
     LoopTransport transport;

@@ -232,12 +232,17 @@ void Receiver::reset_stream() noexcept
     next_poll_index_ = 0;
     ssrc_.reset();
     source_ = {};
+    restart_sequence();
+    jitter_x16_ = 0;
+    have_transit_ = false;
+}
+
+void Receiver::restart_sequence() noexcept
+{
     sequence_ = rtp::RtpSequence{};
     have_max_ = false;
     max_seq_ = 0;
     window_.reset();
-    jitter_x16_ = 0;
-    have_transit_ = false;
 }
 
 void Receiver::drain(uint64_t const now_index) noexcept
@@ -348,11 +353,12 @@ auto Receiver::admit(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address co
     if (auto const refused = check_payload(packet, source)) {
         return std::unexpected{*refused};
     }
-    if (auto const admitted = admit_source(packet.header.ssrc.get(), source, now_index); !admitted) {
-        return std::unexpected{admitted.error()};
+    auto const silent = admit_source(packet.header.ssrc.get(), source, now_index);
+    if (!silent) {
+        return std::unexpected{silent.error()};
     }
     auto const frames = static_cast<uint32_t>(packet.payload.size() / format_.bytes_per_frame());
-    if (!admit_sequence(packet.header.sequence.get(), frames)) {
+    if (!admit_sequence(packet.header.sequence.get(), frames, *silent)) {
         return std::unexpected{DropReason::sequence};
     }
     return frames;
@@ -375,7 +381,7 @@ auto Receiver::check_payload(rtp::RtpPacket const& packet, statusbar::ip::IPv4Ad
 }
 
 auto Receiver::admit_source(uint32_t const ssrc, statusbar::ip::IPv4Address const& source, uint64_t const now_index) noexcept
-    -> std::expected<void, DropReason>
+    -> std::expected<uint64_t, DropReason>
 {
     if (ssrc_ && (*ssrc_ != ssrc || source_ != source)) {
         // Another SSRC or address: refused while the learnt source is live, adopted once it has been silent for a
@@ -389,16 +395,21 @@ auto Receiver::admit_source(uint32_t const ssrc, statusbar::ip::IPv4Address cons
             return std::unexpected{DropReason::no_offset};
         }
     }
+    auto const silent = ssrc_ ? std::max<int64_t>(static_cast<int64_t>(now_index - last_index_), 0) : 0;
     if (!ssrc_) {
         ssrc_ = ssrc;
         source_ = source;
     }
     last_index_ = now_index;
-    return {};
+    return static_cast<uint64_t>(silent);
 }
 
-auto Receiver::admit_sequence(uint16_t const seq, uint32_t const frames) noexcept -> bool
+auto Receiver::admit_sequence(uint16_t const seq, uint32_t const frames, uint64_t const silent) noexcept -> bool
 {
+    // Silent for more than MAX_DROPOUT packets, the source restarted or wrapped: no step tells what was lost.
+    if (silent > uint64_t{rtp::RtpSequence::MAX_DROPOUT} * frames) {
+        restart_sequence();
+    }
     bool const was_validated = sequence_.validated();
     if (!sequence_.update(seq) && was_validated) {
         return false;  // an unconfirmed jump
