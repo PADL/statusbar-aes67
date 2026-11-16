@@ -11,6 +11,7 @@
 #include "padl/rtp/rtp_header.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
+#include "statusbar/net/net_socket.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
@@ -26,14 +27,8 @@
 
 namespace padl::aes67 {
 
-/// An IPv4 address and UDP port.
-struct Endpoint
-{
-    statusbar::ip::IPv4Address address;
-    uint16_t port{0};
-
-    auto operator==(Endpoint const&) const noexcept -> bool = default;
-};
+/// An IPv4 address and UDP port, host order: net::ipv4_sockaddr_in(address, port) and net::ipv4_endpoint() convert.
+using Endpoint = statusbar::net::IPv4Endpoint;
 
 /// The RTCP endpoint beside a stream's: the same address, the next port (RFC 3550 Section 11).
 [[nodiscard]] constexpr auto rtcp_endpoint_for(Endpoint const& media) noexcept -> Endpoint

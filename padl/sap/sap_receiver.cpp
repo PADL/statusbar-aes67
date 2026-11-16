@@ -78,8 +78,7 @@ constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
     if (auto reuse = statusbar::net::set_reuse_addr(fd); !reuse) {
         return reuse;
     }
-    sockaddr_in address = statusbar::net::ipv4_sockaddr_in(statusbar::ip::IPv4Address{});  // INADDR_ANY
-    address.sin_port = htons(port);
+    sockaddr_in const address = statusbar::net::ipv4_sockaddr_in(statusbar::ip::IPv4Address{}, port);  // INADDR_ANY
     if (::bind(fd, statusbar::net::sockaddr_cast(address), sizeof(address)) != 0) {
         return statusbar::failure(statusbar::net::errno_code());
     }
@@ -91,11 +90,10 @@ constexpr int64_t EXPIRY_PERIOD_NS = 1'000'000'000;
     int const fd, std::span<statusbar::ip::IPv4Address const> const groups, unsigned int const interface_index) noexcept
     -> statusbar::Status
 {
-#if defined(IP_MULTICAST_ALL)
     // Only the groups joined here, not every group another socket on the host joined.
-    int const all = 0;
-    (void)::setsockopt(fd, IPPROTO_IP, IP_MULTICAST_ALL, &all, sizeof(all));
-#endif
+    if (auto set = statusbar::net::set_multicast_all(fd, false); !set) {
+        return set;
+    }
     for (size_t i = 0; i < groups.size(); ++i) {
         if (auto joined = statusbar::net::join_group(fd, groups[i], interface_index); !joined && i == 0) {
             return statusbar::failure(joined.error());
@@ -120,7 +118,7 @@ struct Received
     if (n < 0) {
         return statusbar::failure(statusbar::net::errno_code());
     }
-    return Received{.length = static_cast<size_t>(n), .source = statusbar::ip::IPv4Address{ntohl(from.sin_addr.s_addr)}};
+    return Received{.length = static_cast<size_t>(n), .source = statusbar::net::ipv4_endpoint(from).address};
 }
 
 }  // namespace

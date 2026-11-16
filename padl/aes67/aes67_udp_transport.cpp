@@ -80,7 +80,7 @@ class UdpReceivePort final : public ReceivePort
             }
             out[written++] = {
                 .payload = std::span<uint8_t const>{buffers_[i]}.first(messages_[i].msg_len),
-                .source = from_sockaddr(sources_[i]),
+                .source = statusbar::net::ipv4_endpoint(sources_[i]),
             };
         }
         return written;
@@ -88,13 +88,13 @@ class UdpReceivePort final : public ReceivePort
 
     /// Whether a received datagram is this port's: not truncated (larger than any AES67 packet: counted
     /// malformed), and for its address and interface (another group's on a shared port is not counted).
-    [[nodiscard]] auto wanted(msghdr& header) const noexcept -> bool
+    [[nodiscard]] auto wanted(msghdr const& header) const noexcept -> bool
     {
         if ((header.msg_flags & MSG_TRUNC) != 0) {
             transport_.refused(Refusal::malformed);
             return false;
         }
-        return destined_for(header, destination_.address, interface_index_);
+        return statusbar::net::destined_for(header, destination_.address, interface_index_);
     }
 
     UdpTransport& transport_;
@@ -251,7 +251,8 @@ auto UdpTransport::open_send(SendOptions const& options) -> statusbar::StatusVal
     }
     // Not connected: a connected UDP socket reports a unicast destination's
     // ICMP port-unreachable as ECONNREFUSED on the next send.
-    return std::make_unique<UdpSendPort>(std::move(*fd), to_sockaddr(options.destination));
+    return std::make_unique<UdpSendPort>(
+        std::move(*fd), statusbar::net::ipv4_sockaddr_in(options.destination.address, options.destination.port));
 }
 
 auto UdpTransport::open_rtcp(RtcpOptions const& options) -> statusbar::StatusValue<std::unique_ptr<RtcpPort>>

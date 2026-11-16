@@ -3,8 +3,8 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// Socket plumbing the transports share: interface lookup, sockaddr conversion and the RTCP socket.
-/// Sockets and group joins are net_socket.hpp's; dotted quads are ip::parse_ipv4() and ip::to_string().
+/// Socket plumbing the transports share: interface lookup and the receive, send and RTCP sockets. Sockets,
+/// group joins, sockaddr conversion and IP_PKTINFO are net_socket.hpp's; dotted quads are ip::parse_ipv4().
 
 #include "padl/aes67/aes67_transport.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
@@ -39,16 +39,8 @@ struct InterfaceInfo
 /// Look up an interface by name: it must exist and have an IPv4 address.
 [[nodiscard]] auto find_interface(std::string_view name) -> statusbar::StatusValue<InterfaceInfo>;
 
-[[nodiscard]] auto to_sockaddr(Endpoint const& endpoint) noexcept -> sockaddr_in;
-[[nodiscard]] auto from_sockaddr(sockaddr_in const& address) noexcept -> Endpoint;
-
-/// The ancillary space recvmsg() needs for IP_PKTINFO.
+/// The ancillary space recvmsg() needs for IP_PKTINFO (net::destined_for() reads it).
 inline constexpr size_t PKTINFO_SPACE = CMSG_SPACE(sizeof(in_pktinfo));
-
-/// Whether a received message's IP_PKTINFO names `address` as its destination and, unless
-/// `interface_index` is 0, `interface_index` as the interface it arrived on; false without one.
-[[nodiscard]] auto destined_for(
-    msghdr& header, statusbar::ip::IPv4Address const& address, unsigned int interface_index = 0) noexcept -> bool;
 
 /// A UDP socket bound to `local` with IP_PKTINFO on (SO_REUSEADDR when `shared`). A group is joined on `interface`,
 /// for `source` alone when given (RFC 4607), with IP_MULTICAST_ALL off, so only this socket's joins reach it.

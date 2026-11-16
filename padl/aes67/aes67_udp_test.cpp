@@ -18,7 +18,6 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <deque>
 #include <memory>
 #include <print>
@@ -71,7 +70,7 @@ TEST(aes67_udp, two_receivers_share_a_port)
     EXPECT_TRUE(net::set_multicast_send(socket->get(), ::if_nametoindex("lo"), 1, true).has_value());
     auto send_to = [&](Endpoint const& to, uint16_t const seq) {
         auto const bytes = rtp_packet(seq, static_cast<uint32_t>(seq * FPP));
-        sockaddr_in const address = to_sockaddr(to);
+        sockaddr_in const address = net::ipv4_sockaddr_in(to.address, to.port);
         return ::sendto(socket->get(), bytes.data(), bytes.size(), 0, reinterpret_cast<sockaddr const*>(&address), sizeof(address));
     };
     for (uint16_t seq = 0; seq < 3; ++seq) {
@@ -203,7 +202,7 @@ TEST(aes67_udp, counts_loss_and_reorder_from_the_wire)
 
     auto socket = net::make_udp_socket();
     EXPECT_TRUE(socket.has_value());
-    sockaddr_in const to = to_sockaddr(destination);
+    sockaddr_in const to = net::ipv4_sockaddr_in(destination.address, destination.port);
     uint64_t const base = 48000ULL * 3600;
     for (uint16_t const n : {0, 1, 2, 4, 3, 6, 7}) {
         auto const bytes = rtp_packet(static_cast<uint16_t>(100 + n), static_cast<uint32_t>(base + (n * FPP)));
@@ -233,7 +232,7 @@ TEST(aes67_udp, a_truncated_datagram_is_counted_malformed)
     auto socket = net::make_udp_socket();
     EXPECT_TRUE(socket.has_value());
     std::vector<uint8_t> const oversized(UdpTransport::MAX_DATAGRAM + 100, uint8_t{0x80});
-    sockaddr_in const address = to_sockaddr(unicast);
+    sockaddr_in const address = net::ipv4_sockaddr_in(unicast.address, unicast.port);
     EXPECT_TRUE(
         ::sendto(
             socket->get(), oversized.data(), oversized.size(), 0, reinterpret_cast<sockaddr const*>(&address), sizeof(address)) >
@@ -416,28 +415,6 @@ TEST(aes67_udp, multicast_receive_sockets_receive_only_their_own_joins)
     EXPECT_EQ(multicast_all((*rtcp)->fd()), 0);
 }
 
-TEST(aes67_udp, a_datagram_is_kept_only_for_its_address_and_interface)
-{
-    alignas(cmsghdr) std::array<uint8_t, PKTINFO_SPACE> control{};
-    msghdr header{};
-    header.msg_control = control.data();
-    header.msg_controllen = control.size();
-    EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 2}));  // no IP_PKTINFO
-    cmsghdr* const cmsg = CMSG_FIRSTHDR(&header);
-    cmsg->cmsg_level = IPPROTO_IP;
-    cmsg->cmsg_type = IP_PKTINFO;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
-    in_pktinfo info{};
-    info.ipi_ifindex = 3;
-    uint32_t const group = IPv4Address{239, 69, 1, 2}.to_uint32();  // htonl is a macro: no commas in its argument
-    info.ipi_addr.s_addr = htonl(group);
-    std::memcpy(CMSG_DATA(cmsg), &info, sizeof(info));
-    EXPECT_TRUE(destined_for(header, IPv4Address{239, 69, 1, 2}));      // any interface
-    EXPECT_TRUE(destined_for(header, IPv4Address{239, 69, 1, 2}, 3));   // its own
-    EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 2}, 4));  // another NIC's join
-    EXPECT_FALSE(destined_for(header, IPv4Address{239, 69, 1, 3}, 3));
-}
-
 TEST(aes67_udp, a_rendered_send_is_the_serialised_packet_byte_for_byte)
 {
     auto transport = UdpTransport::open("lo");
@@ -612,7 +589,7 @@ TEST(aes67_udp, a_unicast_send_socket_is_pinned_to_its_interface_at_priority_zer
     sockaddr_in bound{};
     socklen_t bound_length = sizeof(bound);
     EXPECT_EQ(::getsockname(fd->get(), reinterpret_cast<sockaddr*>(&bound), &bound_length), 0);
-    EXPECT_TRUE(from_sockaddr(bound).address == info->address);
+    EXPECT_TRUE(net::ipv4_endpoint(bound).address == info->address);
     auto group = open_send_socket(*info, {.destination = {.address = own_group(), .port = 45022}});
     EXPECT_TRUE(group.has_value());
     EXPECT_EQ(::getsockopt(group->get(), SOL_SOCKET, SO_PRIORITY, &value, &length), 0);

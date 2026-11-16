@@ -29,14 +29,6 @@ auto hash_for(std::string_view const sdp, uint16_t const previous = 0) noexcept 
     return value == 0 ? uint16_t{1} : value;
 }
 
-/// An IPv4 socket address.
-[[nodiscard]] auto socket_address(statusbar::ip::IPv4Address const& address, uint16_t const port) noexcept -> sockaddr_in
-{
-    sockaddr_in socket = statusbar::net::ipv4_sockaddr_in(address);
-    socket.sin_port = htons(port);
-    return socket;
-}
-
 /// Binds `fd` to `origin`, so packets leave from the address their origin field names (RFC 2974 Section 6), and
 /// connects it to `destination`:`port`, so send() needs no address.
 [[nodiscard]] auto connect_from(
@@ -45,8 +37,8 @@ auto hash_for(std::string_view const sdp, uint16_t const previous = 0) noexcept 
     statusbar::ip::IPv4Address const& destination,
     uint16_t const port) noexcept -> statusbar::Status
 {
-    auto const from = socket_address(origin, 0);
-    auto const to = socket_address(destination, port);
+    auto const from = statusbar::net::ipv4_sockaddr_in(origin, 0);
+    auto const to = statusbar::net::ipv4_sockaddr_in(destination, port);
     if (::bind(fd, statusbar::net::sockaddr_cast(from), sizeof(from)) != 0 ||
         ::connect(fd, statusbar::net::sockaddr_cast(to), sizeof(to)) != 0) {
         return statusbar::failure(statusbar::net::errno_code());

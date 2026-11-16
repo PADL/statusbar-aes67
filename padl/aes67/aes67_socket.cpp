@@ -67,7 +67,8 @@ class UdpRtcpPort final : public RtcpPort
                 continue;
             }
             out[written] = {
-                .payload = std::span<uint8_t const>{buffers_[written]}.first(read->length), .source = from_sockaddr(source)};
+                .payload = std::span<uint8_t const>{buffers_[written]}.first(read->length),
+                .source = statusbar::net::ipv4_endpoint(source)};
             ++written;
         }
         return written;
@@ -118,7 +119,7 @@ class UdpRtcpPort final : public RtcpPort
         }
         return Read{
             .length = static_cast<size_t>(got),
-            .accepted = (header.msg_flags & MSG_TRUNC) == 0 && destined_for(header, local_, interface_index_),
+            .accepted = (header.msg_flags & MSG_TRUNC) == 0 && statusbar::net::destined_for(header, local_, interface_index_),
         };
     }
 
@@ -141,7 +142,7 @@ class UdpRtcpPort final : public RtcpPort
         }
         sockaddr_in address{};
         std::memcpy(&address, entry->ifa_addr, sizeof(address));
-        found.first.push_back(from_sockaddr(address).address);
+        found.first.push_back(statusbar::net::ipv4_endpoint(address).address);
         found.second = (entry->ifa_flags & IFF_LOOPBACK) != 0;
     }
     return found;
@@ -178,21 +179,16 @@ class UdpRtcpPort final : public RtcpPort
             return statusbar::failure(set.error());
         }
     }
-    int const one = 1;
-    if (::setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one)) != 0) {
-        return statusbar::failure(statusbar::net::errno_code());
+    if (auto set = statusbar::net::set_receive_pktinfo(fd); !set) {
+        return set;
     }
-    int const all = 0;
-    if (multicast && ::setsockopt(fd, IPPROTO_IP, IP_MULTICAST_ALL, &all, sizeof(all)) != 0) {
-        return statusbar::failure(statusbar::net::errno_code());
-    }
-    return statusbar::success();
+    return multicast ? statusbar::net::set_multicast_all(fd, false) : statusbar::success();
 }
 
 /// Binds `fd` to `local`.
 [[nodiscard]] auto bind_to(int const fd, Endpoint const& local) noexcept -> statusbar::Status
 {
-    sockaddr_in const address = to_sockaddr(local);
+    sockaddr_in const address = statusbar::net::ipv4_sockaddr_in(local.address, local.port);
     if (::bind(fd, statusbar::net::sockaddr_cast(address), sizeof(address)) != 0) {
         return statusbar::failure(statusbar::net::errno_code());
     }
@@ -294,31 +290,6 @@ auto find_interface(std::string_view const name) -> statusbar::StatusValue<Inter
         .mac = interface_mac(name)};
 }
 
-auto to_sockaddr(Endpoint const& endpoint) noexcept -> sockaddr_in
-{
-    sockaddr_in address = statusbar::net::ipv4_sockaddr_in(endpoint.address);
-    address.sin_port = htons(endpoint.port);
-    return address;
-}
-
-auto from_sockaddr(sockaddr_in const& address) noexcept -> Endpoint
-{
-    return {.address = statusbar::ip::IPv4Address{ntohl(address.sin_addr.s_addr)}, .port = ntohs(address.sin_port)};
-}
-
-auto destined_for(msghdr& header, statusbar::ip::IPv4Address const& address, unsigned int const interface_index) noexcept -> bool
-{
-    for (cmsghdr* cmsg = CMSG_FIRSTHDR(&header); cmsg != nullptr; cmsg = CMSG_NXTHDR(&header, cmsg)) {
-        if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
-            in_pktinfo info{};
-            std::memcpy(&info, CMSG_DATA(cmsg), sizeof(info));
-            return ntohl(info.ipi_addr.s_addr) == address.to_uint32() &&
-                (interface_index == 0 || static_cast<unsigned int>(info.ipi_ifindex) == interface_index);
-        }
-    }
-    return false;
-}
-
 auto open_receive_socket(
     InterfaceInfo const& interface,
     Endpoint const& local,
@@ -357,7 +328,10 @@ auto open_rtcp_socket(InterfaceInfo const& interface, RtcpOptions const& options
         return statusbar::failure(set.error());
     }
     return std::make_unique<UdpRtcpPort>(
-        std::move(*fd), to_sockaddr(options.destination), local.address, multicast ? interface.index : 0U);
+        std::move(*fd),
+        statusbar::net::ipv4_sockaddr_in(options.destination.address, options.destination.port),
+        local.address,
+        multicast ? interface.index : 0U);
 }
 
 }  // namespace padl::aes67

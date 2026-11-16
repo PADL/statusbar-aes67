@@ -79,7 +79,7 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_for()`.
 - `padl/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `padl/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
-- `padl/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, sockaddr conversion, `destined_for()`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
+- `padl/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, `PKTINFO_SPACE`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
 - `padl/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`, `SenderReportTime`, `sender_clock_offset()`.
 - `padl/aes67/aes67_error.hpp` — `Aes67Error`.
 - `padl/aes67/aes67_test_support.hpp` — `LoopTransport`, `PatternSource`, `RecordingSink`, crafted sessions and packets, for tests.
