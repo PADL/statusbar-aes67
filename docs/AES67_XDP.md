@@ -136,6 +136,12 @@ the module overview in [AES67_MODULE.md](AES67_MODULE.md).
 - `launch_time_queue(tx_queues)` also puts PTP event traffic on `PTP_QUEUE` (2) with 4 TX queues or
   more (`net::tc::PTP_PRIORITY`, ptp4l's `socket_priority 7`), queue 1 idle and the rest on queue 3,
   as an SR shaper lays them, and keeps its root without launch time: `off` lays the root (a host
-  without launch time calls it before the socket opens) and removes only the etf. The order
-  assumes the lowest queue has the highest priority, as on igb and igc (I210 Datasheet Section
-  7.2.7.4), the drivers with AF_XDP launch time; an mqprio root of another handle goes first.
+  without launch time calls it before the socket opens) and removes only the etf. That default
+  order assumes the lowest queue has the highest priority, as on igb and igc (I210 Datasheet Section
+  7.2.7.4); an mqprio root of another handle goes first.
+- The package knows no driver, so the caller chooses the queues: `XdpQueueLayout` (the socket's queue,
+  PTP's, and `rest_below`) to `launch_time_queue(tx_queues, layout)` and `settle_launch_time(interface,
+  mode, layout)`, and the same queue as `XdpTransportOptions::queue` to `open()`. For a NIC that does
+  not rank queue 0 highest (ice, whose queues weigh the same), the socket on the top queue, PTP below it
+  and the rest below that (`net::tc::LaunchTimeQueue::rest_below`); a PTP queue that leaves no queue
+  beyond it is dropped (`ptp_queue_fits()`). `QUEUE` and `PTP_QUEUE` are the layout's defaults.

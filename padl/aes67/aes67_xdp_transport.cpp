@@ -255,7 +255,8 @@ auto settle_over_tc(
 }  // namespace
 #endif
 
-auto XdpTransport::settle_launch_time(std::string_view const interface, statusbar::net::tc::LaunchTimeMode const mode)
+auto XdpTransport::settle_launch_time(
+    std::string_view const interface, statusbar::net::tc::LaunchTimeMode const mode, XdpQueueLayout const& layout)
     -> statusbar::StatusValue<statusbar::net::tc::LaunchTimeQueueAction>
 {
 #if defined(__linux__)
@@ -267,9 +268,9 @@ auto XdpTransport::settle_launch_time(std::string_view const interface, statusba
     if (!ifindex || !queues) {
         return statusbar::failure(ifindex ? queues.error() : ifindex.error());
     }
-    return settle_over_tc(*ifindex, launch_time_queue(*queues), mode);
+    return settle_over_tc(*ifindex, launch_time_queue(*queues, layout), mode);
 #else
-    (void)interface, (void)mode;
+    (void)interface, (void)mode, (void)layout;
     return failure(std::errc::not_supported);
 #endif
 }

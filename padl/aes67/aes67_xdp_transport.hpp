@@ -3,7 +3,7 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// AES67 over AF_XDP: one XdpContext on NIC queue 0 serves every receiver and sender; the XDP
+/// AES67 over AF_XDP: one XdpContext on one NIC queue (XdpQueueLayout) serves every receiver and sender; the XDP
 /// program redirects the joined groups' untagged IPv4/UDP frames (and, with set_receive_vid(), every
 /// group's tagged with one VID) and passes the rest to the kernel. Senders may tag (SendPort::set_vlan()).
 /// Multicast destinations only, at most MAX_GROUPS groups; ports and threads as aes67_transport.hpp.
@@ -41,6 +41,22 @@ namespace padl::aes67 {
 
 class XdpRtcpPort;
 
+/// Where the socket's TX queue and PTP's lie on a NIC, as the caller chooses them for its driver (this package
+/// knows none). The defaults, XdpTransport::QUEUE and PTP_QUEUE with the rest past them, suit a NIC whose
+/// lowest queue is its highest priority (Intel's i210 and i225/i226).
+struct XdpQueueLayout
+{
+    /// The queue the socket binds, RSS is steered to and an etf keeps for its timed frames.
+    uint16_t queue{0};
+    /// PTP event traffic's own queue; dropped where it would leave no queue beyond itself for the rest.
+    std::optional<uint16_t> ptp_queue{2};
+    /// The rest, and PTP's queue, below the socket's (net::tc::LaunchTimeQueue::rest_below): for a NIC that
+    /// does not rank queue 0 highest.
+    bool rest_below{false};
+
+    auto operator==(XdpQueueLayout const&) const noexcept -> bool = default;
+};
+
 /// What XdpTransport::open() accepts past the interface (outside the class so it
 /// can be a defaulted argument there).
 struct XdpTransportOptions
@@ -55,7 +71,7 @@ struct XdpTransportOptions
     /// Frames carry launch times (net::XdpConfig::tx_launch_time): the host found that the driver
     /// honours them (net::netdev::launch_time_supported). open() goes on without when the build, kernel or NIC lacks it.
     bool launch_time{false};
-    /// The NIC queue the socket binds and RSS is steered to: XdpTransport::QUEUE, or an SR class's queue
+    /// The NIC queue the socket binds and RSS is steered to: XdpQueueLayout::queue, or an SR class's queue
     /// for streams its credit-based shaper paces (IEEE 802.1Q-2022 Clause 8.6.8.2).
     uint32_t queue{0};
 };
@@ -63,8 +79,9 @@ struct XdpTransportOptions
 class XdpTransport final : public Transport
 {
   public:
-    /// The NIC queue the socket binds unless Options::queue says another.
-    static constexpr uint32_t QUEUE = 0;
+    /// The NIC queue the socket binds unless Options::queue says another: XdpQueueLayout's default, the
+    /// caller's fallback where it cannot read the NIC's driver or queues.
+    static constexpr uint32_t QUEUE = XdpQueueLayout{}.queue;
     /// Frames begin_tick() reads from the RX ring at most (XdpConfig::rx_drain_max).
     static constexpr size_t RECEIVE_BATCH = 64;
     /// Frames one port may hold for receive() between ticks.
@@ -88,9 +105,9 @@ class XdpTransport final : public Transport
     static constexpr size_t MAX_RTCP_PORTS = 64;
     /// The handle major of the mqprio root launch_time_queue() lays.
     static constexpr uint16_t LAUNCH_TIME_QDISC_MAJOR = 0x9100;
-    /// PTP event traffic's own TX queue (net::tc::PTP_PRIORITY), with 4 TX queues or more: queue 1 stays
-    /// idle, as an SR class B queue would be, and the rest uses the queues past it.
-    static constexpr uint16_t PTP_QUEUE = 2;
+    /// PTP event traffic's own TX queue (net::tc::PTP_PRIORITY) by default, with 4 TX queues or more: queue 1
+    /// stays idle, as an SR class B queue would be, and the rest uses the queues past it.
+    static constexpr uint16_t PTP_QUEUE = *XdpQueueLayout{}.ptp_queue;
 
     /// The launch time each frame on a socket with launch time carries (internal; public for tests):
     /// the PHC's now until a lead is in force, then departure plus lead, in commit order
@@ -258,24 +275,39 @@ class XdpTransport final : public Transport
     /// and bit 24 clear, RFC 1112 Section 6.4); the ports accept their own groups' and count the rest unmatched.
     [[nodiscard]] static auto tagged_groups_rule(uint16_t vid) noexcept -> statusbar::net::CompiledRule<32>;
 
-    /// The TX queues of an interface of `tx_queues` (net::tc::settle_launch_time_queue): QUEUE kept for the
-    /// socket's timed frames, PTP_QUEUE for PTP where there is one past it, under LAUNCH_TIME_QDISC_MAJOR, a
-    /// root that stays when launch time is off.
-    [[nodiscard]] static constexpr auto launch_time_queue(uint16_t const tx_queues) noexcept -> statusbar::net::tc::LaunchTimeQueue
+    /// Whether `layout` has a PTP queue that fits `tx_queues` (net::tc::launch_time_queue_is_possible()).
+    [[nodiscard]] static constexpr auto ptp_queue_fits(uint16_t const tx_queues, XdpQueueLayout const& layout) noexcept -> bool
+    {
+        return layout.ptp_queue.has_value() &&
+            statusbar::net::tc::launch_time_queue_is_possible(
+                   {.major = LAUNCH_TIME_QDISC_MAJOR,
+                    .queue = layout.queue,
+                    .tx_queues = tx_queues,
+                    .ptp_queue = layout.ptp_queue,
+                    .rest_below = layout.rest_below});
+    }
+
+    /// The TX queues of an interface of `tx_queues` (net::tc::settle_launch_time_queue): `layout`'s queue kept
+    /// for the socket's timed frames, its PTP queue for PTP where it fits (ptp_queue_fits()), under
+    /// LAUNCH_TIME_QDISC_MAJOR, a root that stays when launch time is off.
+    [[nodiscard]] static constexpr auto launch_time_queue(uint16_t const tx_queues, XdpQueueLayout const& layout = {}) noexcept
+        -> statusbar::net::tc::LaunchTimeQueue
     {
         return statusbar::net::tc::LaunchTimeQueue{
             .major = LAUNCH_TIME_QDISC_MAJOR,
-            .queue = QUEUE,
+            .queue = layout.queue,
             .tx_queues = tx_queues,
-            .ptp_queue = PTP_QUEUE + 1 < tx_queues ? std::optional<uint16_t>{PTP_QUEUE} : std::nullopt,
+            .ptp_queue = ptp_queue_fits(tx_queues, layout) ? layout.ptp_queue : std::nullopt,
             .persistent_root = true,
+            .rest_below = layout.rest_below,
         };
     }
 
-    /// `interface`'s qdiscs to `mode` (net::tc::settle_launch_time_queue over a TcClient): off lays the root
-    /// without an etf, unsupported looks nothing up; on igc the first etf and the last removal reset the
-    /// adapter. Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails.
-    [[nodiscard]] static auto settle_launch_time(std::string_view interface, statusbar::net::tc::LaunchTimeMode mode)
+    /// `interface`'s qdiscs to `mode` for `layout` (launch_time_queue(), net::tc::settle_launch_time_queue over a
+    /// TcClient): off lays the root without an etf, unsupported looks nothing up; on igc the first etf and the
+    /// last removal reset the adapter. Linux, CAP_NET_ADMIN; off Linux, or without the interface, fails.
+    [[nodiscard]] static auto settle_launch_time(
+        std::string_view interface, statusbar::net::tc::LaunchTimeMode mode, XdpQueueLayout const& layout = {})
         -> statusbar::StatusValue<statusbar::net::tc::LaunchTimeQueueAction>;
 
     /// Open AF_XDP on `interface`'s queue `options.queue`, adopting or attaching (and pinning) the program as net::XdpConfig

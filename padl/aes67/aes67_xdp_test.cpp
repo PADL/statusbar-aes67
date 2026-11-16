@@ -209,6 +209,21 @@ TEST(aes67_xdp, launch_time_asks_for_tx_metadata_on_the_socket_s_queue)
     EXPECT_FALSE(XdpTransport::settle_launch_time("no-such-interface-0", net::tc::LaunchTimeMode::off).has_value());
 }
 
+// A caller that ranks the higher queues higher puts the socket on the top queue, PTP below it, the rest below
+// that; the defaults stay the socket on 0 and PTP on 2, and a PTP queue that leaves the rest no queue is dropped.
+TEST(aes67_xdp, the_launch_time_queue_follows_the_layout_the_caller_chooses)
+{
+    auto const top = XdpTransport::launch_time_queue(3, {.queue = 2, .ptp_queue = 1, .rest_below = true});
+    EXPECT_TRUE(top.queue == 2 && top.ptp_queue == uint16_t{1} && top.rest_below);
+    EXPECT_EQ(net::tc::launch_time_class(top), net::tc::make_handle(XdpTransport::LAUNCH_TIME_QDISC_MAJOR, 3));
+    auto const root = net::tc::launch_time_mqprio(top);
+    EXPECT_TRUE(root && root->offset[2] == 2 && root->count[2] == 1 && root->offset[0] == 0 && root->count[0] == 1);
+    EXPECT_FALSE(XdpTransport::launch_time_queue(2, {.queue = 1, .ptp_queue = 0, .rest_below = true}).ptp_queue.has_value());
+    auto const fallback = XdpTransport::launch_time_queue(4);
+    EXPECT_TRUE(fallback.queue == XdpTransport::QUEUE && fallback.ptp_queue == XdpTransport::PTP_QUEUE && !fallback.rest_below);
+    EXPECT_FALSE(XdpTransport::launch_time_queue(4, {.queue = 2}).ptp_queue.has_value());  // PTP 2 on the socket's own
+}
+
 TEST(aes67_xdp, binds_the_queue_rss_is_steered_to)
 {
     EXPECT_EQ(XdpTransport::config_for("eth0").queue_id, XdpTransport::QUEUE);
