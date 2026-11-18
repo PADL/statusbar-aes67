@@ -275,22 +275,22 @@ class XdpTransport final : public Transport
     /// and bit 24 clear, RFC 1112 Section 6.4); the ports accept their own groups' and count the rest unmatched.
     [[nodiscard]] static auto tagged_groups_rule(uint16_t vid) noexcept -> statusbar::net::CompiledRule<32>;
 
-    /// Whether `layout` has a PTP queue that fits `tx_queues` (net::tc::launch_time_queue_is_possible()).
-    [[nodiscard]] static constexpr auto ptp_queue_fits(uint16_t const tx_queues, XdpQueueLayout const& layout) noexcept -> bool
+    /// Whether `layout` has a PTP queue that fits `tx_queues` (net::tc::launch_time_mqprio() lays it).
+    [[nodiscard]] static auto ptp_queue_fits(uint16_t const tx_queues, XdpQueueLayout const& layout) noexcept -> bool
     {
         return layout.ptp_queue.has_value() &&
-            statusbar::net::tc::launch_time_queue_is_possible(
-                   {.major = LAUNCH_TIME_QDISC_MAJOR,
-                    .queue = layout.queue,
-                    .tx_queues = tx_queues,
-                    .ptp_queue = layout.ptp_queue,
-                    .rest_below = layout.rest_below});
+            statusbar::net::tc::launch_time_mqprio({.major = LAUNCH_TIME_QDISC_MAJOR,
+                                                    .queue = layout.queue,
+                                                    .tx_queues = tx_queues,
+                                                    .ptp_queue = layout.ptp_queue,
+                                                    .rest_below = layout.rest_below})
+                .has_value();
     }
 
     /// The TX queues of an interface of `tx_queues` (net::tc::settle_launch_time_queue): `layout`'s queue kept
     /// for the socket's timed frames, its PTP queue for PTP where it fits (ptp_queue_fits()), under
     /// LAUNCH_TIME_QDISC_MAJOR, a root that stays when launch time is off.
-    [[nodiscard]] static constexpr auto launch_time_queue(uint16_t const tx_queues, XdpQueueLayout const& layout = {}) noexcept
+    [[nodiscard]] static auto launch_time_queue(uint16_t const tx_queues, XdpQueueLayout const& layout = {}) noexcept
         -> statusbar::net::tc::LaunchTimeQueue
     {
         return statusbar::net::tc::LaunchTimeQueue{
