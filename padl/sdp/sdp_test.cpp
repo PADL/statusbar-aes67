@@ -970,4 +970,85 @@ TEST(sdp, a_channel_order_of_256_characters_is_written_whole)
     EXPECT_TRUE(to_string(*session).find("a=fmtp:97 channel-order=" + order + "\r\n") != std::string::npos);
 }
 
+// Extension attributes go at session level after the session's own, in order, before the first m=; one whose name is
+// not a token is left out, a value is kept on one line, and parse() reads the session past them, keeping none.
+TEST(sdp_attributes, extension_attributes_are_written_at_session_level_in_order)
+{
+    auto session = parse(DANTE);
+    EXPECT_TRUE(session.has_value());
+    if (!session) {
+        return;
+    }
+    session->attributes = {
+        {.name = "x-test-id", .value = "stream-1"},
+        {.name = "bad name", .value = "dropped"},
+        {.name = "x-flag"},
+        {.name = "x-two", .value = "a\r\nb"},
+    };
+    std::string const text = to_string(*session);
+    auto const first = text.find("a=x-test-id:stream-1\r\na=x-flag\r\na=x-two:a  b\r\nm=audio");
+    EXPECT_TRUE(first != std::string::npos);
+    EXPECT_TRUE(first > text.find("t=0 0\r\n"));
+    EXPECT_TRUE(text.find("dropped") == std::string::npos);
+    auto const again = parse(text);
+    EXPECT_TRUE(again.has_value() && again->attributes.empty() && again->media == session->media);
+}
+
+// A value is an RFC 8866 byte-string: NUL dropped (a value of NULs alone is the property form); a name with a
+// separator (`:`) is not a token, so left out.
+TEST(sdp_attributes, a_value_loses_nul_and_a_name_must_be_a_token)
+{
+    Session session;
+    session.attributes = {
+        {.name = "x-nul", .value = std::string{"a\0b", 3}},
+        {.name = "x-only-nul", .value = std::string{"\0", 1}},
+        {.name = "x:colon", .value = "dropped"},
+    };
+    std::string const text = to_string(session);
+    EXPECT_TRUE(text.ends_with("t=0 0\r\na=x-nul:ab\r\na=x-only-nul\r\n"));
+    EXPECT_FALSE(text.contains('\0'));
+    EXPECT_FALSE(text.contains("dropped"));
+}
+
+// An attribute the module writes or reads, or a sender's own (mid, framecount), in any case, is never an extension:
+// left out, so the session's own attributes stand.
+TEST(sdp_attributes, a_reserved_name_is_left_out)
+{
+    Session session;
+    session.attributes = {
+        {.name = "ptime", .value = "4"},
+        {.name = "PTIME", .value = "4"},
+        {.name = "recvonly"},
+        {.name = "ts-refclk", .value = "ptp=traceable"},
+        {.name = "mid", .value = "1"},
+        {.name = "x-kept", .value = "1"},
+    };
+    EXPECT_TRUE(to_string(session).ends_with("t=0 0\r\na=x-kept:1\r\n"));
+    for (std::string_view const name :
+         {"rtpmap", "fmtp", "maxptime", "mediaclk", "clock-domain", "source-filter", "rtcp", "rtcp-mux"}) {
+        EXPECT_TRUE(is_reserved_attribute(name));
+    }
+    EXPECT_FALSE(is_reserved_attribute("x-kept"));
+}
+
+// The o= username and unicast address are written as read unless empty or holding a space, CR or LF, so a re-served
+// SDP keeps its origin tuple: a TAB, or a `:` a token may not hold, round-trips.
+TEST(sdp, an_origin_field_is_written_as_read)
+{
+    auto const session = parse("v=0\r\no=user\tname:1 7 9 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 239.69.0.1/32\r\nt=0 0\r\n"
+                               "m=audio 5004 RTP/AVP 96\r\na=rtpmap:96 L24/48000/2\r\n");
+    EXPECT_TRUE(session.has_value() && session->username == "user\tname:1");
+    EXPECT_TRUE(session.has_value() && to_string(*session).contains("o=user\tname:1 7 9 IN IP4 10.0.0.1\r\n"));
+    Session spaced;
+    spaced.username = "two words";
+    EXPECT_TRUE(to_string(spaced).contains("o=- 0 0 IN IP4 0.0.0.0\r\n"));
+}
+
+TEST(sdp_attributes, a_session_without_them_is_written_as_before)
+{
+    auto const session = parse(DANTE).value_or(Session{});
+    EXPECT_TRUE(session.attributes.empty());
+    EXPECT_TRUE(to_string(session).find("t=0 0\r\nm=audio") != std::string::npos);
+}
+
 TEST_MAIN(padl_sdp, sdp_test)

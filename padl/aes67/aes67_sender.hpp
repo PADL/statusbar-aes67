@@ -127,9 +127,13 @@ class Sender
     /// session version. Off the real-time thread.
     void set_name(std::string name);
     [[nodiscard]] auto name() const noexcept -> std::string const& { return name_; }
+    /// The session-level attributes session() writes after its own, in order (sdp::Attribute); none until set.
+    /// A change bumps the session version. Off the real-time thread.
+    void set_attributes(std::vector<sdp::Attribute> attributes);
+    [[nodiscard]] auto attributes() const noexcept -> std::vector<sdp::Attribute> const& { return attributes_; }
 
-    /// Adopt `previous`'s send offset, grandmaster, media clock, name, SDP session id and version, DSCP, channel order,
-    /// ST 2110 form and Info Block version, so this sender's next configure() announces the same session one version on.
+    /// Adopt `previous`'s send offset, grandmaster, media clock, name, attributes, SDP session id and version, DSCP, channel
+    /// order, ST 2110 form and Info Block version, so this sender's next configure() announces the same session one version on.
     /// Call before configure(), off the real-time thread.
     void continue_from(Sender const& previous);
 
@@ -216,6 +220,7 @@ class Sender
     FrameProvider provider_;
     Transport& transport_;
     std::string name_;
+    std::vector<sdp::Attribute> attributes_;
     /// One version on (the first: the wall clock's seconds, one on).
     void bump_session_version();
     /// Fill `payload` with the provider's frames from `first_index`, or

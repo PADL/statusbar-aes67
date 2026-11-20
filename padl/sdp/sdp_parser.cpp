@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 #include "padl/sdp/sdp_session.hpp"
+#include "padl/sdp/sdp_text.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <charconv>
 #include <optional>
 #include <span>
@@ -307,12 +307,7 @@ auto parse_rtcp(std::string_view rest) noexcept -> statusbar::StatusValue<RtcpAt
     return rtcp;
 }
 
-auto equal_ignoring_case(std::string_view const a, std::string_view const b) noexcept -> bool
-{
-    return std::ranges::equal(a, b, [](char x, char y) {
-        return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
-    });
-}
+using detail::equal_ignoring_case;
 
 enum class RtpmapResult
 {

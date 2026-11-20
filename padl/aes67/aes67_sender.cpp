@@ -15,6 +15,7 @@
 #include <random>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace padl::aes67 {
 
@@ -150,6 +151,7 @@ void Sender::continue_from(Sender const& previous)
     grandmaster_ = previous.grandmaster_;
     sender_clock_ = previous.sender_clock_;
     name_ = previous.name_;
+    attributes_ = previous.attributes_;
     session_id_ = previous.session_id_;
     session_version_ = previous.session_version_;
     dscp_ = previous.dscp_;
@@ -174,6 +176,15 @@ void Sender::set_name(std::string name)
         return;
     }
     name_ = std::move(name);
+    bump_session_version();
+}
+
+void Sender::set_attributes(std::vector<sdp::Attribute> attributes)
+{
+    if (attributes == attributes_) {
+        return;
+    }
+    attributes_ = std::move(attributes);
     bump_session_version();
 }
 
@@ -514,6 +525,7 @@ auto Sender::session() const -> std::optional<sdp::Session>
         .origin_address = statusbar::ip::to_string(origin),
         .name = name_.empty() ? std::string{"-"} : name_,
         .connection = sdp::Connection{.address = destination_.address, .ttl = multicast ? destination_.ttl : uint8_t{0}},
+        .attributes = attributes_,
         .media = {media_description(origin, multicast)},
     };
 }

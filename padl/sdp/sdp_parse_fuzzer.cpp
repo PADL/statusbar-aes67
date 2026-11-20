@@ -3,7 +3,9 @@
 
 /// libFuzzer harness for sdp::parse: it may not crash or read out of bounds, every pair of a media's
 /// reference clocks in force (RFC 7273 Section 4.8) compares consistently, and a media's channel order
-/// (ST 2110-30 Section 6.2.2) and maxptime are well formed and survive to_string() and parse() again.
+/// (ST 2110-30 Section 6.2.2) and maxptime are well formed and survive to_string() and parse() again, and an extension
+/// attribute written beside them stays on its line (no NUL, CR or LF in its value), one with a reserved name is not
+/// written, and neither changes what parse() reads.
 
 #include "padl/sdp/sdp_session.hpp"
 
@@ -11,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <span>
+#include <string>
 #include <string_view>
 
 using namespace statusbar;
@@ -69,6 +72,40 @@ void check_round_trip(padl::sdp::Session const& session)
     }
 }
 
+/// The line `to_string()` writes for the extension attribute `x-fuzz` lies whole between two CRLFs: its value
+/// holds no NUL, CR or LF.
+void check_attribute_line(std::string_view const text)
+{
+    auto const at = text.find("\r\na=x-fuzz");
+    auto const end = at == std::string_view::npos ? at : text.find("\r\n", at + 2);
+    if (end == std::string_view::npos) {
+        std::abort();
+    }
+    if (text.substr(at + 2, end - at - 2).find_first_of(std::string_view{"\0\r\n", 3}) != std::string_view::npos) {
+        std::abort();
+    }
+}
+
+/// Extension attributes (Session::attributes) are written on their lines, whatever their values, a reserved name
+/// (`ptime`) not at all, and change nothing parse() reads.
+void check_attributes(padl::sdp::Session session, std::string_view const value)
+{
+    auto const plain_text = padl::sdp::to_string(session);
+    auto const plain = padl::sdp::parse(plain_text);
+    session.attributes = {{.name = "ptime", .value = std::string{value.substr(0, 8)}}};
+    if (padl::sdp::to_string(session) != plain_text) {
+        std::abort();
+    }
+    session.attributes = {
+        {.name = "x-fuzz", .value = std::string{value.substr(0, 64)}}, {.name = "PTime", .value = "1"}, {.name = "x-two"}};
+    auto const written = padl::sdp::to_string(session);
+    check_attribute_line(written);
+    auto const extended = padl::sdp::parse(written);
+    if (plain.has_value() != extended.has_value() || (extended && (!extended->attributes.empty() || *extended != *plain))) {
+        std::abort();
+    }
+}
+
 }  // namespace
 
 extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
@@ -84,5 +121,6 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
         check_references(session->effective_clocks(media));
     }
     check_round_trip(*session);
+    check_attributes(*session, text);
     return 0;
 }

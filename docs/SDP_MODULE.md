@@ -24,6 +24,7 @@ level; the `Session::effective_*()` accessors resolve them (media level wins).
 - `PayloadFormat` — one rtpmap: payload type, `Encoding`, rate, channels.
 - `Encoding` — `l16`, `l24`, `l32`, `am824`; `bytes_per_sample()`, `encoding_name()`.
 - `Connection`, `PtpReference`, `MediaClock` (`MediaClockKind`), `SourceFilter`, `RtcpAttribute`, `Direction` — the attributes above.
+- `Attribute` — `a=<name>:<value>` (or `a=<name>`), a session-level attribute nothing here interprets, in `Session::attributes`: written, never read.
 - `PtpVersion` — `ieee1588_2002`, `ieee1588_2008`, `ieee1588_2019`, `ieee802_1as`, `other`; `ptp_version_name()`.
 - `ReferenceClocks` — one level's `ts-refclk` lines: the PTP references and the other sources (up to `MAX` each); `ReferenceClocks::of()`, `PtpReference::naming()` build a sender's.
 - `Session::effective_clocks()`, `Session::names_clock()`, `PtpReference::same_clock()` — the references in force for a media, and whether one of them names a given clock (AES67-2023 Clause 8.2).
@@ -124,9 +125,18 @@ auto ptp_offset(std::string_view text) -> std::optional<uint32_t>
 - `parse()` reads at most `Session::MAX_MEDIA` (16) audio media sections and fails
   `too_many_media` past them, so a description from the network stays small; sections it
   skips (video, other protocols) are not counted.
+- `Session::attributes` are written after the session's own attributes, in order, before the
+  first `m=`; one whose name is not an RFC 8866 Section 9 token, or is one of
+  `RESERVED_ATTRIBUTES` (what the module writes or reads, and `framecount`, `mid`, `group`,
+  `ssrc`; any case), is left out, so an extension never overrides the session's own; a value is
+  written as a byte-string (NUL dropped, CR and LF as spaces). `parse()` still
+  ignores every attribute it does not know and leaves `attributes` empty, so a session read
+  from another device compares equal whatever extensions it carries.
 - `to_string()` sanitises so its output always parses: line breaks in text fields become
   spaces, an empty username or one with a space is written `-`, and an origin address
-  that is not one token as `0.0.0.0`. A unicast connection's TTL is dropped and a
+  that is not one token as `0.0.0.0`. These `o=` fields are otherwise written as read, so a
+  re-served SDP keeps its origin tuple byte for byte; only extension attribute names are held to
+  RFC 8866's token. A unicast connection's TTL is dropped and a
   multicast one always gets one (`DEFAULT_MULTICAST_TTL` when 0), as RFC 8866 Section 5.7
   requires.
 - `a=rtcp:<port>[ IN IP4 <address>]` (RFC 3605) is read at media level into

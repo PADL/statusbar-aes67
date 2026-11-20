@@ -70,10 +70,12 @@ How the `aes67` module's `Sender` frames, times and describes a stream; the modu
   (FNV-1a) of the origin address and the name, so two senders on one host with the same
   name need ids of their own. The version starts at the wall clock's seconds (RFC 8866's
   suggestion, so it grows across restarts too) and goes up by one with each
-  `configure()`, grandmaster change (`traceable` included) and rename. Ids and versions are kept to 63 bits.
-  `continue_from()` carries the id and version (and the send offset, grandmaster, media
-  clock and name) to a replacement sender, so its next `configure()` announces the same
+  `configure()`, grandmaster change (`traceable` included), rename and change of attributes. Ids and versions are kept
+  to 63 bits. `continue_from()` carries the id and version (and the send offset, grandmaster, media
+  clock, name and attributes) to a replacement sender, so its next `configure()` announces the same
   session one version on.
+- `set_attributes()` gives `session()` session-level attributes the caller interprets (`sdp::Attribute`, such as
+  an `x-` extension naming the stream in a control protocol), written after the sender's own, in order.
 - `set_st2110(true)` gives `session()` ST 2110-30's form (Section 6.2): the channel order as an fmtp
   (`a=fmtp:<pt> channel-order=`, `channel_order()`: the one set, or undefined groups) and `a=maxptime`, the packet
   time. Off by default, so an AES67 receiver sees AES67's attributes alone. A change, and a channel order changed

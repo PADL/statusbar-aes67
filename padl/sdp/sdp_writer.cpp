@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 #include "padl/sdp/sdp_session.hpp"
+#include "padl/sdp/sdp_text.hpp"
 #include "statusbar/ip/ip_ipv4_address_format.hpp"
 
 #include <algorithm>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -40,11 +42,34 @@ auto one_line(std::string_view const text) -> std::string
     return line;
 }
 
-/// A single non-empty token, or `fallback`: an o= username or unicast address.
-auto token(std::string_view const text, std::string_view const fallback) -> std::string_view
+/// An attribute value as RFC 8866 Section 9's byte-string: CR and LF become spaces, NUL is dropped.
+auto byte_string(std::string_view const text) -> std::string
 {
-    bool const is_token = !text.empty() && text.find_first_of(" \r\n") == std::string_view::npos;
-    return is_token ? text : fallback;
+    std::string value = one_line(text);
+    std::erase(value, '\0');
+    return value;
+}
+
+/// A token-char (RFC 8866 Section 9): a visible ASCII character other than `"(),/:;<=>?@[\]`.
+constexpr auto is_token_char(char const c) noexcept -> bool
+{
+    constexpr std::string_view excluded{"\"(),/:;<=>?@[\\]"};
+    auto const u = static_cast<unsigned char>(c);
+    return u > ' ' && u < 0x7F && excluded.find(c) == std::string_view::npos;
+}
+
+/// An o= username or unicast address as read, else `fallback` when it is empty or holds a space, CR or LF: so a
+/// re-served SDP keeps its origin tuple byte for byte. Not held to the token rule attribute names are (is_sdp_token()).
+auto origin_field(std::string_view const text, std::string_view const fallback) -> std::string_view
+{
+    bool const kept = !text.empty() && text.find_first_of(" \r\n") == std::string_view::npos;
+    return kept ? text : fallback;
+}
+
+/// Whether `text` is a token (RFC 8866 Section 9), as an attribute name must be (Section 5.13).
+[[nodiscard]] auto is_sdp_token(std::string_view const text) noexcept -> bool
+{
+    return !text.empty() && std::ranges::all_of(text, is_token_char);
 }
 
 /// The line `<prefix><value>`, appended to `text`.
@@ -209,16 +234,29 @@ void write_media(std::string& text, Media const& media)
     }
 }
 
+/// Each extension attribute whose name is a token and not reserved (is_reserved_attribute()), in order:
+/// `a=<name>:<value>` (byte_string()), or `a=<name>` without a value.
+void write_attributes(std::string& text, std::span<Attribute const> const attributes)
+{
+    for (auto const& attribute : attributes) {
+        if (!is_sdp_token(attribute.name) || is_reserved_attribute(attribute.name)) {
+            continue;
+        }
+        auto const value = byte_string(attribute.value);
+        write_line(text, "a=", value.empty() ? attribute.name : attribute.name + ":" + value);
+    }
+}
+
 /// The `v=`, `o=` and `s=` lines.
 void write_origin(std::string& text, Session const& session)
 {
-    text.append("v=0\r\no=").append(token(session.username, "-"));
+    text.append("v=0\r\no=").append(origin_field(session.username, "-"));
     text += std::format(" {} {}", session.session_id, session.session_version);
-    write_line(text, " IN IP4 ", token(session.origin_address, "0.0.0.0"));
+    write_line(text, " IN IP4 ", origin_field(session.origin_address, "0.0.0.0"));
     write_line(text, "s=", session.name.empty() ? std::string{"-"} : one_line(session.name));
 }
 
-/// The session level: the `v=`, `o=` and `s=` lines, `i=`, `c=`, `t=`, then the session attributes.
+/// The session level: the `v=`, `o=` and `s=` lines, `i=`, `c=`, `t=`, then the session attributes, extensions last.
 void write_session_level(std::string& text, Session const& session)
 {
     write_origin(text, session);
@@ -226,9 +264,16 @@ void write_session_level(std::string& text, Session const& session)
     text += "t=0 0\r\n";
     write_direction(text, session.direction);
     write_clock_attributes(text, session);
+    write_attributes(text, session.attributes);
 }
 
 }  // namespace
+
+auto is_reserved_attribute(std::string_view const name) noexcept -> bool
+{
+    return std::ranges::any_of(
+        RESERVED_ATTRIBUTES, [name](std::string_view const reserved) { return detail::equal_ignoring_case(name, reserved); });
+}
 
 auto ts_refclk_value(PtpReference const& clock) -> std::string
 {

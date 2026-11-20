@@ -5,7 +5,8 @@
 
 /// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection, L16/L24/L32/AM824 audio
 /// media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source filters, the RFC 3605 RTCP port, maxptime and
-/// fmtp's channel-order and IPMX. Session- or media-level values resolve through the effective_*() accessors.
+/// fmtp's channel-order and IPMX, and session-level extension attributes (written only). Session- or media-level values
+/// resolve through the effective_*() accessors.
 
 #include "padl/sdp/sdp_error.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -319,6 +320,43 @@ struct Media
     auto operator==(Media const&) const noexcept -> bool = default;
 };
 
+/// The attribute names this module writes or parse() reads, and those AES67, RAVENNA and ST 2022-7 senders give beside
+/// them (framecount, mid, group, ssrc): an Attribute with one of these names, in any case, is not written, so an
+/// extension never overrides the session's own attributes.
+inline constexpr std::array<std::string_view, 18> RESERVED_ATTRIBUTES{
+    "sendrecv",
+    "sendonly",
+    "recvonly",
+    "inactive",
+    "ts-refclk",
+    "mediaclk",
+    "clock-domain",
+    "source-filter",
+    "rtpmap",
+    "rtcp",
+    "rtcp-mux",
+    "ptime",
+    "maxptime",
+    "fmtp",
+    "framecount",
+    "mid",
+    "group",
+    "ssrc",
+};
+
+/// Whether `name` is one of RESERVED_ATTRIBUTES, compared without regard to case.
+[[nodiscard]] auto is_reserved_attribute(std::string_view name) noexcept -> bool;
+
+/// `a=<name>:<value>` (RFC 8866 Section 5.13), or `a=<name>` without a value: a session-level attribute this module
+/// does not interpret, such as an `x-` extension. Written, never read: parse() ignores attributes it does not know.
+struct Attribute
+{
+    std::string name;   ///< an RFC 8866 Section 9 token, not reserved; to_string() leaves out any other
+    std::string value;  ///< written as a byte-string (NUL dropped, CR and LF as spaces); empty: the property form, `a=<name>`
+
+    auto operator==(Attribute const&) const noexcept -> bool = default;
+};
+
 /// A session description
 struct Session
 {
@@ -337,6 +375,7 @@ struct Session
     std::optional<MediaClock> media_clock;
     std::optional<SourceFilter> source_filter;
     std::optional<uint8_t> clock_domain;  ///< a=clock-domain (see effective_clock_domain())
+    std::vector<Attribute> attributes;    ///< written after the other session attributes, in order; parse() leaves it empty
     std::vector<Media> media;
 
     [[nodiscard]] auto effective_direction(Media const& m) const noexcept -> Direction
@@ -419,8 +458,9 @@ struct Session
 [[nodiscard]] auto media_clock_value(MediaClock const& clock) -> std::string;
 
 /// Write a session description, CRLF line endings, fields in RFC 8866 order, sanitised so the
-/// output always parses. A PtpReference with neither grandmaster nor traceable, and a unicast
-/// connection's TTL, are not written. Every media should have an effective connection.
+/// output always parses. A PtpReference with neither grandmaster nor traceable, a unicast
+/// connection's TTL, and an Attribute whose name is not a token or is reserved are not written. Every media
+/// should have an effective connection.
 [[nodiscard]] auto to_string(Session const& session) -> std::string;
 
 }  // namespace padl::sdp

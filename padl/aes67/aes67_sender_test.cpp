@@ -886,4 +886,32 @@ TEST(aes67_sender, a_sender_crosses_the_rtp_timestamp_wrap_without_a_gap)
     EXPECT_EQ(sender.counters().packets, uint64_t{PACKETS});
 }
 
+// The attributes set are written at session level, one version on, the same session id; the same set changes nothing,
+// and a replacement sender continues the session with them.
+TEST(aes67_sender, extension_attributes_are_announced_one_session_version_on)
+{
+    LoopTransport transport;
+    PatternSource source{8};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    auto const session_for = [](Sender const& s) { return s.session().value_or(padl::sdp::Session{}); };
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    auto const before = session_for(sender);
+    std::vector<padl::sdp::Attribute> const attributes{{.name = "x-test-id", .value = "1234"}};
+    sender.set_attributes(attributes);
+    auto const after = session_for(sender);
+    EXPECT_EQ(after.session_version, before.session_version + 1);
+    EXPECT_EQ(after.session_id, before.session_id);
+    EXPECT_TRUE(padl::sdp::to_string(after).find("t=0 0\r\na=x-test-id:1234\r\n") != std::string::npos);
+    sender.set_attributes(attributes);
+    EXPECT_EQ(session_for(sender).session_version, after.session_version);
+    sender.set_attributes({});
+    EXPECT_EQ(session_for(sender).session_version, after.session_version + 1);
+    EXPECT_TRUE(padl::sdp::to_string(session_for(sender)).find("x-test-id") == std::string::npos);
+    sender.set_attributes(attributes);
+    Sender replacement{STEREO_L24, source.provider(), transport, "Test"};
+    replacement.continue_from(sender);
+    EXPECT_TRUE(replacement.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5004}));
+    EXPECT_TRUE(padl::sdp::to_string(session_for(replacement)).find("a=x-test-id:1234\r\n") != std::string::npos);
+}
+
 TEST_MAIN(padl_aes67, aes67_sender_test)
