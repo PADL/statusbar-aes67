@@ -3,7 +3,7 @@
 
 /// libFuzzer harness for SapDirectory::handle_packet (parse_sap_packet, sdp::parse, updates, deletions, eviction and
 /// expiry) and, on what parses, origin_line(), read_origin_line() and sdp::to_string(). None may crash; the
-/// directory stays bounded.
+/// directory stays bounded, and no entry was first seen after it was last seen.
 
 #include "padl/sap/sap_packet.hpp"
 #include "padl/sap/sap_receiver.hpp"
@@ -44,6 +44,11 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
     }
     if (directory.entries().size() > padl::sap::SapDirectory::MAX_SESSIONS) {
         std::abort();
+    }
+    for (auto const& entry : directory.entries()) {
+        if (entry.first_seen_ns > entry.last_seen_ns || entry.last_seen_ns > now_ns) {
+            std::abort();  // first seen, then seen again, never later than now
+        }
     }
     return 0;
 }

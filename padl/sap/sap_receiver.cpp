@@ -207,7 +207,8 @@ auto SapDirectory::add_entry(SessionKey key, sdp::Session session, SapMessage co
         .session = std::move(session),
         .sap_origin = message.origin,
         .message_id_hash = message.message_id_hash,
-        .last_seen_ns = now_ns});
+        .last_seen_ns = now_ns,
+        .first_seen_ns = now_ns});
     return Event{.kind = Kind::announced, .entry = entries_.back(), .evicted = std::move(evicted)};
 }
 

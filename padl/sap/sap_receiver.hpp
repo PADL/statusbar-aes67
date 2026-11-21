@@ -92,6 +92,7 @@ class SapDirectory
         statusbar::ip::IPv4Address sap_origin;
         uint16_t message_id_hash{0};
         int64_t last_seen_ns{0};
+        int64_t first_seen_ns{0};  ///< when it was first announced: kept while it is re-announced or changed
     };
 
     struct Event

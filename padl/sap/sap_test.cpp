@@ -360,6 +360,20 @@ TEST(sap_directory, announce_refresh_newer_version_delete)
     EXPECT_FALSE(from_origin(directory, deletion, 5).has_value());  // already gone
 }
 
+TEST(sap_directory, an_entry_keeps_when_it_was_first_seen)
+{
+    SapDirectory directory;
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 10);
+    (void)from_origin(directory, announcement(dante_session("A", 1)), 20);                                   // a re-announcement
+    (void)from_origin(directory, announcement(dante_session("B", 2), IPv4Address{10, 10, 32, 236}, 8), 30);  // renamed in place
+    (void)from_origin(directory, announcement(dante_session("A", 1, "10.10.32.248"), IPv4Address{10, 10, 32, 248}), 40);
+    auto const entries = directory.entries();
+    EXPECT_EQ(entries.size(), size_t{2});
+    EXPECT_TRUE(entries.size() == 2 && entries[0].session.name == "B" && entries[0].first_seen_ns == 10);
+    EXPECT_TRUE(entries.size() == 2 && entries[0].last_seen_ns == 30);
+    EXPECT_TRUE(entries.size() == 2 && entries[1].first_seen_ns == 40 && entries[1].last_seen_ns == 40);
+}
+
 TEST(sap_directory, announced_from_is_its_o_address_or_its_sap_origin)
 {
     auto const s = dante_session("A", 1, "10.10.32.99");
