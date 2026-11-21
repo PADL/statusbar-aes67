@@ -360,6 +360,18 @@ TEST(sap_directory, announce_refresh_newer_version_delete)
     EXPECT_FALSE(from_origin(directory, deletion, 5).has_value());  // already gone
 }
 
+TEST(sap_directory, announced_from_is_its_o_address_or_its_sap_origin)
+{
+    auto const s = dante_session("A", 1, "10.10.32.99");
+    EXPECT_TRUE(announced_from(s, IPv4Address{10, 10, 32, 236}, IPv4Address{10, 10, 32, 99}));   // its o= address
+    EXPECT_TRUE(announced_from(s, IPv4Address{10, 10, 32, 236}, IPv4Address{10, 10, 32, 236}));  // its SAP origin
+    EXPECT_FALSE(announced_from(s, IPv4Address{10, 10, 32, 236}, IPv4Address{10, 10, 32, 1}));
+    EXPECT_FALSE(announced_from(dante_session("A", 1, "avio.local"), IPv4Address{10, 10, 32, 9}, IPv4Address{10, 10, 32, 1}));
+    EXPECT_TRUE(subscription_matches(s, IPv4Address{10, 10, 32, 236}, "A", "10.10.32.236"));
+    EXPECT_TRUE(subscription_matches(s, IPv4Address{10, 10, 32, 236}, "A", "10.10.32.99"));
+    EXPECT_FALSE(subscription_matches(s, IPv4Address{10, 10, 32, 236}, "A", "10.10.32.1"));
+}
+
 TEST(sap_directory, a_stale_or_foreign_deletion_is_ignored)
 {
     SapDirectory directory;

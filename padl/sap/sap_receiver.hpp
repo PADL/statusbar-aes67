@@ -52,9 +52,14 @@ struct OriginLine
 /// it has none that reads.
 [[nodiscard]] auto read_origin_line(std::string_view sdp) -> std::optional<OriginLine>;
 
+/// Whether `session`, announced from SAP origin `sap_origin`, is from `origin`: its o= address or its SAP origin
+/// (numerically).
+[[nodiscard]] auto announced_from(
+    sdp::Session const& session, statusbar::ip::IPv4Address const& sap_origin, statusbar::ip::IPv4Address const& origin) -> bool;
+
 /// Whether `session`, announced from SAP origin `sap_origin`, is the one a
 /// subscription to session name `name` means: its s= is `name`, and, when
-/// `origin` is not empty, its o= address or its SAP origin is `origin`.
+/// `origin` is not empty, its o= address or its SAP origin is `origin` (announced_from(), or the o= host name).
 [[nodiscard]] auto subscription_matches(
     sdp::Session const& session, statusbar::ip::IPv4Address const& sap_origin, std::string_view name, std::string_view origin)
     -> bool;

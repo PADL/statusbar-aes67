@@ -138,6 +138,12 @@ auto read_origin_line(std::string_view const sdp) -> std::optional<OriginLine>
     return OriginLine{.key = session_key(session), .version = session.session_version};
 }
 
+auto announced_from(
+    sdp::Session const& session, statusbar::ip::IPv4Address const& sap_origin, statusbar::ip::IPv4Address const& origin) -> bool
+{
+    return sap_origin == origin || statusbar::ip::parse_ipv4(session.origin_address) == origin;
+}
+
 auto subscription_matches(
     sdp::Session const& session,
     statusbar::ip::IPv4Address const& sap_origin,
@@ -147,14 +153,11 @@ auto subscription_matches(
     if (session.name != name) {
         return false;
     }
-    if (origin.empty()) {
-        return true;
-    }
-    if (session.origin_address == origin) {
-        return true;
+    if (origin.empty() || session.origin_address == origin) {
+        return true;  // unpinned, or pinned by its o= text (a host name too)
     }
     auto const pinned = statusbar::ip::parse_ipv4(origin);
-    return pinned && *pinned == sap_origin;
+    return pinned && announced_from(session, sap_origin, *pinned);
 }
 
 auto SapDirectory::handle(SapMessage const& message, int64_t const now_ns) -> std::optional<Event>
