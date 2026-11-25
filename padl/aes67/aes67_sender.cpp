@@ -6,6 +6,7 @@
 #include "padl/aes67/aes67_error.hpp"
 #include "padl/mediaclock/mediaclock_ptp_clock.hpp"
 #include "padl/rtp/rtp_header.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ip/ip_ipv4_address_format.hpp"
 
 #include <algorithm>
@@ -88,9 +89,16 @@ auto Sender::open_port(Destination const& destination) -> statusbar::Status
         error_ = port.error();
         return statusbar::failure(port.error());
     }
-    port_ = std::move(*port);
+    adopt_port(std::move(*port));
     destination_ = destination;
     return statusbar::success();
+}
+
+void Sender::adopt_port(std::unique_ptr<SendPort> port) noexcept
+{
+    port_ = std::move(port);
+    frames_ = port_->frames();
+    schedule_.set_start_lead(frames_ != nullptr ? frames_->start_lead_frames() : 0);
 }
 
 auto Sender::send_plan(Destination const& destination) const noexcept -> SendPlan
@@ -143,8 +151,10 @@ void Sender::become_ready() noexcept
 }
 
 void Sender::clear() noexcept
-{
+{  // NOLINT(statusbar-block-statements): the port and its run, reset together
     port_.reset();
+    frames_ = nullptr;
+    run_started_ = false;
     schedule_.stop();
     state_ = State::idle;
 }
@@ -339,6 +349,10 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
         state_ = State::ready;
         error_.clear();
     }
+    if (frames_ != nullptr) [[unlikely]] {
+        tick_frames(now_index);
+        return;
+    }
     if (auto const newest = newest_due(now_index)) {
         send_until(*newest);
     }
@@ -348,6 +362,9 @@ void Sender::place_held() noexcept
 {
     uint64_t const first = schedule_.held().value_or(0);
     send_state_.store({.ssrc = ssrc(), .first_index = first, .next_index = first});
+    if (frames_ != nullptr) {
+        start_run(first);
+    }
 }
 
 auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint64_t>
@@ -381,11 +398,11 @@ auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool
     // to give (the packet is dropped) does it write the staging buffer, so its frames are still counted.
     std::optional<Supply> supply;
     PayloadRenderer const render = [this, &supply](std::span<uint8_t> const payload) noexcept {
-        supply = render_payload(schedule_.next_index(), payload);
+        supply = render_payload(schedule_.next_index(), format_.frames_per_packet, payload);
         return true;
     };
     bool const sent = port_->send_rendered_at(header, payload_.size(), render, tick_ns_);
-    Supply const supplied = supply ? *supply : render_payload(schedule_.next_index(), payload_);
+    Supply const supplied = supply ? *supply : render_payload(schedule_.next_index(), format_.frames_per_packet, payload_);
     if (supplied == Supply::missing) {
         counters_.lost += format_.frames_per_packet;
     }
@@ -428,6 +445,7 @@ void Sender::pause() noexcept
         paused_ = true;
         schedule_.stop();
         send_state_.store({});  // the RTCP session reads an SSRC of 0 as not sending
+        stop_run();
     }
     if (auto const send_error = transport_.send_error()) {
         state_ = State::error;
@@ -438,13 +456,123 @@ void Sender::pause() noexcept
     }
 }
 
-auto Sender::render_payload(uint64_t const first_index, std::span<uint8_t> const payload) noexcept -> Supply
+auto Sender::render_payload(uint64_t const first_index, uint32_t const frames, std::span<uint8_t> const payload) noexcept -> Supply
 {
-    Supply const supply = provider_ ? provider_(first_index, format_.frames_per_packet, payload) : Supply::none;
+    Supply const supply = provider_ ? provider_(first_index, frames, payload) : Supply::none;
     if (supply != Supply::frames) {
         fill_silence(format_.encoding, payload);
     }
     return supply;
+}
+
+void Sender::tick_frames(uint64_t const now_index) noexcept
+{
+    auto const newest = newest_due(now_index);  // a held run's placement starts the port's run there
+    if (!newest) {
+        return;
+    }
+    if (!run_started_ || run_first_index_ != schedule_.run_first()) {
+        start_run(schedule_.run_first());  // not held, or a hold ended before its packet: from the newest due packet
+    }
+    follow_send_offset();
+    write_until(*newest);
+}
+
+void Sender::start_run(uint64_t const first_index) noexcept
+{
+    stop_run();
+    run_send_offset_ = send_offset_.load(std::memory_order_relaxed);
+    run_first_index_ = first_index;
+    frames_->start(
+        {.ssrc = ssrc(), .first_sequence = schedule_.sequence(), .first_index = first_index, .send_offset = run_send_offset_});
+    run_started_ = true;
+}
+
+void Sender::stop_run() noexcept
+{
+    if (run_started_) {
+        frames_->stop();
+        run_started_ = false;
+    }
+}
+
+void Sender::follow_send_offset() noexcept
+{
+    uint32_t const send_offset = send_offset_.load(std::memory_order_relaxed);
+    if (send_offset != run_send_offset_) {
+        run_send_offset_ = send_offset;
+        frames_->set_send_offset(send_offset);
+    }
+}
+
+void Sender::write_until(uint64_t const newest) noexcept
+{
+    uint32_t written = 0;
+    while (schedule_.next_index() <= newest) {
+        if (write_packet()) {
+            ++written;
+        } else {
+            ++counters_.dropped;
+        }
+        schedule_.advance();
+    }
+    count_written(written);
+}
+
+auto Sender::write_packet() noexcept -> bool
+{
+    // The provider writes straight into the port where the packet's frames lie in one piece; else into the staging
+    // buffer, copied into the port's pieces after (where its storage wraps) or dropped (no room), its frames counted.
+    uint64_t const first = schedule_.next_index();
+    auto const out = frames_->writable(first, format_.frames_per_packet);
+    bool const whole = out.size() >= payload_.size();
+    if (render_payload(first, format_.frames_per_packet, whole ? out.first(payload_.size()) : std::span{payload_}) ==
+        Supply::missing) {
+        counters_.lost += format_.frames_per_packet;
+    }
+    return (whole || copy_staged(first)) && frames_->commit(first, format_.frames_per_packet);
+}
+
+auto Sender::copy_staged(uint64_t const first_index) noexcept -> bool
+{
+    size_t const frame_bytes = format_.bytes_per_frame();
+    for (uint32_t done = 0; done < format_.frames_per_packet;) {
+        auto const out = frames_->writable(first_index + done, format_.frames_per_packet - done);
+        auto const n = static_cast<uint32_t>(std::min<size_t>(out.size() / frame_bytes, format_.frames_per_packet - done));
+        if (n == 0) {
+            return false;
+        }
+        statusbar::span_copy(out, std::span<uint8_t const>{payload_}.subspan(done * frame_bytes, n * frame_bytes));
+        done += n;
+    }
+    return true;
+}
+
+void Sender::count_written(uint32_t const packets) noexcept
+{
+    counters_.packets += packets;
+    counters_.frames += uint64_t{packets} * format_.frames_per_packet;
+    auto const progress = run_progress();
+    send_state_.store({
+        .ssrc = ssrc(),
+        .packets = progress.packets,
+        .octets = static_cast<uint32_t>(uint64_t{progress.packets} * payload_.size()),
+        .first_index = run_first_index_,
+        .next_index = progress.next_index,
+        .sent = progress.packets != 0,
+    });
+    if (packets > 0 && state_ != State::error) {
+        state_ = State::running;
+    }
+}
+
+auto Sender::run_progress() const noexcept -> SendProgress
+{
+    auto const progress = frames_->progress();
+    if (progress.ssrc == ssrc() && progress.first_index == run_first_index_) {
+        return progress;
+    }
+    return {.ssrc = ssrc(), .first_index = run_first_index_, .next_index = run_first_index_, .packets = 0};  // not taken yet
 }
 
 auto Sender::session() const -> std::optional<sdp::Session>

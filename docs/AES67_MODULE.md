@@ -32,9 +32,10 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `receive_endpoint()` — where a stream described by an SDP arrives here: its group, this host's address, or, for an offer whose `c=` is its origin, this host's address.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
 - `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, send offset, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
-- `Depacketizer` — a receiver's per-packet rules: admission (payload type, size, source filter, SSRC learning, RFC 3550 Appendix A.1 sequence check), the reorder window, the interarrival jitter and the counters. `Receiver` runs one.
-- `PacketSchedule` — a sender's packet grid, due rule, resynchronisation, held start and each run's SSRC and sequence. `Sender` runs one.
+- `Depacketizer` — a receiver's per-packet rules: admission (payload type, size, source filter, SSRC learning, RFC 3550 Appendix A.1 sequence check), the reorder window, the interarrival jitter and the counters. `Receiver` runs one on its packet path; a frame port runs one beside the network.
+- `PacketSchedule` — a sender's packet grid, due rule, resynchronisation, held start and each run's SSRC and sequence. `Sender` runs one; a frame port's engine runs one from the `SendRun` it is given.
 - `ReceivePlan`, `SendPlan`, `SendRun`, `receive_plan()` — what a stream is, as a transport is asked to carry it (`Transport::open_receive_stream()` / `open_send_stream()`, by default today's `open_receive()` / `open_receive_from()` / `open_send()`), and where a sender's run starts.
+- `FrameReceive`, `FrameSend`, `FrameDrain`, `SendProgress` — frame ports (`ReceivePort::frames()`, `SendPort::frames()`): ports that packetise and depacketise themselves and take or give frames at sample indices; `Receiver::drain()` and `Sender::tick()` take that path when a port is one.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` accepts the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
@@ -82,13 +83,13 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `padl/aes67/aes67_depacketizer.hpp` — `Depacketizer`.
 - `padl/aes67/aes67_packet_schedule.hpp` — `PacketSchedule`.
 - `padl/aes67/aes67_plan.hpp` — `ReceivePlan`, `SendPlan`, `SendRun`.
-- `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_for()`.
+- `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `FrameReceive`, `FrameSend`, `FrameDrain`, `SendProgress`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_for()`.
 - `padl/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `padl/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.
 - `padl/aes67/aes67_socket.hpp` — `InterfaceInfo`, `find_interface()`, `PKTINFO_SPACE`, `open_receive_socket()`, `open_send_socket()`, `open_rtcp_socket()`.
 - `padl/aes67/aes67_rtcp.hpp` — `RtcpSession`, `RtcpSessionOptions`, `RtcpStats`, `RtcpCadence`, `Rfc3550Interval`, `SenderReportTime`, `sender_clock_offset()`.
 - `padl/aes67/aes67_error.hpp` — `Aes67Error`.
-- `padl/aes67/aes67_test_support.hpp` — `LoopTransport`, `PatternSource`, `RecordingSink`, crafted sessions and packets, for tests.
+- `padl/aes67/aes67_test_support.hpp` — `LoopTransport` (and its frame ports, `FrameRx` and `FrameTx`, under `frame_ports`), `PatternSource`, `RecordingSink`, crafted sessions and packets, for tests.
 
 ## Dependencies
 

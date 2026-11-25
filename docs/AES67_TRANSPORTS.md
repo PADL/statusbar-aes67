@@ -39,6 +39,37 @@ module overview in [AES67_MODULE.md](AES67_MODULE.md).
   The defaults call `open_receive_from()` (a source-specific group with a source to join
   for), `open_receive()` and `open_send()`; `UdpTransport` and `XdpTransport` keep them.
 
+## Frame ports
+
+A port may packetise and depacketise the stream itself, beside the network, and take or give
+frames at sample indices: `ReceivePort::frames()` returns its `FrameReceive`, `SendPort::frames()`
+its `FrameSend` (both null for a packet port, and constant for the port's life).
+
+- A `FrameReceive` admits and places packets by its `ReceivePlan` with the `Depacketizer`'s
+  rules and the plan's offset. `Receiver::drain()` asks it for the frames it placed
+  (`drain(now_index, handler)`), its counters and its `ReceiveState`, and passes on each change
+  of the offset (`set_offset()`); a sender-clocked plan's port forgets its offset on a new source
+  (`FrameDrain::offset_forgotten`), as the packet path does. There is no due-tick gate. A
+  `Receiver` without a `FrameHandler` hands the port one that drops the frames.
+- A `FrameSend` sends the `SendRun` it is given (SSRC, first sequence, first index, send offset)
+  on its `SendPlan`'s grid with a `PacketSchedule`. `Sender::tick()` keeps its own schedule:
+  each packet due is written into the port (`writable()`, in pieces where the port's storage
+  wraps, then `commit()`), counted as the packet path counts it, and the port sends it. A
+  run's first packet is placed `start_lead_frames()` past the newest due packet (held as for a
+  report), `pause()` stops the run, a hold that ends before that packet restarts it from the
+  newest due packet, and a changed send offset is passed on. A packet the port had no room for is
+  dropped, and the run leaves it out (its sequence number spent), as a packet port does. The
+  `SendState` an RTCP session reads comes from the port's `progress()` once that names the run
+  (`SendProgress::ssrc` and `first_index`); until the port has taken it, the run's first packet
+  is published as not yet sent.
+- Both are called on the real-time thread and neither may block or make a system call there.
+  `start()`, `stop()`, `set_send_offset()` and `set_offset()` only record the change: the
+  implementation publishes it (through `itc`) to a thread off the tick, which applies it to
+  whatever does the packet work. The tick never applies them itself.
+- `LoopTransport` in `aes67_test_support.hpp` has a frame port of each kind (`frame_ports`),
+  built from `Depacketizer` and `PacketSchedule`; the tests show the frames, counters, packets
+  and their timestamps equal the packet path's for the same input.
+
 ## UdpTransport
 
 - The one transport that carries unicast (AES67-2023 Clause 6.1.1), both ways: every

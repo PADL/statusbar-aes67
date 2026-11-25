@@ -36,6 +36,66 @@ using namespace statusbar;
 using namespace padl::aes67;
 using statusbar::ip::IPv4Address;
 
+namespace {
+
+/// One stream sent twice from the same pattern: as packets, and as frames written to a frame port whose engine sends
+/// its run by a PacketSchedule (LoopTransport::FrameTx::send_due(), after each tick).
+struct TwoSenders
+{
+    explicit TwoSenders(uint32_t const start_lead = 0, uint32_t const phase = 0)
+    {
+        frames.frame_ports = true;
+        frames.start_lead = start_lead;
+        packet.set_packet_phase(phase);
+        frame.set_packet_phase(phase);
+    }
+    /// Both configured to `destination`.
+    auto configure(Destination const& destination) -> bool
+    {
+        return packet.configure(destination).has_value() && frame.configure(destination).has_value();
+    }
+    /// Both ticked at `now_index`, then the frame port's engine.
+    void tick(uint64_t const now_index)
+    {
+        packet.tick(now_index, 0);
+        frame.tick(now_index, 0);
+        if (frames.frame_tx != nullptr) {
+            frames.frame_tx->send_due(now_index);
+        }
+    }
+    /// Both sent the same packets (sequence numbers by their difference from the first), the frame path's run
+    /// starting `skip` packets after the packet path's.
+    void expect_same_packets(size_t const skip = 0) const
+    {
+        EXPECT_EQ(packets.queue.size(), frames.queue.size() + skip);
+        auto const a0 = padl::rtp::parse_rtp(packets.queue.at(skip).bytes);
+        auto const b0 = padl::rtp::parse_rtp(frames.queue.at(0).bytes);
+        for (size_t i = 0; i < std::min(packets.queue.size() - skip, frames.queue.size()); ++i) {
+            auto const a = padl::rtp::parse_rtp(packets.queue[skip + i].bytes);
+            auto const b = padl::rtp::parse_rtp(frames.queue[i].bytes);
+            EXPECT_TRUE(a && b && a0 && b0 && a->header.timestamp.get() == b->header.timestamp.get());
+            EXPECT_TRUE(
+                a && b && std::ranges::equal(a->payload, b->payload) && b->header.payload_type() == a->header.payload_type());
+            EXPECT_TRUE(
+                a && b && a0 && b0 &&
+                static_cast<uint16_t>(a->header.sequence.get() - a0->header.sequence.get()) ==
+                    static_cast<uint16_t>(b->header.sequence.get() - b0->header.sequence.get()));
+            EXPECT_TRUE(b && b->header.ssrc.get() == frame.ssrc());
+        }
+    }
+
+    LoopTransport packets;
+    LoopTransport frames;
+    PatternSource packet_source{6};
+    PatternSource frame_source{6};
+    Sender packet{STEREO_L24, packet_source.provider(), packets, "Test"};
+    Sender frame{STEREO_L24, frame_source.provider(), frames, "Test"};
+};
+
+Destination const GROUP{.address = IPv4Address{239, 69, 1, 2}, .port = 5004, .payload_type = 98};
+
+}  // namespace
+
 TEST(aes67_sender, announces_l32_that_an_l32_receiver_accepts)
 {
     LoopTransport transport;
@@ -914,6 +974,112 @@ TEST(aes67_sender, extension_attributes_are_announced_one_session_version_on)
     EXPECT_TRUE(padl::sdp::to_string(session_for(replacement)).find("a=x-test-id:1234\r\n") != std::string::npos);
 }
 
+// A frame port's engine, run by a PacketSchedule from the SendRun the Sender gives it, sends in each tick the packets
+// the packet path sends, with the same timestamps and payloads; missing frames are silence and a stall skips alike.
+TEST(aes67_sender, a_frame_port_sends_what_the_packet_path_sends)
+{
+    TwoSenders senders{0, 18};
+    EXPECT_TRUE(senders.configure(GROUP));
+    EXPECT_TRUE(senders.frames.frame_tx != nullptr);
+    uint64_t const base = (48'000ULL * 1'000'000) + 7;
+    senders.packet_source.refuse_index = senders.frame_source.refuse_index = base + (20 * FPP) + 18 - (base % FPP);
+    for (uint64_t now = base; now < base + 3000; now += 6) {
+        senders.tick(now);
+        EXPECT_EQ(senders.packets.queue.size(), senders.frames.queue.size());  // in the same tick
+    }
+    senders.tick(base + 3000 + (20 * uint64_t{FPP}));  // a stall: both skip ahead
+    senders.expect_same_packets();
+    EXPECT_TRUE(senders.packet.counters() == senders.frame.counters());
+    EXPECT_EQ(senders.frame.counters().lost, uint64_t{FPP} + (19 * uint64_t{FPP}));  // a missing packet, then the skip
+    auto const first = padl::rtp::parse_rtp(senders.frames.queue.front().bytes);
+    auto const& runs = senders.frames.frame_tx->runs;
+    EXPECT_EQ(runs.size(), size_t{1});
+    EXPECT_TRUE(first && runs.size() == 1 && runs[0].ssrc == senders.frame.ssrc() && runs[0].send_offset == 6);
+    EXPECT_TRUE(first && runs.size() == 1 && runs[0].first_sequence == first->header.sequence.get());
+    EXPECT_TRUE(first && runs.size() == 1 && static_cast<uint32_t>(runs[0].first_index) == first->header.timestamp.get());
+    EXPECT_EQ(runs[0].first_index % FPP, uint64_t{18});
+    EXPECT_EQ(senders.frame.send_state().first_index, senders.packet.send_state().first_index);
+    EXPECT_TRUE(senders.frame.state() == State::running);
+}
+
+// A frame port's run starts its start lead past the newest due packet, on the grid, so it can take the run off the
+// real-time thread; a pause stops it, and the next tick starts a new run under a new SSRC.
+TEST(aes67_sender, a_frame_port_run_starts_its_lead_ahead_and_a_pause_stops_it)
+{
+    TwoSenders senders{100};
+    EXPECT_TRUE(senders.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    senders.tick(base + 53);  // the packet path sends packet base
+    auto const& tx = *senders.frames.frame_tx;
+    EXPECT_EQ(tx.runs.size(), size_t{1});
+    EXPECT_TRUE(senders.frames.queue.empty());
+    EXPECT_EQ(tx.runs[0].first_index, base + (3 * uint64_t{FPP}));  // 100 frames, rounded up to the grid
+    EXPECT_EQ(senders.frame.send_state().first_index, base + (3 * uint64_t{FPP}));
+    EXPECT_FALSE(senders.frame.send_state().sent);
+    for (uint64_t now = base + 59; now < base + 1000; now += 6) {
+        senders.tick(now);
+    }
+    senders.expect_same_packets(3);  // the frame port's run starts three packets on
+    auto const first = padl::rtp::parse_rtp(senders.frames.queue.front().bytes);
+    EXPECT_TRUE(first && first->header.timestamp.get() == static_cast<uint32_t>(base + (3 * uint64_t{FPP})));
+    EXPECT_TRUE(senders.frame.send_state().sent);
+
+    uint32_t const ssrc = senders.frame.ssrc();
+    senders.frame.pause();
+    EXPECT_EQ(tx.stops, size_t{1});
+    senders.frame.tick(base + 2000, 0);
+    EXPECT_EQ(tx.runs.size(), size_t{2});
+    EXPECT_TRUE(tx.runs.size() == 2 && tx.runs[1].ssrc != ssrc && tx.runs[1].ssrc == senders.frame.ssrc());
+    EXPECT_TRUE(tx.runs.size() == 2 && tx.runs[1].first_index == base + (43 * uint64_t{FPP}));  // newest 40, three on
+}
+
+// A run held for its first report starts its engine where the packet path's first packet goes; a new send offset
+// reaches the engine from the tick.
+TEST(aes67_sender, a_frame_port_run_held_for_its_report_starts_where_the_packet_path_does)
+{
+    TwoSenders senders;
+    EXPECT_TRUE(senders.configure(GROUP));
+    auto const packet_hold = senders.packet.hold_reports();
+    auto const frame_hold = senders.frame.hold_reports();
+    uint64_t const base = 48'000ULL * 1'000'000;
+    for (uint64_t now = base; now < base + 3000; now += 6) {
+        senders.tick(now);
+    }
+    auto const& tx = *senders.frames.frame_tx;
+    EXPECT_EQ(tx.runs.size(), size_t{1});
+    EXPECT_TRUE(tx.runs.size() == 1 && tx.runs[0].first_index == senders.packet.send_state().first_index);
+    EXPECT_TRUE(!senders.packets.queue.empty());
+    senders.expect_same_packets();
+    senders.packet.set_send_offset(12);
+    senders.frame.set_send_offset(12);
+    for (uint64_t now = base + 3000; now < base + 4000; now += 6) {
+        senders.tick(now);
+    }
+    EXPECT_EQ(tx.send_offset, uint32_t{12});
+    senders.expect_same_packets();
+    EXPECT_TRUE(senders.packet.counters() == senders.frame.counters());
+}
+
+// A frame port with no room for a packet's frames: dropped, its frames still pulled and counted, as a packet the
+// transport has no buffer for.
+TEST(aes67_sender, a_frame_port_without_room_counts_what_a_packet_port_without_a_buffer_does)
+{
+    TwoSenders senders;
+    EXPECT_TRUE(senders.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    senders.tick(base + 53);
+    senders.packets.refuse = senders.frames.refuse = true;
+    senders.packet_source.refuse_index = senders.frame_source.refuse_index = base + (2 * uint64_t{FPP});
+    for (uint64_t now = base + 59; now < base + 300; now += 6) {
+        senders.tick(now);
+    }
+    EXPECT_TRUE(senders.packet.counters() == senders.frame.counters());
+    senders.expect_same_packets();  // the dropped ones left out on both paths
+    EXPECT_EQ(senders.frame.counters().dropped, uint64_t{5});
+    EXPECT_EQ(senders.frame.counters().lost, uint64_t{FPP});
+    EXPECT_EQ(senders.packet_source.pulls, senders.frame_source.pulls);
+}
+
 // The plan a transport is asked to open: the destination, its marking and tag, the format, payload type and grid.
 TEST(aes67_sender, a_send_plan_carries_the_destination_format_and_grid)
 {
@@ -941,6 +1107,82 @@ TEST(aes67_sender, a_send_plan_carries_the_destination_format_and_grid)
             .phase = 30,
         }));
     EXPECT_TRUE(transport.vlan.has_value());  // the default open_send_stream(): open_send() with the tag
+}
+
+// The SendState an RTCP session reads is the packet path's, one engine step behind (the port sends after the tick that
+// writes): a run's first tick publishes its first packet as not yet sent, never the port's run before, and a pause
+// publishes nothing sending on both paths.
+TEST(aes67_sender, a_frame_port_publishes_the_send_state_the_packet_path_does)
+{
+    TwoSenders senders;
+    EXPECT_TRUE(senders.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    std::vector<SendState> packet;
+    std::vector<SendState> frame;
+    auto run = [&](uint64_t const from, uint64_t const to) {
+        for (uint64_t now = from; now < to; now += 6) {
+            senders.tick(now);
+            packet.push_back(senders.packet.send_state());
+            frame.push_back(senders.frame.send_state());
+        }
+    };
+    run(base + 53, base + 1000);
+    senders.packet.pause();
+    senders.frame.pause();
+    packet.push_back(senders.packet.send_state());
+    frame.push_back(senders.frame.send_state());
+    run(base + 2000, base + 3000);
+    size_t fresh_runs = 0;
+    size_t followed = 0;
+    for (size_t t = 0; t < frame.size(); ++t) {
+        auto const& b = frame[t];
+        SendState const before = t > 0 ? packet[t - 1] : SendState{};
+        if (b.ssrc == 0) {
+            EXPECT_TRUE(b == SendState{} && packet[t] == SendState{});  // paused
+        } else if (before.ssrc == 0 || before.first_index != packet[t].first_index) {
+            EXPECT_TRUE(
+                b == (SendState{.ssrc = b.ssrc, .first_index = packet[t].first_index, .next_index = packet[t].first_index}));
+            ++fresh_runs;
+        } else {
+            EXPECT_TRUE(b.packets == before.packets && b.octets == before.octets && b.sent == before.sent);
+            EXPECT_TRUE(b.first_index == before.first_index && b.next_index == before.next_index);
+            ++followed;
+        }
+    }
+    EXPECT_EQ(fresh_runs, size_t{2});
+    EXPECT_TRUE(followed > 300);
+    EXPECT_EQ(frame.back().ssrc, senders.frame.ssrc());
+}
+
+// A report hold that ends before its run's first packet: the packet path starts from the newest due packet, and the
+// frame port's run, given the held one, is restarted there, so nothing counted as sent is left unsent.
+TEST(aes67_sender, a_report_hold_ended_before_its_packet_restarts_the_frame_port_run)
+{
+    TwoSenders senders;
+    EXPECT_TRUE(senders.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    {
+        auto const packet_hold = senders.packet.hold_reports();
+        auto const frame_hold = senders.frame.hold_reports();
+        senders.tick(base + 53);
+        senders.tick(base + 59);
+    }
+    senders.tick(base + 65);  // the restart: the port's progress is still the held run's, under the same SSRC
+    auto const restarted = senders.frame.send_state();
+    EXPECT_TRUE(restarted.next_index == restarted.first_index && restarted.packets == 0 && !restarted.sent);
+    EXPECT_EQ(restarted.first_index, senders.packet.send_state().first_index);
+    for (uint64_t now = base + 71; now < base + 3000; now += 6) {
+        senders.tick(now);
+    }
+    auto const& tx = *senders.frames.frame_tx;
+    auto const first = padl::rtp::parse_rtp(senders.packets.queue.at(0).bytes);
+    EXPECT_EQ(tx.runs.size(), size_t{2});
+    EXPECT_EQ(tx.stops, size_t{1});
+    EXPECT_TRUE(first && tx.runs.size() == 2 && static_cast<uint32_t>(tx.runs[1].first_index) == first->header.timestamp.get());
+    senders.expect_same_packets();
+    EXPECT_TRUE(senders.packet.counters() == senders.frame.counters());
+    EXPECT_EQ(senders.frame.send_state().first_index, senders.packet.send_state().first_index);
+    EXPECT_EQ(tx.lost, uint64_t{0});
 }
 
 TEST_MAIN(padl_aes67, aes67_sender_test)

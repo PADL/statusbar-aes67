@@ -98,6 +98,39 @@ class RefusalCounter
     std::array<std::atomic<uint64_t>, 4> counts_{};
 };
 
+//
+// Frame ports
+//
+
+/// What one FrameReceive::drain() did.
+struct FrameDrain
+{
+    uint32_t packets{0};           ///< packets whose frames it handed on
+    bool accepted{false};          ///< a packet of the learnt source arrived: receive_state() moved on
+    bool offset_forgotten{false};  ///< a sender-clocked plan adopted a new source (Depacketizer::admit()'s no_offset)
+};
+
+/// A receive port that admits and places the stream's packets itself, by the Depacketizer's rules and its ReceivePlan,
+/// and gives frames at sample indices (ReceivePort::frames()). The draining thread calls it; nothing here may block or
+/// make a system call. set_offset() is published to whatever places the packets off the real-time thread.
+class FrameReceive
+{
+  public:
+    virtual ~FrameReceive() = default;
+    /// Hands `handler` (never empty) the frames placed since the last drain, by sample index (`now_index` the media
+    /// clock's index at the current PTP time), and says what it did.
+    [[nodiscard]] virtual auto drain(uint64_t now_index, FrameHandler const& handler) noexcept -> FrameDrain = 0;
+    /// The stream's counters, as Receiver::counters() (Depacketizer::counters()).
+    [[nodiscard]] virtual auto counters() const noexcept -> Counters const& = 0;
+    /// Every counter to zero; the stream goes on.
+    virtual void reset_counters() noexcept = 0;
+    /// The latest report block inputs; valid once a source is learnt.
+    [[nodiscard]] virtual auto receive_state() const noexcept -> ReceiveState = 0;
+    /// Places packets by `offset` (Receiver::set_offset()) from now on, or holds them no_offset (nullopt). It replaces
+    /// the plan's; a change takes effect once published, after the call returns.
+    virtual void set_offset(std::optional<uint32_t> offset) noexcept = 0;
+};
+
 /// Datagrams addressed to one receiver's destination.
 class ReceivePort
 {
@@ -109,6 +142,47 @@ class ReceivePort
     /// Why the stream cannot arrive now (the transport's filter does not accept its group), or none (the default).
     /// The draining thread; it clears when the transport accepts the group again.
     [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
+    /// The port as a frame port, which the Receiver drains for frames instead of receive(); nullptr (the default): a
+    /// packet port. Constant for the port's life.
+    [[nodiscard]] virtual auto frames() noexcept -> FrameReceive* { return nullptr; }
+};
+
+/// What a FrameSend has sent of the run it is sending: the run it last took, which may lag start().
+struct SendProgress
+{
+    uint32_t ssrc{0};         ///< the run's SendRun::ssrc; 0: none taken yet
+    uint64_t first_index{0};  ///< the run's SendRun::first_index
+    uint64_t next_index{0};   ///< the first frame of the next packet it sends
+    uint32_t packets{0};      ///< packets sent in the run, mod 2^32
+};
+
+/// A send port that packetises the stream itself, by a PacketSchedule of its SendPlan and the SendRun it is given, from
+/// frames the Sender writes at sample indices (SendPort::frames()). The ticking thread calls it and nothing here may
+/// block or make a system call: start(), stop() and set_send_offset() only record the change, which the
+/// implementation publishes off the real-time thread (a run is placed start_lead_frames() ahead for that). Destroying
+/// the port stops its run.
+class FrameSend
+{
+  public:
+    virtual ~FrameSend() = default;
+    /// How far past the newest due packet a run's first packet is placed, in frames: time for start() to take effect.
+    [[nodiscard]] virtual auto start_lead_frames() const noexcept -> uint32_t = 0;
+    /// Sends `run` from its first packet, once that is due, on the plan's grid; the run before it must be stopped.
+    virtual void start(SendRun const& run) noexcept = 0;
+    /// Stops the run after the packet in hand.
+    virtual void stop() noexcept = 0;
+    /// The run goes on with packets due once their last frame is `frames` behind now (Sender::set_send_offset()).
+    virtual void set_send_offset(uint32_t frames) noexcept = 0;
+    /// Where frames [first_index, first_index + n) are written, n <= `frames`: n whole frames, fewer at the end of the
+    /// port's storage (ask again from first_index + n); empty when first_index is not one it can hold now.
+    [[nodiscard]] virtual auto writable(uint64_t first_index, uint32_t frames) noexcept -> std::span<uint8_t> = 0;
+    /// Frames [first_index, first_index + frames) are written: the run may send them. False when refused. A packet
+    /// none of whose frames were committed is one the Sender dropped (writable() had no room; Counters::dropped): the
+    /// run leaves it out, its sequence number spent, as a packet port does with a packet it had no buffer for.
+    [[nodiscard]] virtual auto commit(uint64_t first_index, uint32_t frames) noexcept -> bool = 0;
+    /// What the run it last took has sent. It may still describe the run before start() until the change takes
+    /// effect: SendProgress::ssrc and first_index say which run it is, and the Sender reads it only for its own.
+    [[nodiscard]] virtual auto progress() const noexcept -> SendProgress = 0;
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX
@@ -150,6 +224,9 @@ class SendPort
         }
         return statusbar::success();
     }
+    /// The port as a frame port, which the Sender writes frames to instead of sending packets; nullptr (the default): a
+    /// packet port. Constant for the port's life.
+    [[nodiscard]] virtual auto frames() noexcept -> FrameSend* { return nullptr; }
 };
 
 /// Where a sender's packets go and how they are marked.

@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <memory>
 #include <print>
 #include <string>
@@ -44,6 +45,77 @@ inline void expect_pattern(Received const& block)
     for (size_t i = 0; i < block.bytes.size(); ++i) {
         EXPECT_EQ(block.bytes[i], pattern(block.first_index + (i / 6), i % 6));
     }
+}
+
+/// Each frame a sink was handed, by its index (the last one handed for an index).
+auto frames_by_index(RecordingSink const& sink, size_t const frame_bytes) -> std::map<uint64_t, std::vector<uint8_t>>
+{
+    std::map<uint64_t, std::vector<uint8_t>> frames;
+    for (auto const& block : sink.blocks) {
+        for (size_t f = 0; f < block.frames; ++f) {
+            auto const first = block.bytes.begin() + static_cast<std::ptrdiff_t>(f * frame_bytes);
+            frames[block.first_index + f] = {first, first + static_cast<std::ptrdiff_t>(frame_bytes)};
+        }
+    }
+    return frames;
+}
+
+/// One stream received twice from the same packets: through a packet port, and through a frame port that runs the
+/// Depacketizer beside the network.
+struct TwoPaths
+{
+    explicit TwoPaths(bool const sender_clock = false)
+    {
+        frames.frame_ports = true;
+        packet.set_sender_clock(sender_clock);
+        frame.set_sender_clock(sender_clock);
+    }
+    /// Both configured for `session`.
+    auto configure(padl::sdp::Session const& session) -> bool
+    {
+        return packet.configure(session).has_value() && frame.configure(session).has_value();
+    }
+    /// The datagram to both.
+    void push(Endpoint const& destination, std::vector<uint8_t> const& bytes)
+    {
+        packets.queue.push_back({destination, bytes});
+        frames.queue.push_back({destination, bytes});
+    }
+    /// Both drained at `now_index`.
+    void drain(uint64_t const now_index)
+    {
+        packet.drain(now_index);
+        frame.drain(now_index);
+    }
+    /// The two hand on the same frames, and count, publish and report alike.
+    void expect_same() const
+    {
+        EXPECT_TRUE(frames_by_index(packet_sink, 6) == frames_by_index(frame_sink, 6));
+        EXPECT_TRUE(packet.counters() == frame.counters());
+        EXPECT_TRUE(packet.receive_state() == frame.receive_state());
+        EXPECT_TRUE(packet.ssrc() == frame.ssrc());
+        EXPECT_TRUE(packet.state() == frame.state());
+        EXPECT_TRUE(packet.offset() == frame.offset());
+    }
+
+    LoopTransport packets;
+    LoopTransport frames;
+    RecordingSink packet_sink;
+    RecordingSink frame_sink;
+    Receiver packet{STEREO_L24, packet_sink.handler(), packets};
+    Receiver frame{STEREO_L24, frame_sink.handler(), frames};
+};
+
+/// RTP packet `seq` of the pattern at `index`, its timestamp carrying `offset`.
+auto offset_packet(
+    uint16_t const seq, uint64_t const index, uint32_t const offset, uint32_t const ssrc = 0x1234, uint8_t const pt = 97)
+    -> std::vector<uint8_t>
+{
+    auto bytes = rtp_packet(seq, static_cast<uint32_t>(index), ssrc, pt);
+    padl::rtp::RtpHeader header{};
+    header.init(pt, seq, static_cast<uint32_t>(index) + offset, ssrc);
+    (void)store_unchecked(std::span{bytes}, header);
+    return bytes;
 }
 
 }  // namespace
@@ -589,6 +661,76 @@ TEST(aes67_receiver, an_any_source_group_or_an_unfiltered_one_is_joined_for_any_
     EXPECT_FALSE(transport.joined_source.has_value());
 }
 
+// A frame port that admits and places by the Depacketizer gives the frames, counters and report inputs a packet port
+// gives the Receiver, packet for packet: reorder, loss, duplicates, strays, multiplexed RTCP, its ring wrapping.
+TEST(aes67_receiver, a_frame_port_hands_on_and_counts_what_the_packet_path_does)
+{
+    TwoPaths paths;
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    uint32_t const offset = 0x1000;
+    EXPECT_TRUE(paths.configure(stream_session(group, offset)));
+    EXPECT_TRUE(paths.frames.frame_rx != nullptr && paths.packets.frame_rx == nullptr);
+    uint64_t const base = (1ULL << 32U) + 96;  // the timestamps wrap
+    auto at = [&](uint16_t const n) { return base + (uint64_t{n} * FPP); };
+    for (uint16_t n : {0, 1, 2, 4, 3, 3, 6}) {  // 3 late, then again; 5 lost
+        paths.push(group, offset_packet(static_cast<uint16_t>(10 + n), at(n), offset));
+    }
+    paths.push(group, offset_packet(17, at(7), offset, 0x9999));      // another source
+    paths.push(group, offset_packet(17, at(7), offset, 0x1234, 96));  // another payload type
+    paths.push(group, {0x80, 0x61});                                  // malformed
+    paths.push(group, {0x80, 200, 0x00, 0x01});                       // multiplexed RTCP: not a refusal
+    paths.drain(at(7));
+    paths.expect_same();
+    EXPECT_EQ(paths.frame.counters().packets, uint64_t{6});
+    for (uint16_t n = 7; n < 40; ++n) {  // 1584 frames: the frame port's ring wraps
+        paths.push(group, offset_packet(static_cast<uint16_t>(10 + n), at(n), offset));
+        paths.drain(at(n + 1));  // when it was sent: the packet path's due-tick gate is open
+        paths.expect_same();
+    }
+    // A new source, adopted after a second's silence.
+    uint64_t const later = at(40) + 48'000;
+    paths.push(group, offset_packet(500, later, offset, 0x5555));
+    paths.drain(later);
+    paths.expect_same();
+    EXPECT_TRUE(paths.frame.ssrc() == std::optional<uint32_t>{0x5555});
+    EXPECT_TRUE(paths.frame.state() == State::running);
+}
+
+// The offset reaches a frame port from the draining thread, and a sender-clocked stream's new source makes both paths
+// forget it.
+TEST(aes67_receiver, a_frame_port_follows_the_offset_as_the_packet_path_does)
+{
+    TwoPaths paths{true};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    auto session = stream_session(group, std::nullopt);
+    session.media[0].media_clock = padl::sdp::MediaClock::sender();
+    EXPECT_TRUE(paths.configure(session));
+    auto& port = *paths.frames.frame_rx;
+    EXPECT_TRUE(port.plan.sender_clock && !port.plan.offset.has_value());
+    uint64_t const base = 48'000ULL * 5000;
+    paths.push(group, rtp_packet(0, static_cast<uint32_t>(base)));
+    paths.drain(base);
+    paths.expect_same();
+    EXPECT_EQ(paths.frame.counters().drops.no_offset, uint64_t{1});
+    EXPECT_TRUE(port.offsets.empty());  // nothing changed: nothing passed on
+    paths.packet.set_offset(0);
+    paths.frame.set_offset(0);
+    paths.push(group, rtp_packet(1, static_cast<uint32_t>(base + FPP)));
+    paths.drain(base + FPP);
+    paths.expect_same();
+    EXPECT_TRUE(port.offsets == std::vector<std::optional<uint32_t>>{0U});
+    EXPECT_EQ(paths.frame.counters().packets, uint64_t{1});
+    // Another sender after a second's silence: both forget the offset until its reports give one.
+    paths.push(group, rtp_packet(900, static_cast<uint32_t>(base + 48'000 + FPP), 0x7777));
+    paths.drain(base + 48'000 + FPP);
+    paths.expect_same();
+    EXPECT_FALSE(paths.frame.offset().has_value());
+    EXPECT_FALSE(port.offset.has_value());
+    paths.frame.set_offset(0);
+    paths.drain(base + 48'000 + (2 * FPP));
+    EXPECT_TRUE(port.offset == std::optional<uint32_t>{0});
+}
+
 // The plan a transport is asked to open: the SDP's group and port, its source filter's source to join for and admit,
 // its payload type, packet size and offset.
 TEST(aes67_receiver, a_receive_plan_carries_what_the_sdp_says)
@@ -645,6 +787,20 @@ TEST(aes67_receiver, a_new_source_reopens_the_due_tick_gate)
     size_t const asked = transport.receives;
     receiver.drain(base + 60);  // back inside the old gate's window
     EXPECT_TRUE(transport.receives > asked);
+}
+
+// A receiver without a FrameHandler drains a frame port as the packet path drains a socket: counted, handed nowhere.
+TEST(aes67_receiver, a_frame_port_needs_no_handler)
+{
+    LoopTransport transport;
+    transport.frame_ports = true;
+    Receiver receiver{STEREO_L24, {}, transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    transport.queue.push_back({group, rtp_packet(1, 952)});
+    receiver.drain(952 + FPP);
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
+    EXPECT_TRUE(receiver.state() == State::running);
 }
 
 TEST_MAIN(padl_aes67, aes67_receiver_test)

@@ -93,6 +93,8 @@ class Depacketizer
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
     /// Every counter to zero; the stream, its source and sequence go on.
     void reset_counters() noexcept { counters_ = {}; }
+    /// The counters of a stream depacketized elsewhere (a frame port's), for counters() to read.
+    void adopt_counters(Counters const& counters) noexcept { counters_ = counters; }
     /// The SSRC learnt from the stream's first packet.
     [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t> const& { return ssrc_; }
     /// The report block inputs (RFC 3550 Section 6.4.1) once a source is learnt, as of `now_index`.

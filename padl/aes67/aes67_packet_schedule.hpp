@@ -8,10 +8,12 @@
 /// its first report, and each run's SSRC and sequence (RFC 3550 Section 8). seed() draws from the system; the rest is
 /// real-time safe, one thread.
 
+#include "padl/aes67/aes67_plan.hpp"
 #include "padl/aes67/aes67_stream.hpp"
 #include "padl/mediaclock/mediaclock_ptp_clock.hpp"
 #include "padl/rtp/rtp_header.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <optional>
@@ -55,6 +57,25 @@ class PacketSchedule
         held_first_.reset();
         placed_ = false;
     }
+    /// Every run's first packet at least `frames` past the newest due packet, held until then as for a report; 0 (the
+    /// default): a run starts at the newest due packet unless held.
+    void set_start_lead(uint32_t const frames) noexcept { start_lead_ = frames; }
+    [[nodiscard]] auto start_lead() const noexcept -> uint32_t { return start_lead_; }
+    /// Starts `run`, its first packet due now (is_due()): what a frame port's engine does with the run it is given.
+    void start(SendRun const& run) noexcept
+    {
+        ssrc_.store(run.ssrc, std::memory_order_relaxed);
+        sequence_ = run.first_sequence;
+        next_index_ = run_first_ = run.first_index;
+        held_first_.reset();
+        started_ = true;
+    }
+    /// Whether the packet at `first_index` is due at `now_index` with `send_offset`: its last frame that far behind.
+    [[nodiscard]] auto is_due(uint64_t const first_index, uint64_t const now_index, uint64_t const send_offset) const noexcept
+        -> bool
+    {
+        return first_index + format_.frames_per_packet + send_offset <= now_index + 1;
+    }
     /// Not started: the next newest_due() starts a run on the grid.
     void stop() noexcept { started_ = false; }
     /// Not started, nothing held.
@@ -66,8 +87,8 @@ class PacketSchedule
     }
 
     /// The newest packet due at `now_index` with `send_offset` (frames), next_index() resynchronised; a run's first
-    /// packet waits for its report while `hold` (FIRST_REPORT_LEAD_US). Frames skipped, too far behind to send in
-    /// time, are added to `lost`; nullopt when no packet is to be sent.
+    /// packet waits for its report while `hold` (FIRST_REPORT_LEAD_US), or for the start lead (take_placed()). Frames
+    /// skipped, too far behind to send in time, are added to `lost`; nullopt when no packet is to be sent.
     [[nodiscard]] auto newest_due(uint64_t const now_index, uint64_t const send_offset, bool const hold, uint64_t& lost) noexcept
         -> std::optional<uint64_t>
     {
@@ -99,10 +120,12 @@ class PacketSchedule
 
     /// The current run's SSRC. Any thread.
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return ssrc_.load(std::memory_order_relaxed); }
+    [[nodiscard]] auto sequence() const noexcept -> uint16_t { return sequence_; }
     /// The first frame of the next packet to send.
     [[nodiscard]] auto next_index() const noexcept -> uint64_t { return next_index_; }
     /// The run's first packet.
     [[nodiscard]] auto run_first() const noexcept -> uint64_t { return run_first_; }
+    [[nodiscard]] auto started() const noexcept -> bool { return started_; }
     /// The packet a held run starts at, once placed.
     [[nodiscard]] auto held() const noexcept -> std::optional<uint64_t> const& { return held_first_; }
 
@@ -112,8 +135,8 @@ class PacketSchedule
     [[nodiscard]] auto resync(uint64_t const newest, bool const hold, uint64_t& lost) noexcept -> bool
     {
         uint64_t const fpp = format_.frames_per_packet;
-        if (!started_ && hold && !start_held(newest)) {
-            return false;  // the run's first packet waits for its SR
+        if (!started_ && (hold || start_lead_ != 0) && !start_held(newest, hold)) {
+            return false;  // the run's first packet waits for its SR, or for its start to take effect
         }
         if (!started_) {
             next_index_ = run_first_ = newest;
@@ -133,13 +156,14 @@ class PacketSchedule
         return true;
     }
 
-    /// Whether a held run starts at `newest`: its first packet, FIRST_REPORT_LEAD_US ahead, is due; placed afresh when
-    /// none is yet, or the clock stepped back past it or forward past a burst (its SR would name a packet never sent).
-    [[nodiscard]] auto start_held(uint64_t const newest) noexcept -> bool
+    /// Whether a held run starts at `newest`: its first packet, held_first() ahead, is due; placed afresh (placed_)
+    /// when none is yet, or the clock stepped back past it or forward past a burst (its SR would name a packet never
+    /// sent).
+    [[nodiscard]] auto start_held(uint64_t const newest, bool const hold) noexcept -> bool
     {
         uint64_t const burst = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
-        if (!held_first_ || newest > *held_first_ + burst || *held_first_ > held_first(newest)) {
-            held_first_ = held_first(newest);
+        if (!held_first_ || newest > *held_first_ + burst || *held_first_ > held_first(newest, hold)) {
+            held_first_ = held_first(newest, hold);
             placed_ = true;
             return false;
         }
@@ -151,11 +175,13 @@ class PacketSchedule
         return true;
     }
 
-    /// The packet a held run starts at: FIRST_REPORT_LEAD_US past `newest`, on the packet grid.
-    [[nodiscard]] auto held_first(uint64_t const newest) const noexcept -> uint64_t
+    /// The packet a held run starts at: FIRST_REPORT_LEAD_US past `newest` while `hold`, and at least the start lead,
+    /// on the packet grid.
+    [[nodiscard]] auto held_first(uint64_t const newest, bool const hold) const noexcept -> uint64_t
     {
         uint64_t const fpp = format_.frames_per_packet;
-        uint64_t const lead = ((uint64_t{format_.sample_rate} * FIRST_REPORT_LEAD_US) / 1'000'000) + fpp - 1;
+        uint64_t const report = hold ? (uint64_t{format_.sample_rate} * FIRST_REPORT_LEAD_US) / 1'000'000 : 0;
+        uint64_t const lead = std::max<uint64_t>(report, start_lead_) + fpp - 1;
         return newest + ((lead / fpp) * fpp);
     }
 
@@ -177,6 +203,7 @@ class PacketSchedule
     std::mt19937_64 rng_;
     uint16_t sequence_{0};
     uint32_t phase_{0};
+    uint32_t start_lead_{0};
     bool started_{false};
     bool placed_{false};                  ///< start_held() placed a held run's first packet since take_placed()
     uint64_t next_index_{0};              ///< first frame of the next packet to send

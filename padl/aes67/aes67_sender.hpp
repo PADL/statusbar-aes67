@@ -190,7 +190,8 @@ class Sender
 
     /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
     /// handed to the transport departing at `tick_ns`, this tick's time in the ns the sending NIC's
-    /// PHC reads (0: untimed; SendPort::send_rendered_at).
+    /// PHC reads (0: untimed; SendPort::send_rendered_at). On a frame port (SendPort::frames()) the due packets'
+    /// frames are written at their indices instead, for the port's run to send.
     void tick(uint64_t now_index, uint64_t tick_ns) noexcept;
     /// Send nothing until the next tick(), which starts a new run on the index grid with a new SSRC and
     /// sequence (RFC 3550 Section 8): send_state() is cleared (the RTCP session says BYE), state() reads
@@ -220,11 +221,12 @@ class Sender
     std::vector<sdp::Attribute> attributes_;
     /// One version on (the first: the wall clock's seconds, one on).
     void bump_session_version();
-    /// Fill `payload` with the provider's frames from `first_index`, or
+    /// Fill `payload` with the provider's `frames` frames from `first_index`, or
     /// silence when it has none; what the provider said.
-    [[nodiscard]] auto render_payload(uint64_t first_index, std::span<uint8_t> payload) noexcept -> Supply;
+    [[nodiscard]] auto render_payload(uint64_t first_index, uint32_t frames, std::span<uint8_t> payload) noexcept -> Supply;
 
     std::unique_ptr<SendPort> port_;
+    FrameSend* frames_{nullptr};  ///< port_ as a frame port, or nullptr
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
@@ -233,6 +235,8 @@ class Sender
     [[nodiscard]] auto open_port(Destination const& destination) -> statusbar::Status;
     /// The plan of this sender's stream to `destination`.
     [[nodiscard]] auto send_plan(Destination const& destination) const noexcept -> SendPlan;
+    /// Takes `port` as the stream's, and a frame port's start lead.
+    void adopt_port(std::unique_ptr<SendPort> port) noexcept;
     /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.
     void seed_run();
     /// A new session version, and the session id from the origin and name when none was set.
@@ -242,7 +246,7 @@ class Sender
     /// The newest packet due at `now_index` (PacketSchedule::newest_due()), skipped frames counted lost and a held run's
     /// placement published; nullopt when none is to be sent.
     [[nodiscard]] auto newest_due(uint64_t now_index) noexcept -> std::optional<uint64_t>;
-    /// Publishes the held run's first packet, placed at PacketSchedule::held().
+    /// Publishes the held run's first packet, placed at PacketSchedule::held(), and starts a frame port's run there.
     /// Not inlined: rare, and off newest_due()'s path.
     [[gnu::noinline]] void place_held() noexcept;
     /// Sends the packets from the schedule's next index up to `newest`, then flushes them.
@@ -253,6 +257,28 @@ class Sender
     void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
     /// Adds `packets` sent to the SR's counts and publishes them.
     void report_sent(uint32_t packets, uint32_t run_ssrc) noexcept;
+
+    // The frame path (SendPort::frames()): the frames written at their indices, the port's run sending them.
+
+    /// tick() on the frame path: the run started or re-placed, the send offset followed, the due packets written.
+    void tick_frames(uint64_t now_index) noexcept;
+    /// Starts the frame port's run, its first packet at `first_index`, stopping the one before.
+    void start_run(uint64_t first_index) noexcept;
+    /// Stops the frame port's run, if one was started.
+    void stop_run() noexcept;
+    /// Passes a changed send offset on to the frame port's run.
+    void follow_send_offset() noexcept;
+    /// Writes the packets from the schedule's next index up to `newest` to the frame port, and counts them.
+    void write_until(uint64_t newest) noexcept;
+    /// Renders and commits the packet at the schedule's next index into the port; true when the port took it.
+    [[nodiscard]] auto write_packet() noexcept -> bool;
+    /// Copies the packet at `first_index` from the staging buffer into the port, piece by piece where its storage
+    /// wraps; false when it has no room.
+    [[nodiscard]] auto copy_staged(uint64_t first_index) noexcept -> bool;
+    /// Counts `packets` written and publishes the port's progress for the SR.
+    void count_written(uint32_t packets) noexcept;
+    /// The port's progress when it is of the run last started, else that run's before its first packet has gone.
+    [[nodiscard]] auto run_progress() const noexcept -> SendProgress;
     /// channel_order() when it names the format's channels (else none: an order for other channels misleads).
     [[nodiscard]] auto described_channel_order() const -> std::string;
     /// The SDP media section this sender describes.
@@ -280,6 +306,9 @@ class Sender
     std::optional<Grandmaster> grandmaster_;
     uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
     std::atomic<uint32_t> send_offset_;
+    uint32_t run_send_offset_{0};  ///< the send offset the frame port's run was given (real-time thread)
+    uint64_t run_first_index_{0};  ///< the first index the frame port's run was given (real-time thread)
+    bool run_started_{false};      ///< the frame port has a run (real-time thread)
     std::optional<statusbar::ieee::VlanTag> vlan_;
     std::atomic<uint32_t> holds_{0};  ///< the ReportHolds held: real-time reads wait-free
     /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.

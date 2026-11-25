@@ -77,20 +77,30 @@ class Receiver
     void clear() noexcept;
 
     /// Read what has arrived and hand it on, with indices about `now_index`
-    /// (the media clock's index at the current PTP time), behind the due-tick gate.
+    /// (the media clock's index at the current PTP time), behind the due-tick gate; from a frame port
+    /// (ReceivePort::frames()), the frames it placed.
     void drain(uint64_t now_index) noexcept;
 
     [[nodiscard]] auto format() const noexcept -> StreamFormat const& { return format_; }
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
-    [[nodiscard]] auto counters() const noexcept -> Counters const& { return depacketizer_.counters(); }
+    [[nodiscard]] auto counters() const noexcept -> Counters const&
+    {
+        return depacketizer_.counters();  // a frame port's, as of the last drain
+    }
     /// Every counter to zero; the stream, its source and sequence go on. The draining thread.
-    void reset_counters() noexcept { depacketizer_.reset_counters(); }
+    void reset_counters() noexcept
+    {
+        depacketizer_.reset_counters();
+        if (frames_ != nullptr) {
+            frames_->reset_counters();
+        }
+    }
     /// Why the transport refused the last configure(), or (since the last drain()) why its port cannot
     /// receive (ReceivePort::error()), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     /// The SSRC learnt from the stream's first packet.
-    [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t> { return depacketizer_.ssrc(); }
+    [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t>;
 
     /// Where this stream's RTCP goes and arrives (the SDP's a=rtcp, else port + 1), marked `dscp`:
     /// the DSCP this host would send a similar stream with (AES67-2023 Clause 6.2). Fails
@@ -130,6 +140,17 @@ class Receiver
         -> statusbar::StatusValue<RtcpOptions>;
     /// State::error while the port reports one (ReceivePort::error()), ready again once it does not.
     void notify_port_error() noexcept;
+    /// Whether the due-tick gate (UDP) is closed at `now_index`: no packet can be there yet, and the clock did not step
+    /// back past the gate's horizon.
+    [[nodiscard]] auto gate_closed(uint64_t now_index) const noexcept -> bool;
+    /// drain() from a frame port: the offset passed on, its frames handed on, its state published.
+    void drain_frames(uint64_t now_index) noexcept;
+    /// What a frame port's drain did: its counters taken for counters(), its offset forgotten, the state running.
+    void take_drain(FrameDrain const& drained) noexcept;
+    /// Passes a changed offset on to the frame port.
+    void follow_offset() noexcept;
+    /// Forgets the offset, as the frame port did for a sender-clocked stream's new source.
+    void forget_offset() noexcept;
     /// Receives and accepts up to MAX_BATCHES batches; true when every batch came back full (more may wait).
     [[nodiscard]] auto receive_batches(uint64_t now_index) noexcept -> bool;
     /// Sets the due-tick gate after a drain: open after a backlog or a new source, else a tick before the next packet is due.
@@ -146,10 +167,12 @@ class Receiver
     FrameHandler handler_;
     Transport& transport_;
     std::unique_ptr<ReceivePort> port_;
+    FrameReceive* frames_{nullptr};  ///< port_ as a frame port, or nullptr
     /// receive_batches()' datagrams, built once rather than value-initialised on every drain.
     std::array<Datagram, BATCH> batch_{};
 
     std::atomic<uint64_t> offset_{0};  ///< OFFSET_SET | offset, or 0 for none yet
+    uint64_t port_offset_{0};          ///< offset_ as the frame port was last given it (draining thread)
     std::optional<RtcpOptions> rtcp_;  ///< from configure(), without the DSCP
     std::error_code rtcp_error_;       ///< why there is none
 

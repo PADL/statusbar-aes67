@@ -10,7 +10,8 @@ what it refuses; the module overview is [AES67_MODULE.md](AES67_MODULE.md).
 - `configure()` makes a `ReceivePlan` from the SDP (`receive_plan()`) and opens the transport for
   it; each packet then goes through a `Depacketizer` (admission, SSRC learning, the sequence
   check and reorder window, jitter, counters) and is placed by the offset. The `Receiver` keeps
-  the SDP, the offset, the port, its state and the due-tick gate.
+  the SDP, the offset, the port, its state and the due-tick gate. Over a frame port
+  ([AES67_TRANSPORTS.md](AES67_TRANSPORTS.md)) the port does that work, by the same rules.
 - `configure()` accepts the media's group and port, payload type, encoding, channels and
   rate, an RFC 4570 source filter if any, and the RFC 7273 direct media clock offset. It
   prefers the offered format with the receiver's encoding (`Media::prefer()`), else the

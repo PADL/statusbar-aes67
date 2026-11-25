@@ -51,6 +51,9 @@ namespace {
     return static_cast<uint32_t>(std::max<uint64_t>(((us * media.sample_rate) + 999'999) / 1'000'000, 1));
 }
 
+/// What a frame port hands a Receiver without a FrameHandler: the frames go nowhere, as the packet path's do.
+FrameHandler const NO_FRAMES = [](uint64_t /*first_index*/, uint32_t /*frames*/, std::span<uint8_t const> /*bytes*/) {};
+
 }  // namespace
 
 auto receive_endpoint(
@@ -134,7 +137,8 @@ void Receiver::apply_media(
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, ReceivePlan const& plan)
 {
     depacketizer_.set_stream(plan.payload_type, plan.max_frames);
-    offset_.store(plan.offset ? OFFSET_SET | *plan.offset : 0, std::memory_order_release);
+    port_offset_ = plan.offset ? OFFSET_SET | *plan.offset : 0;  // the frame port has the plan's
+    offset_.store(port_offset_, std::memory_order_release);
     depacketizer_.set_source_filter(plan.source_filter);
     receive_state_.store({.source = plan.source_filter.value_or(statusbar::ip::IPv4Address{})});
     set_rtcp(session, media, connection, plan.destination);
@@ -153,6 +157,7 @@ auto Receiver::adopt(statusbar::StatusValue<std::unique_ptr<ReceivePort>> port) 
         return refused(port.error());
     }
     port_ = std::move(*port);
+    frames_ = port_->frames();
     return statusbar::success();
 }
 
@@ -224,8 +229,9 @@ auto Receiver::rtcp_options(uint8_t const dscp) const -> statusbar::StatusValue<
 }
 
 void Receiver::clear() noexcept
-{
+{  // NOLINT(statusbar-block-statements): the port and the stream's state, reset together
     port_.reset();
+    frames_ = nullptr;
     depacketizer_.set_source_filter(std::nullopt);
     rtcp_.reset();
     reset_stream();
@@ -241,12 +247,11 @@ void Receiver::reset_stream() noexcept
 
 void Receiver::drain(uint64_t const now_index) noexcept
 {
-    if (!port_) {
+    if (frames_ != nullptr) [[unlikely]] {
+        drain_frames(now_index);
         return;
     }
-    // The due-tick gate (UDP): skip until a packet can be there, unless the
-    // clock stepped back past the gate's horizon.
-    if (next_poll_index_ != 0 && now_index < next_poll_index_ && now_index >= gate_set_at_ && !transport_.drain_every_tick()) {
+    if (!port_ || gate_closed(now_index)) {
         return;
     }
     bool const backlog = receive_batches(now_index);
@@ -255,6 +260,58 @@ void Receiver::drain(uint64_t const now_index) noexcept
         receive_state_.store(depacketizer_.receive_state(now_index));
     }
     set_gate(now_index, backlog);
+}
+
+auto Receiver::gate_closed(uint64_t const now_index) const noexcept -> bool
+{
+    // Skip until a packet can be there, unless the clock stepped back past the gate's horizon.
+    return next_poll_index_ != 0 && now_index < next_poll_index_ && now_index >= gate_set_at_ && !transport_.drain_every_tick();
+}
+
+void Receiver::drain_frames(uint64_t const now_index) noexcept
+{
+    follow_offset();
+    auto const drained = frames_->drain(now_index, handler_ ? handler_ : NO_FRAMES);
+    take_drain(drained);
+    notify_port_error();
+    if (drained.accepted) {
+        receive_state_.store(frames_->receive_state());
+    }
+}
+
+void Receiver::take_drain(FrameDrain const& drained) noexcept
+{
+    depacketizer_.adopt_counters(frames_->counters());  // counters() reads them there
+    if (drained.offset_forgotten) {
+        forget_offset();
+    }
+    if (drained.packets != 0) {
+        state_ = State::running;
+    }
+}
+
+void Receiver::follow_offset() noexcept
+{
+    uint64_t const offset = offset_.load(std::memory_order_acquire);
+    if (offset != port_offset_) {
+        port_offset_ = offset;
+        frames_->set_offset((offset & OFFSET_SET) != 0 ? std::optional{static_cast<uint32_t>(offset)} : std::nullopt);
+    }
+}
+
+void Receiver::forget_offset() noexcept
+{
+    offset_.store(0, std::memory_order_release);
+    port_offset_ = 0;
+}
+
+auto Receiver::ssrc() const noexcept -> std::optional<uint32_t>
+{
+    if (frames_ == nullptr) {
+        return depacketizer_.ssrc();
+    }
+    auto const state = frames_->receive_state();
+    return state.valid ? std::optional{state.ssrc} : std::nullopt;
 }
 
 void Receiver::notify_port_error() noexcept
