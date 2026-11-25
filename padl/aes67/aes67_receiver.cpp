@@ -14,11 +14,6 @@ namespace padl::aes67 {
 
 namespace {
 
-/// Sequence numbers the reorder window remembers: as far back as RtpSequence
-/// accepts a late packet.
-constexpr size_t WINDOW = rtp::RtpSequence::MAX_MISORDER + 1;
-static_assert(WINDOW <= 128);
-
 /// The media is one a receiver of `format` accepts: a `sender` media clock when `sender_clock`, else
 /// `direct` (RFC 7273 Section 5), at a rate the media clock supports, in the format.
 [[nodiscard]] auto check_media(
@@ -76,6 +71,7 @@ Receiver::Receiver(StreamFormat const& format, FrameHandler handler, Transport& 
     : format_{format}
     , handler_{std::move(handler)}
     , transport_{transport}
+    , depacketizer_{format}
 {}
 
 auto Receiver::configure(sdp::Session const& session, size_t const media_index) -> statusbar::Status
@@ -88,7 +84,7 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
     if (!connection) {
         return statusbar::failure(Aes67Error::no_connection);
     }
-    if (auto const checked = check_media(session, *media, format_, sender_clock_); !checked) {
+    if (auto const checked = check_media(session, *media, format_, sender_clock()); !checked) {
         return checked;
     }
     return open_stream(session, *media, *connection);
@@ -113,8 +109,7 @@ auto Receiver::open_stream(sdp::Session const& session, sdp::Media const& media,
 void Receiver::apply_media(
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
 {
-    payload_type_ = media.payload_type;
-    max_frames_ = max_frames_for(media);
+    depacketizer_.set_stream(media.payload_type, max_frames_for(media));
     offset_.store(initial_offset(session.effective_media_clock(media)), std::memory_order_release);
     set_source_filter(session, media, connection, endpoint);
     set_rtcp(session, media, connection, endpoint);
@@ -123,11 +118,12 @@ void Receiver::apply_media(
 void Receiver::set_source_filter(
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
 {
-    source_filter_ = matching_source(session.effective_source_filter(media), connection.address);
-    if (!source_filter_ && endpoint.address != connection.address) {
-        source_filter_ = connection.address;  // an offer: c= is the sender (AES67-2023 Clause 8.5.2)
+    auto source_filter = matching_source(session.effective_source_filter(media), connection.address);
+    if (!source_filter && endpoint.address != connection.address) {
+        source_filter = connection.address;  // an offer: c= is the sender (AES67-2023 Clause 8.5.2)
     }
-    receive_state_.store({.source = source_filter_.value_or(statusbar::ip::IPv4Address{})});
+    depacketizer_.set_source_filter(source_filter);
+    receive_state_.store({.source = source_filter.value_or(statusbar::ip::IPv4Address{})});
 }
 
 auto Receiver::reopen(Endpoint const& destination, std::optional<statusbar::ip::IPv4Address> const& source) -> statusbar::Status
@@ -156,7 +152,7 @@ auto Receiver::refused(std::error_code const error) noexcept -> statusbar::Statu
 
 auto Receiver::initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t
 {
-    return !sender_clock_ && clock && clock->direct_offset ? OFFSET_SET | *clock->direct_offset : 0;
+    return !sender_clock() && clock && clock->direct_offset ? OFFSET_SET | *clock->direct_offset : 0;
 }
 
 void Receiver::set_rtcp(
@@ -193,14 +189,16 @@ auto Receiver::rtcp_options_for(
             .address = received.address.is_multicast() ? statusbar::ip::IPv4Address{} : received.address, .port = endpoint.port};
     } else if (!endpoint.address.is_multicast()) {
         // A unicast stream: reports arrive at this address and go to the sender, at the same port.
-        auto const peer = source_filter_ ? source_filter_ : statusbar::ip::parse_ipv4(session.origin_address);
+        auto const& filter = depacketizer_.source_filter();
+        auto const peer = filter ? filter : statusbar::ip::parse_ipv4(session.origin_address);
         if (!peer) {
             return statusbar::failure(Aes67Error::no_rtcp_peer);
         }
         options.local = endpoint;
         options.destination = {.address = *peer, .port = endpoint.port};
     }
-    options.source = statusbar::net::is_source_specific_group(options.destination.address) ? source_filter_ : std::nullopt;
+    options.source =
+        statusbar::net::is_source_specific_group(options.destination.address) ? depacketizer_.source_filter() : std::nullopt;
     return options;
 }
 
@@ -220,7 +218,7 @@ auto Receiver::rtcp_options(uint8_t const dscp) const -> statusbar::StatusValue<
 void Receiver::clear() noexcept
 {
     port_.reset();
-    source_filter_.reset();
+    depacketizer_.set_source_filter(std::nullopt);
     rtcp_.reset();
     reset_stream();
     offset_.store(0, std::memory_order_release);
@@ -228,21 +226,9 @@ void Receiver::clear() noexcept
 }
 
 void Receiver::reset_stream() noexcept
-{  // NOLINT(statusbar-block-statements): one stream's state, reset together
-    next_poll_index_ = 0;
-    ssrc_.reset();
-    source_ = {};
-    restart_sequence();
-    jitter_x16_ = 0;
-    have_transit_ = false;
-}
-
-void Receiver::restart_sequence() noexcept
 {
-    sequence_ = rtp::RtpSequence{};
-    have_max_ = false;
-    max_seq_ = 0;
-    window_.reset();
+    next_poll_index_ = 0;
+    depacketizer_.reset();
 }
 
 void Receiver::drain(uint64_t const now_index) noexcept
@@ -257,18 +243,8 @@ void Receiver::drain(uint64_t const now_index) noexcept
     }
     bool const backlog = receive_batches(now_index);
     notify_port_error();
-    if (this_drain_.accepted && ssrc_) {
-        receive_state_.store({
-            .ssrc = *ssrc_,
-            .valid = true,
-            .source = source_,
-            .extended_max = sequence_.extended_max(),
-            .expected = sequence_.expected(),
-            .received = sequence_.received(),
-            .jitter_x16 = jitter_x16_,
-            .last_rtp_ts = last_rtp_ts_,
-            .last_now_index = now_index,
-        });
+    if (this_drain_.accepted && depacketizer_.ssrc()) {
+        receive_state_.store(depacketizer_.receive_state(now_index));
     }
     set_gate(now_index, backlog);
 }
@@ -294,7 +270,7 @@ auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
     for (size_t round = 0; round < MAX_BATCHES; ++round) {
         size_t const n = port_->receive(batch_);
         for (size_t i = 0; i < n; ++i) {
-            if (sender_clock_) {
+            if (depacketizer_.sender_clock()) {
                 offset = offset_.load(std::memory_order_acquire);  // set, or cleared by a new source
             }
             if (!is_multiplexed_rtcp(batch_[i].payload)) {
@@ -310,6 +286,9 @@ auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
 
 void Receiver::set_gate(uint64_t const now_index, bool const backlog) noexcept
 {
+    if (depacketizer_.take_restarted()) {
+        next_poll_index_ = 0;  // the drain adopted a new source: as reset_stream()
+    }
     if (backlog) {
         next_poll_index_ = 0;  // the rest next tick
     } else if (this_drain_.newest_frames != 0) {
@@ -328,113 +307,31 @@ void Receiver::set_gate(uint64_t const now_index, bool const backlog) noexcept
 void Receiver::accept(Datagram const& datagram, uint64_t const now_index, uint64_t const offset) noexcept
 {
     auto const packet = rtp::parse_rtp(datagram.payload);
-    auto const frames = packet ? admit(*packet, datagram.source.address, now_index) : std::unexpected{DropReason::not_rtp};
+    auto const frames =
+        packet ? depacketizer_.admit(*packet, datagram.source.address, now_index) : std::unexpected{DropReason::not_rtp};
     if (!packet || !frames) {
-        drop(frames.error());
+        refuse(frames.error());
         return;
     }
     notify_arrival(packet->header.timestamp.get(), now_index);
     if ((offset & OFFSET_SET) == 0) {
-        drop(DropReason::no_offset);  // learnt, but not placed before the sender's first report
+        depacketizer_.drop(DropReason::no_offset);  // learnt, but not placed before the sender's first report
         return;
     }
     deliver(*packet, *frames, offset, now_index);
 }
 
-void Receiver::drop(DropReason const reason) noexcept
+void Receiver::refuse(DropReason const reason) noexcept
 {
-    ++counters_.dropped;
-    ++counters_.drops[reason];
-}
-
-auto Receiver::admit(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address const& source, uint64_t const now_index) noexcept
-    -> std::expected<uint32_t, DropReason>
-{
-    if (auto const refused = check_payload(packet, source)) {
-        return std::unexpected{*refused};
+    if (reason == DropReason::no_offset) {
+        offset_.store(0, std::memory_order_release);  // a sender-clocked stream's new source: its reports give its own
     }
-    auto const silent = admit_source(packet.header.ssrc.get(), source, now_index);
-    if (!silent) {
-        return std::unexpected{silent.error()};
-    }
-    auto const frames = static_cast<uint32_t>(packet.payload.size() / format_.bytes_per_frame());
-    if (!admit_sequence(packet.header.sequence.get(), frames, *silent)) {
-        return std::unexpected{DropReason::sequence};
-    }
-    return frames;
-}
-
-auto Receiver::check_payload(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address const& source) const noexcept
-    -> std::optional<DropReason>
-{
-    if (packet.header.payload_type() != payload_type_) {
-        return DropReason::payload_type;
-    }
-    size_t const bytes = packet.payload.size();
-    if (bytes == 0 || bytes % format_.bytes_per_frame() != 0 || bytes / format_.bytes_per_frame() > max_frames_) {
-        return DropReason::size;
-    }
-    if (source_filter_ && source != *source_filter_) {
-        return DropReason::source;
-    }
-    return std::nullopt;
-}
-
-auto Receiver::admit_source(uint32_t const ssrc, statusbar::ip::IPv4Address const& source, uint64_t const now_index) noexcept
-    -> std::expected<uint64_t, DropReason>
-{
-    if (ssrc_ && (*ssrc_ != ssrc || source_ != source)) {
-        // Another SSRC or address: refused while the learnt source is live, adopted once it has been silent for a
-        // second (a restarted sender). Signed: after a PTP step backwards the learnt source still counts as live.
-        if (static_cast<int64_t>(now_index - last_index_) < static_cast<int64_t>(format_.sample_rate)) {
-            return std::unexpected{*ssrc_ != ssrc ? DropReason::ssrc : DropReason::source};
-        }
-        reset_stream();
-        if (sender_clock_) {
-            offset_.store(0, std::memory_order_release);  // the new source's reports give its own
-            return std::unexpected{DropReason::no_offset};
-        }
-    }
-    auto const silent = ssrc_ ? std::max<int64_t>(static_cast<int64_t>(now_index - last_index_), 0) : 0;
-    if (!ssrc_) {
-        ssrc_ = ssrc;
-        source_ = source;
-    }
-    last_index_ = now_index;
-    return static_cast<uint64_t>(silent);
-}
-
-auto Receiver::admit_sequence(uint16_t const seq, uint32_t const frames, uint64_t const silent) noexcept -> bool
-{
-    // Silent for more than MAX_DROPOUT packets, the source restarted or wrapped: no step tells what was lost.
-    if (silent > uint64_t{rtp::RtpSequence::MAX_DROPOUT} * frames) {
-        restart_sequence();
-    }
-    bool const was_validated = sequence_.validated();
-    if (!sequence_.update(seq) && was_validated) {
-        return false;  // an unconfirmed jump
-    }
-    // A packet on probation (a new source's first) is handed on all the same:
-    // its timestamp, not its sequence number, places it, and index_of_rtp() puts it about now.
-    return place(seq, frames);
+    depacketizer_.drop(reason);
 }
 
 void Receiver::notify_arrival(uint32_t const timestamp, uint64_t const now_index) noexcept
 {
-    // RFC 3550 Appendix A.8 on the first packet of each drain (its index is the arrival time,
-    // shared by the batch): transit = arrival - timestamp; J += (|D| - J) / 16, kept x16.
-    uint32_t const transit = static_cast<uint32_t>(now_index) - timestamp;
-    if (have_transit_ && now_index != last_arrival_index_) {
-        auto const d = static_cast<int32_t>(transit - last_transit_);
-        uint32_t const magnitude = d < 0 ? 0U - static_cast<uint32_t>(d) : static_cast<uint32_t>(d);
-        jitter_x16_ += magnitude - ((jitter_x16_ + 8) >> 4U);
-    }
-    if (!have_transit_ || now_index != last_arrival_index_) {
-        last_transit_ = transit;
-        last_arrival_index_ = now_index;
-        have_transit_ = true;
-    }
-    last_rtp_ts_ = timestamp;
+    depacketizer_.notify_arrival(timestamp, now_index);
     this_drain_.accepted = true;
 }
 
@@ -450,55 +347,8 @@ void Receiver::deliver(
     if (handler_) {
         handler_(index, frames, packet.payload);
     }
-    ++counters_.packets;
-    counters_.frames += frames;
+    depacketizer_.delivered(frames);
     state_ = State::running;
-}
-
-auto Receiver::place(uint16_t const seq, uint32_t const frames) noexcept -> bool
-{
-    auto const ahead = static_cast<uint16_t>(seq - max_seq_);
-    auto const behind = static_cast<uint16_t>(max_seq_ - seq);
-    if (have_max_ && ahead != 0 && ahead < rtp::RtpSequence::MAX_DROPOUT) {
-        advance_window(seq, ahead, frames);
-        return true;
-    }
-    if (have_max_ && behind < WINDOW) {  // up to RtpSequence::MAX_MISORDER behind, as it accepts
-        return mark_late(behind, frames);
-    }
-    start_window(seq);  // the first packet, or a jump RtpSequence confirmed: the sender restarted its sequence
-    return true;
-}
-
-void Receiver::start_window(uint16_t const seq) noexcept
-{
-    have_max_ = true;
-    max_seq_ = seq;
-    window_.reset();
-    window_.set(0);
-}
-
-void Receiver::advance_window(uint16_t const seq, uint16_t const ahead, uint32_t const frames) noexcept
-{
-    counters_.lost += uint64_t{ahead - 1U} * frames;  // assumes the stream's packets are all this size
-    if (ahead >= WINDOW) {
-        window_.reset();
-    } else {
-        window_ <<= ahead;
-    }
-    window_.set(0);
-    max_seq_ = seq;
-}
-
-auto Receiver::mark_late(uint16_t const behind, uint32_t const frames) noexcept -> bool
-{
-    if (window_.test(behind)) {
-        return false;  // a duplicate
-    }
-    window_.set(behind);
-    counters_.late += frames;
-    counters_.lost -= std::min<uint64_t>(counters_.lost, frames);
-    return true;
 }
 
 }  // namespace padl::aes67

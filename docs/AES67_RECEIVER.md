@@ -7,6 +7,9 @@ what it refuses; the module overview is [AES67_MODULE.md](AES67_MODULE.md).
 
 ## Receiver
 
+- Each packet goes through a `Depacketizer` (admission, SSRC learning, the sequence check and
+  reorder window, jitter, counters) and is placed by the offset. The `Receiver` keeps the SDP,
+  the offset, the port, its state and the due-tick gate.
 - `configure()` accepts the media's group and port, payload type, encoding, channels and
   rate, an RFC 4570 source filter if any, and the RFC 7273 direct media clock offset. It
   prefers the offered format with the receiver's encoding (`Media::prefer()`), else the

@@ -589,4 +589,30 @@ TEST(aes67_receiver, an_any_source_group_or_an_unfiltered_one_is_joined_for_any_
     EXPECT_FALSE(transport.joined_source.has_value());
 }
 
+// A drain that adopts a new source opens the due-tick gate, as a reset stream's is, even when it places nothing (a
+// sender-clocked stream's new source, its offset forgotten): after a step back the port is asked at once.
+TEST(aes67_receiver, a_new_source_reopens_the_due_tick_gate)
+{
+    LoopTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    receiver.set_sender_clock(true);
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    auto session = stream_session(group, std::nullopt);
+    session.media[0].media_clock = padl::sdp::MediaClock::sender();
+    EXPECT_TRUE(receiver.configure(session));
+    receiver.set_offset(0);
+    uint64_t const base = 48'000ULL * 5000;
+    transport.queue.push_back({group, rtp_packet(0, static_cast<uint32_t>(base), 0xA)});
+    receiver.drain(base + FPP);  // placed: the gate closes until a tick before base + 2 * FPP
+    EXPECT_EQ(receiver.counters().packets, uint64_t{1});
+    uint64_t const later = base + 96'000;
+    transport.queue.push_back({group, rtp_packet(1, static_cast<uint32_t>(later), 0xB)});
+    receiver.drain(later + FPP);  // another source after two seconds' silence: adopted, its offset forgotten
+    EXPECT_FALSE(receiver.offset().has_value());
+    EXPECT_FALSE(receiver.ssrc().has_value());  // learnt from its next packet
+    size_t const asked = transport.receives;
+    receiver.drain(base + 60);  // back inside the old gate's window
+    EXPECT_TRUE(transport.receives > asked);
+}
+
 TEST_MAIN(padl_aes67, aes67_receiver_test)

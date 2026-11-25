@@ -6,7 +6,9 @@
 /// AES67 module header: the stream formats, Sender and Receiver, their RTCP sessions, and the UDP
 /// and AF_XDP transports with their socket helpers. Include a sub-header when only one is needed.
 
+#include "padl/aes67/aes67_depacketizer.hpp"
 #include "padl/aes67/aes67_error.hpp"
+#include "padl/aes67/aes67_packet_schedule.hpp"
 #include "padl/aes67/aes67_receiver.hpp"
 #include "padl/aes67/aes67_rtcp.hpp"
 #include "padl/aes67/aes67_sender.hpp"

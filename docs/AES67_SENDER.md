@@ -7,6 +7,10 @@ How the `aes67` module's `Sender` frames, times and describes a stream; the modu
 
 ## Sender
 
+- When a packet is due, which run it belongs to and its sequence number and timestamp are a
+  `PacketSchedule`'s (the grid, the due rule, the resynchronisation below, a held start, each
+  run's SSRC and sequence); the `Sender` keeps the session and SDP, the grandmaster, report
+  holds, counters and rendering.
 - Packet times (AES67-2023 Clause 7.2): a sender sends any whole number of frames per
   packet whose payload fits `MAX_PAYLOAD`, 1440 octets (Clause 6.3); larger fails
   `packet_too_large`. That covers 125 us, 250 us, 333 us, 1 ms and 4 ms (Clauses 7.2.1 and

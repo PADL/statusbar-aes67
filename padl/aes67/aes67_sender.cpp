@@ -12,7 +12,6 @@
 #include <chrono>
 #include <format>
 #include <iterator>
-#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,6 +40,7 @@ Sender::Sender(StreamFormat const& format, FrameProvider provider, Transport& tr
     , provider_{std::move(provider)}
     , transport_{transport}
     , name_{std::move(name)}
+    , schedule_{format}
     , send_offset_{default_send_offset(format)}
 {}
 
@@ -111,11 +111,8 @@ auto Sender::set_vlan(std::optional<statusbar::ieee::VlanTag> const& vlan) noexc
 
 void Sender::seed_run()
 {
-    std::random_device random;
     payload_.assign(format_.bytes_per_packet(), 0);
-    rng_.seed((uint64_t{random()} << 32U) | random());
-    ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);  // never 0, nor the last run's
-    sequence_ = static_cast<uint16_t>(random());
+    schedule_.seed();
     rtcp_counts_ = {};
 }
 
@@ -132,8 +129,7 @@ void Sender::become_ready() noexcept
 {                           // NOLINT(statusbar-block-statements): the run's state, reset together
     send_state_.store({});  // not ticked while configured, so tick() is not storing too
     paused_ = false;
-    started_ = false;
-    held_first_.reset();
+    schedule_.reset();
     state_ = State::ready;
     error_.clear();
 }
@@ -141,7 +137,7 @@ void Sender::become_ready() noexcept
 void Sender::clear() noexcept
 {
     port_.reset();
-    started_ = false;
+    schedule_.stop();
     state_ = State::idle;
 }
 
@@ -324,10 +320,8 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
     if (paused_) {
         // A new run after a pause: a new SSRC and sequence (RFC 3550 Section 8), its SR counts afresh.
         paused_ = false;
-        ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);
-        sequence_ = static_cast<uint16_t>(next_random());
+        schedule_.renew();
         rtcp_counts_ = {};
-        held_first_.reset();
     }
     // A transport that cannot get packets out puts the sender in error until it can.
     if (auto const send_error = transport_.send_error()) {
@@ -342,85 +336,33 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
     }
 }
 
-auto Sender::held_first(uint64_t const newest) const noexcept -> uint64_t
+void Sender::place_held() noexcept
 {
-    uint64_t const fpp = format_.frames_per_packet;
-    uint64_t const lead = ((uint64_t{format_.sample_rate} * FIRST_REPORT_LEAD_US) / 1'000'000) + fpp - 1;
-    return newest + ((lead / fpp) * fpp);
-}
-
-void Sender::place_held(uint64_t const newest) noexcept
-{
-    held_first_ = held_first(newest);
-    send_state_.store({.ssrc = ssrc(), .first_index = *held_first_, .next_index = *held_first_});
-}
-
-auto Sender::start_held(uint64_t const newest) noexcept -> bool
-{
-    uint64_t const burst = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
-    if (!held_first_ || newest > *held_first_ + burst || *held_first_ > held_first(newest)) {
-        place_held(newest);
-        return false;
-    }
-    if (newest < *held_first_) {
-        return false;  // its SR has until then; the run starts then whether or not it went
-    }
-    next_index_ = run_first_ = *held_first_;
-    started_ = true;
-    return true;
+    uint64_t const first = schedule_.held().value_or(0);
+    send_state_.store({.ssrc = ssrc(), .first_index = first, .next_index = first});
 }
 
 auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint64_t>
 {
-    uint64_t const fpp = format_.frames_per_packet;
-    uint64_t const send_offset = send_offset_.load(std::memory_order_relaxed);
-    uint64_t const phase = phase_;
-    if (now_index + 1 < send_offset + fpp + phase) {
-        return std::nullopt;  // no packet due yet (only near the epoch)
+    auto const newest =
+        schedule_.newest_due(now_index, send_offset_.load(std::memory_order_relaxed), holds_for_reports(), counters_.lost);
+    if (!newest && schedule_.take_placed()) {
+        place_held();
     }
-    // The newest packet (on the grid shifted by the phase) whose last frame is send_offset or more behind now.
-    uint64_t const newest = ((((now_index + 1 - send_offset - phase) / fpp) - 1) * fpp) + phase;
-    return resync(newest) ? std::optional{newest} : std::nullopt;
-}
-
-auto Sender::resync(uint64_t const newest) noexcept -> bool
-{
-    uint64_t const fpp = format_.frames_per_packet;
-    if (!started_ && holds_for_reports() && !start_held(newest)) {
-        return false;  // the run's first packet waits for its SR
-    }
-    if (!started_) {
-        next_index_ = run_first_ = newest;
-        started_ = true;
-    } else if (next_index_ > newest + fpp) {
-        // The clock went back. A small step is waited out (nothing is due
-        // until now catches up, so no index is sent twice); a large one,
-        // more than MAX_BURST packets, resynchronises.
-        if (next_index_ - (newest + fpp) <= uint64_t{MAX_BURST} * fpp) {
-            return false;
-        }
-        next_index_ = newest;
-    } else if (next_index_ + (uint64_t{MAX_BURST} * fpp) <= newest) {
-        counters_.lost += newest - next_index_;  // too far behind: skip what cannot be sent in time
-        next_index_ = newest;
-    }
-    return true;
+    return newest;
 }
 
 void Sender::send_until(uint64_t const newest) noexcept
 {
     uint32_t const run_ssrc = ssrc();
     uint32_t queued = 0;
-    while (next_index_ <= newest) {
-        rtp::RtpHeader header{};
-        header.init(destination_.payload_type, sequence_, mediaclock::PtpMediaClock::rtp_timestamp(next_index_, 0), run_ssrc);
-        if (send_packet(header)) {
+    while (schedule_.next_index() <= newest) {
+        if (send_packet(schedule_.header(destination_.payload_type, run_ssrc))) {
             ++queued;
         } else {
             ++counters_.dropped;
         }
-        ++sequence_;
-        next_index_ += format_.frames_per_packet;
+        schedule_.advance();
     }
     flush(queued, run_ssrc);
 }
@@ -431,11 +373,11 @@ auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool
     // to give (the packet is dropped) does it write the staging buffer, so its frames are still counted.
     std::optional<Supply> supply;
     PayloadRenderer const render = [this, &supply](std::span<uint8_t> const payload) noexcept {
-        supply = render_payload(next_index_, payload);
+        supply = render_payload(schedule_.next_index(), payload);
         return true;
     };
     bool const sent = port_->send_rendered_at(header, payload_.size(), render, tick_ns_);
-    Supply const supplied = supply ? *supply : render_payload(next_index_, payload_);
+    Supply const supplied = supply ? *supply : render_payload(schedule_.next_index(), payload_);
     if (supplied == Supply::missing) {
         counters_.lost += format_.frames_per_packet;
     }
@@ -463,8 +405,8 @@ void Sender::report_sent(uint32_t const packets, uint32_t const run_ssrc) noexce
         .ssrc = run_ssrc,
         .packets = rtcp_counts_.packets,
         .octets = rtcp_counts_.octets,
-        .first_index = run_first_,
-        .next_index = next_index_,
+        .first_index = schedule_.run_first(),
+        .next_index = schedule_.next_index(),
         .sent = rtcp_counts_.sent,
     });
 }
@@ -476,7 +418,7 @@ void Sender::pause() noexcept
     }
     if (!paused_) {
         paused_ = true;
-        started_ = false;
+        schedule_.stop();
         send_state_.store({});  // the RTCP session reads an SSRC of 0 as not sending
     }
     if (auto const send_error = transport_.send_error()) {
@@ -486,21 +428,6 @@ void Sender::pause() noexcept
         state_ = State::idle;
         error_.clear();
     }
-}
-
-auto Sender::next_random() noexcept -> uint32_t
-{
-    return static_cast<uint32_t>(rng_() >> 32U);
-}
-
-auto Sender::fresh_ssrc() noexcept -> uint32_t
-{
-    uint32_t const old = ssrc();
-    uint32_t next = next_random();
-    while (next == 0 || next == old) {
-        next = next_random();
-    }
-    return next;
 }
 
 auto Sender::render_payload(uint64_t const first_index, std::span<uint8_t> const payload) noexcept -> Supply

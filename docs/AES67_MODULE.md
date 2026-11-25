@@ -32,6 +32,8 @@ time it is given, sends it through an `RtcpPort`, and parses what arrives.
 - `receive_endpoint()` — where a stream described by an SDP arrives here: its group, this host's address, or, for an offer whose `c=` is its origin, this host's address.
 - `Receiver` — `configure(session, media_index)`, `drain(now_index)`, counters, state, learnt SSRC; `set_sender_clock()` and `set_offset()` for a stream on the sender's clock.
 - `Sender` — `configure(destination | session)`, `tick(now_index)`, `pause()` (idle until the next tick, which starts a new run on the index grid under a new SSRC and sequence, RFC 3550 Section 8; the RTCP session says BYE for the old SSRC at its next tick and sends no SR meanwhile), `session()`, send offset, packet phase, session id, grandmaster, `set_sender_clock()`, name, `continue_from()`. `tick(now_index, tick_ns)` hands each packet to the transport departing at the tick's time.
+- `Depacketizer` — a receiver's per-packet rules: admission (payload type, size, source filter, SSRC learning, RFC 3550 Appendix A.1 sequence check), the reorder window, the interarrival jitter and the counters. `Receiver` runs one.
+- `PacketSchedule` — a sender's packet grid, due rule, resynchronisation, held start and each run's SSRC and sequence. `Sender` runs one.
 - `Destination`, `Grandmaster`, `State`, `Counters` — what a stream is sent to, its ts-refclk, its state and its figures; `DropReason`, `DropCounts` — why a receiver refused packets.
 - `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer` — the transport contract; `UdpTransport`, `XdpTransport` (`XdpTransportOptions`) implement it. `Refusal`, `ReceiveRefusals`, `RefusalCounter` — frames a transport refused before any receiver saw them (`Transport::receive_refusals()`). `SendPort::send_rendered_at()` accepts the packet's departure; `XdpTransport` with `XdpTransportOptions::launch_time` gives every frame a launch time (`LaunchClock`, `set_launch_lead_ns()` / `clear_launch_lead()`), and `settle_launch_time()` puts its queue in or out of launch-time mode.
 - `RtcpPort`, `RtcpOptions` — an RTCP session's datagrams beside a stream (`Transport::open_rtcp()`), off the real-time thread.
@@ -76,6 +78,8 @@ auto receive(std::string_view interface, sdp::Session const& session) -> Status
 - `padl/aes67/aes67_stream.hpp` — `StreamFormat`, callbacks, `Destination`, `Grandmaster`, `State`, `Counters`.
 - `padl/aes67/aes67_receiver.hpp` — `Receiver`.
 - `padl/aes67/aes67_sender.hpp` — `Sender`.
+- `padl/aes67/aes67_depacketizer.hpp` — `Depacketizer`.
+- `padl/aes67/aes67_packet_schedule.hpp` — `PacketSchedule`.
 - `padl/aes67/aes67_transport.hpp` — `Transport`, `ReceivePort`, `SendPort`, `PayloadRenderer`, `RtcpPort`, `Endpoint`, `Datagram`, `SendOptions`, `RtcpOptions`, `rtcp_endpoint_for()`.
 - `padl/aes67/aes67_udp_transport.hpp` — `UdpTransport`.
 - `padl/aes67/aes67_xdp_transport.hpp` — `XdpTransport`, `XdpTransportOptions`.

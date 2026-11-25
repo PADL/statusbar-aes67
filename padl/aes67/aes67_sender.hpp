@@ -7,6 +7,7 @@
 /// its tick's time, and the stream's SDP; under an RTCP session an IPMX sender (VSF TR-10-1 Section 8.10.1).
 /// configure(), clear(), the setters and session() allocate; tick() and the accessors are real-time safe.
 
+#include "padl/aes67/aes67_packet_schedule.hpp"
 #include "padl/aes67/aes67_stream.hpp"
 #include "padl/aes67/aes67_transport.hpp"
 #include "padl/sdp/sdp_session.hpp"
@@ -17,7 +18,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -30,14 +30,14 @@ class Sender
 {
   public:
     /// Packets one tick sends at most; further behind, the sender skips ahead.
-    static constexpr uint32_t MAX_BURST = 8;
+    static constexpr uint32_t MAX_BURST = PacketSchedule::MAX_BURST;
     /// The largest RTP payload sent: 1440 octets, AES67-2023 Clause 6.3 (no fragmentation in a
     /// 1500-octet MTU, over IPv4 or IPv6).
     static constexpr uint32_t MAX_PAYLOAD = 1440;
     /// Session ids and versions are kept to 63 bits: positive in any signed reading.
     static constexpr uint64_t SESSION_ID_MASK = 0x7FFF'FFFF'FFFF'FFFFULL;
     /// How far ahead a held run's first packet is placed, in microseconds: time for the reactor to send its SR.
-    static constexpr uint32_t FIRST_REPORT_LEAD_US = 20'000;
+    static constexpr uint32_t FIRST_REPORT_LEAD_US = PacketSchedule::FIRST_REPORT_LEAD_US;
 
     /// `name` is the session name (s=) of session().
     Sender(StreamFormat const& format, FrameProvider provider, Transport& transport, std::string name);
@@ -63,11 +63,8 @@ class Sender
     /// Where the packet grid starts, in frames (modulo frames_per_packet):
     /// packets carry [k * fpp + phase, (k + 1) * fpp + phase). Call before
     /// configure(), off the real-time thread.
-    void set_packet_phase(uint32_t const frames) noexcept
-    {
-        phase_ = format_.frames_per_packet != 0 ? frames % format_.frames_per_packet : 0;
-    }
-    [[nodiscard]] auto packet_phase() const noexcept -> uint32_t { return phase_; }
+    void set_packet_phase(uint32_t const frames) noexcept { schedule_.set_phase(frames); }
+    [[nodiscard]] auto packet_phase() const noexcept -> uint32_t { return schedule_.phase(); }
     /// The phase that staggers the `k`th sender: (k mod 8) 125 us ticks modulo
     /// the packet (0, 6, ... 42 frames for 1 ms at 48 kHz).
     [[nodiscard]] static constexpr auto stagger_phase(StreamFormat const& format, uint32_t const k) noexcept -> uint32_t
@@ -213,7 +210,7 @@ class Sender
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     /// The current run's SSRC (a resumed run draws a new one on the ticking thread). Any thread.
-    [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return ssrc_.load(std::memory_order_relaxed); }
+    [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return schedule_.ssrc(); }
 
   private:
     StreamFormat format_;
@@ -231,11 +228,6 @@ class Sender
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
-    /// Draws from rng_ (seeded by seed_run() from std::random_device): no syscall on the ticking thread.
-    [[nodiscard]] auto next_random() noexcept -> uint32_t;
-    /// A random SSRC, neither 0 nor the current one.
-    [[nodiscard]] auto fresh_ssrc() noexcept -> uint32_t;
-
     /// clear(), then open the transport to `destination`; on failure State::error and error().
     [[nodiscard]] auto open_port(Destination const& destination) -> statusbar::Status;
     /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.
@@ -244,21 +236,14 @@ class Sender
     void renew_session();
     /// Ready, not paused or started, with nothing published yet.
     void become_ready() noexcept;
-    /// The newest packet due at `now_index`, next_index_ resynchronised; nullopt when none is to be sent.
+    /// The newest packet due at `now_index` (PacketSchedule::newest_due()), skipped frames counted lost and a held run's
+    /// placement published; nullopt when none is to be sent.
     [[nodiscard]] auto newest_due(uint64_t now_index) noexcept -> std::optional<uint64_t>;
-    /// Moves next_index_ toward `newest` after a start or a clock step; false to wait out a small step back, or while
-    /// a held run's first packet is not yet due (start_held()).
-    [[nodiscard]] auto resync(uint64_t newest) noexcept -> bool;
-    /// Whether a held run starts at `newest`: its first packet, FIRST_REPORT_LEAD_US ahead, is due; placed afresh when
-    /// none is yet, or the clock stepped back past it or forward past a burst (its SR would name a packet never sent).
-    [[nodiscard]] auto start_held(uint64_t newest) noexcept -> bool;
-    /// Places the held run's first packet at held_first(`newest`) and publishes it.
-    void place_held(uint64_t newest) noexcept;
-    /// The packet a held run starts at: FIRST_REPORT_LEAD_US past `newest`, on the packet grid.
-    [[nodiscard]] auto held_first(uint64_t newest) const noexcept -> uint64_t;
-    /// Sends the packets from next_index_ up to `newest`, then flushes them.
+    /// Publishes the held run's first packet, placed at PacketSchedule::held().
+    void place_held() noexcept;
+    /// Sends the packets from the schedule's next index up to `newest`, then flushes them.
     void send_until(uint64_t newest) noexcept;
-    /// Renders and queues the packet at next_index_; true when the transport accepted it.
+    /// Renders and queues the packet at the schedule's next index; true when the transport accepted it.
     [[nodiscard]] auto send_packet(rtp::RtpHeader const& header) noexcept -> bool;
     /// Flushes the `queued` packets and counts what went out.
     void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
@@ -269,14 +254,11 @@ class Sender
     /// The SDP media section this sender describes.
     [[nodiscard]] auto media_description(statusbar::ip::IPv4Address const& origin, bool multicast) const -> sdp::Media;
 
-    std::atomic<uint32_t> ssrc_{0};
-    std::mt19937_64 rng_;
+    PacketSchedule schedule_;
     bool paused_{false};  ///< pause() since the last tick()
-    bool started_{false};
     bool sender_clock_{false};
     uint8_t dscp_{rtp::FrameAddressing::DSCP_MEDIA};
     State state_{State::idle};
-    uint16_t sequence_{0};
     std::string channel_order_;
     bool st2110_{false};
     uint8_t info_block_version_{0};
@@ -294,12 +276,8 @@ class Sender
     std::optional<Grandmaster> grandmaster_;
     uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
     std::atomic<uint32_t> send_offset_;
-    uint32_t phase_{0};
     std::optional<statusbar::ieee::VlanTag> vlan_;
-    uint64_t next_index_{0};              ///< first frame of the next packet to send
-    uint64_t run_first_{0};               ///< the run's first packet (real-time thread)
-    std::optional<uint64_t> held_first_;  ///< the packet a run held for its first SR starts at (real-time thread)
-    std::atomic<uint32_t> holds_{0};      ///< the ReportHolds held: real-time reads wait-free
+    std::atomic<uint32_t> holds_{0};  ///< the ReportHolds held: real-time reads wait-free
     /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.
     void count_hold(bool held);
     Counters counters_;

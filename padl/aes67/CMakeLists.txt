@@ -5,7 +5,9 @@ statusbar_add_module(
   NAME
   aes67
   SOURCES
+  aes67_depacketizer.cpp
   aes67_error.cpp
+  aes67_packet_schedule.cpp
   aes67_receiver.cpp
   aes67_rtcp.cpp
   aes67_sender.cpp
