@@ -34,7 +34,7 @@ namespace padl::aes67 {
 
 /// The plan of a receiver of `format` for `media` on `connection` over `transport`, `sender_clock` or direct
 /// (Receiver::set_sender_clock()): where receive_endpoint() says, joined and filtered by the SDP's source filter
-/// (RFC 4570) or an offer's sender. Fails as receive_endpoint().
+/// (RFC 4570) or an offer's sender, on the grandmaster its ts-refclk names. Fails as receive_endpoint().
 [[nodiscard]] auto receive_plan(
     sdp::Session const& session,
     sdp::Media const& media,

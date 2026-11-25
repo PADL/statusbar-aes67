@@ -94,6 +94,7 @@ auto receive_plan(
         .source_filter = offer ? std::optional{connection.address} : join,
         .offset = !sender_clock && clock && clock->direct_offset ? clock->direct_offset : std::nullopt,
         .sender_clock = sender_clock,
+        .grandmaster = named_grandmaster(session.effective_clocks(media)),
     };
 }
 

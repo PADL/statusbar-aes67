@@ -111,6 +111,7 @@ auto Sender::send_plan(Destination const& destination) const noexcept -> SendPla
         .format = format_,
         .payload_type = destination.payload_type,
         .phase = schedule_.phase(),
+        .grandmaster = grandmaster_,
     };
 }
 

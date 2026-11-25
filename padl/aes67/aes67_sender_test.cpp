@@ -1109,6 +1109,29 @@ TEST(aes67_sender, a_send_plan_carries_the_destination_format_and_grid)
     EXPECT_TRUE(transport.vlan.has_value());  // the default open_send_stream(): open_send() with the tag
 }
 
+// A send plan names the grandmaster the sender's ts-refclk names when it opens (none while it is not known), and a
+// receiver of the SDP it announces plans the same one: for IEEE 1588 in a domain, and for IEEE 802.1AS, traceable.
+TEST(aes67_sender, a_send_plan_names_the_grandmaster_its_receivers_plan)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.configure(GROUP));
+    EXPECT_FALSE(transport.send_plans.back().grandmaster.has_value());
+    for (Grandmaster const grandmaster :
+         {Grandmaster{.identity = GRANDMASTER.identity, .domain = 5},
+          Grandmaster{
+              .identity = GRANDMASTER.identity, .domain = 0, .version = padl::sdp::PtpVersion::ieee802_1as, .traceable = true}}) {
+        sender.set_grandmaster(grandmaster);
+        EXPECT_TRUE(sender.configure(GROUP));
+        EXPECT_TRUE(transport.send_plans.back().grandmaster == std::optional{grandmaster});
+        auto const announced = padl::sdp::parse(padl::sdp::to_string(*sender.session()));
+        Receiver receiver{STEREO_L24, {}, transport};
+        EXPECT_TRUE(announced && receiver.configure(*announced).has_value());
+        EXPECT_TRUE(transport.receive_plans.back().grandmaster == std::optional{grandmaster});
+    }
+}
+
 // The SendState an RTCP session reads is the packet path's, one engine step behind (the port sends after the tick that
 // writes): a run's first tick publishes its first packet as not yet sent, never the port's run before, and a pause
 // publishes nothing sending on both paths.

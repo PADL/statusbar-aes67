@@ -97,4 +97,32 @@ TEST(aes67_stream, groups_alias_when_their_low_23_bits_agree)
     EXPECT_FALSE(multicast_mac_aliases(IPv4Address{239, 69, 1, 2}, IPv4Address{10, 69, 1, 2}));
 }
 
+// named_grandmaster() reads back what Grandmaster::references() writes: IEEE 1588 in a domain, IEEE 802.1AS, either
+// traceable; the first reference that names a grandmaster; none from references that name none.
+TEST(aes67_stream, named_grandmaster_reads_back_what_references_writes)
+{
+    for (Grandmaster const grandmaster :
+         {GRANDMASTER,
+          Grandmaster{.identity = GRANDMASTER.identity, .domain = 5, .traceable = true},
+          Grandmaster{.identity = GRANDMASTER.identity, .version = padl::sdp::PtpVersion::ieee802_1as, .traceable = true}}) {
+        EXPECT_TRUE(named_grandmaster(grandmaster.references().ptp) == std::optional{grandmaster});
+    }
+    EXPECT_FALSE(named_grandmaster({}).has_value());
+    padl::sdp::ReferenceClocks clocks = padl::sdp::ReferenceClocks::of(padl::sdp::PtpReference{.traceable = true});
+    EXPECT_FALSE(named_grandmaster(clocks.ptp).has_value());
+    clocks.ptp.push_back(padl::sdp::PtpReference{.version = padl::sdp::PtpVersion::other, .text = "ptp=IEEE1588-2030:x"});
+    EXPECT_FALSE(named_grandmaster(clocks.ptp).has_value());
+    Grandmaster const second{.identity = *ieee::eui64_from_string("EC-46-70-FF-FE-10-FF-B0"), .domain = 3};
+    clocks.ptp.push_back(second.reference());
+    clocks.ptp.push_back(GRANDMASTER.reference());
+    auto const named = named_grandmaster(clocks.ptp);
+    EXPECT_TRUE(named && named->identity == second.identity && named->domain == 3 && named->traceable);
+    // Traceable only under its own version: an IEEE 1588 `traceable` says nothing of an IEEE 802.1AS grandmaster.
+    padl::sdp::ReferenceClocks gptp = padl::sdp::ReferenceClocks::of(
+        Grandmaster{.identity = GRANDMASTER.identity, .version = padl::sdp::PtpVersion::ieee802_1as}.reference());
+    gptp.ptp.push_back(padl::sdp::PtpReference{.version = padl::sdp::PtpVersion::ieee1588_2008, .traceable = true});
+    auto const untraced = named_grandmaster(gptp.ptp);
+    EXPECT_TRUE(untraced && untraced->version == padl::sdp::PtpVersion::ieee802_1as && !untraced->traceable);
+}
+
 TEST_MAIN(padl_aes67, aes67_stream_test)

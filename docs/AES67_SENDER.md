@@ -10,7 +10,9 @@ How the `aes67` module's `Sender` frames, times and describes a stream; the modu
 - When a packet is due, which run it belongs to and its sequence number and timestamp are a
   `PacketSchedule`'s (the grid, the due rule, the resynchronisation below, a held start, each
   run's SSRC and sequence); the `Sender` keeps the session and SDP, the grandmaster, report
-  holds, counters and rendering. `configure()` opens the transport with a `SendPlan`. Over a
+  holds, counters and rendering. `configure()` opens the transport with a `SendPlan`, which names
+  the grandmaster known then (`set_grandmaster()`; one learnt later reaches a plan at the next
+  `configure()`, as the sender reopens nothing for it). Over a
   frame port ([AES67_TRANSPORTS.md](AES67_TRANSPORTS.md)) the frames are written at their
   indices and the port's own schedule, given the `SendRun`, sends them.
 - Packet times (AES67-2023 Clause 7.2): a sender sends any whole number of frames per
