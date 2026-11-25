@@ -1080,6 +1080,51 @@ TEST(aes67_sender, a_frame_port_without_room_counts_what_a_packet_port_without_a
     EXPECT_EQ(senders.packet_source.pulls, senders.frame_source.pulls);
 }
 
+// A frame port's error() is the sender's as a transport's send error is: State::error while it lasts, through a pause,
+// ready again once it clears; the transport's own comes first, and a packet port's sender never asks a frame port.
+TEST(aes67_sender, a_frame_ports_error_is_reported_as_the_transports_send_error_is)
+{
+    LoopTransport transport;
+    transport.frame_ports = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    sender.tick(base + 47, 0);
+    EXPECT_TRUE(sender.state() == State::running && !sender.error());
+    transport.frame_error = std::make_error_code(std::errc::io_error);
+    sender.tick(base + 95, 0);
+    EXPECT_TRUE(sender.state() == State::error && sender.error() == std::errc::io_error);
+    sender.tick(base + 143, 0);  // a packet written: still in error
+    EXPECT_TRUE(sender.state() == State::error && sender.counters().packets == 3);
+    transport.failing = std::error_code{EINVAL, std::system_category()};
+    sender.tick(base + 143, 0);
+    EXPECT_TRUE(sender.error() == std::errc::invalid_argument);  // the transport's first
+    transport.failing.clear();
+    sender.pause();
+    EXPECT_TRUE(sender.state() == State::error && sender.error() == std::errc::io_error);  // paused, the port refusing
+    transport.frame_error.clear();
+    sender.pause();
+    EXPECT_TRUE(sender.state() == State::idle && !sender.error());
+    transport.frame_error = std::make_error_code(std::errc::io_error);
+    sender.tick(base + 191, 0);
+    EXPECT_TRUE(sender.state() == State::error);
+    transport.frame_error.clear();
+    sender.tick(base + 191, 0);  // nothing due, but the port sends again
+    EXPECT_TRUE(sender.state() == State::ready && !sender.error());
+    sender.tick(base + 239, 0);
+    EXPECT_TRUE(sender.state() == State::running);
+
+    LoopTransport packets;
+    packets.frame_error = std::make_error_code(std::errc::io_error);
+    Sender packet{STEREO_L24, source.provider(), packets, "Test"};
+    packet.set_send_offset(0);
+    EXPECT_TRUE(packet.configure(GROUP));
+    packet.tick(base + 47, 0);
+    EXPECT_TRUE(packet.state() == State::running && !packet.error() && packets.queue.size() == 1);
+}
+
 // The plan a transport is asked to open: the destination, its marking and tag, the format, payload type and grid.
 TEST(aes67_sender, a_send_plan_carries_the_destination_format_and_grid)
 {

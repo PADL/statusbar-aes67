@@ -64,7 +64,9 @@ its `FrameSend` (both null for a packet port, and constant for the port's life).
   dropped, and the run leaves it out (its sequence number spent), as a packet port does. The
   `SendState` an RTCP session reads comes from the port's `progress()` once that names the run
   (`SendProgress::ssrc` and `first_index`); until the port has taken it, the run's first packet
-  is published as not yet sent.
+  is published as not yet sent. A port that refused or stopped the run and will not try it
+  again unasked says why in `error()`, a plain read the tick makes; the sender is in
+  `State::error` with it, as with `Transport::send_error()`, until it clears.
 - Both are called on the real-time thread and neither may block or make a system call there.
   `start()`, `stop()`, `set_send_offset()` and `set_offset()` only record the change: the
   implementation publishes it (through `itc`) to a thread off the tick, which applies it to

@@ -441,6 +441,8 @@ class LoopTransport final : public Transport
             uint64_t const next = schedule.started() ? schedule.next_index() : taken->first_index;
             return {.ssrc = taken->ssrc, .first_index = taken->first_index, .next_index = next, .packets = sent};
         }
+        /// The transport's frame_error.
+        [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.frame_error; }
 
         /// The engine at `now_index`: a run given taken, started once its first packet is due, then every packet due
         /// sent.
@@ -574,6 +576,7 @@ class LoopTransport final : public Transport
     bool refuse{false};                                       ///< every send_rendered() finds no TX buffer
     std::error_code failing;                                  ///< send_error()
     std::error_code port_error;                               ///< every receive port's error()
+    std::error_code frame_error;                              ///< every FrameTx's error()
     bool every_tick{false};                                   ///< drain_every_tick()
     bool refuse_tag{false};                                   ///< set_vlan() refuses a tag, as a socket does
     std::optional<statusbar::ieee::VlanTag> vlan;             ///< the open port's tag
