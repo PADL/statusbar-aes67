@@ -127,7 +127,7 @@ class FrameReceive
     /// The latest report block inputs; valid once a source is learnt.
     [[nodiscard]] virtual auto receive_state() const noexcept -> ReceiveState = 0;
     /// Places packets by `offset` (Receiver::set_offset()) from now on, or holds them no_offset (nullopt). It replaces
-    /// the plan's; a change takes effect once published, after the call returns.
+    /// the plan's; a change applies once published, after the call returns.
     virtual void set_offset(std::optional<uint32_t> offset) noexcept = 0;
 };
 
@@ -147,10 +147,10 @@ class ReceivePort
     [[nodiscard]] virtual auto frames() noexcept -> FrameReceive* { return nullptr; }
 };
 
-/// What a FrameSend has sent of the run it is sending: the run it last took, which may lag start().
+/// What a FrameSend has sent of the run it is sending: the run it last accepted, which may lag start().
 struct SendProgress
 {
-    uint32_t ssrc{0};         ///< the run's SendRun::ssrc; 0: none taken yet
+    uint32_t ssrc{0};         ///< the run's SendRun::ssrc; 0: none accepted yet
     uint64_t first_index{0};  ///< the run's SendRun::first_index
     uint64_t next_index{0};   ///< the first frame of the next packet it sends
     uint32_t packets{0};      ///< packets sent in the run, mod 2^32
@@ -165,7 +165,7 @@ class FrameSend
 {
   public:
     virtual ~FrameSend() = default;
-    /// How far past the newest due packet a run's first packet is placed, in frames: time for start() to take effect.
+    /// How far past the newest due packet a run's first packet is placed, in frames: time for start() to apply.
     [[nodiscard]] virtual auto start_lead_frames() const noexcept -> uint32_t = 0;
     /// Sends `run` from its first packet, once that is due, on the plan's grid; the run before it must be stopped.
     virtual void start(SendRun const& run) noexcept = 0;
@@ -180,8 +180,8 @@ class FrameSend
     /// none of whose frames were committed is one the Sender dropped (writable() had no room; Counters::dropped): the
     /// run leaves it out, its sequence number spent, as a packet port does with a packet it had no buffer for.
     [[nodiscard]] virtual auto commit(uint64_t first_index, uint32_t frames) noexcept -> bool = 0;
-    /// What the run it last took has sent. It may still describe the run before start() until the change takes
-    /// effect: SendProgress::ssrc and first_index say which run it is, and the Sender reads it only for its own.
+    /// What the run it last accepted has sent. It may still describe the run before start() until the change
+    /// applies: SendProgress::ssrc and first_index say which run it is, and the Sender reads it only for its own.
     [[nodiscard]] virtual auto progress() const noexcept -> SendProgress = 0;
     /// Why the port cannot send the run and will not try again unasked (it refused or stopped it), or none (the
     /// default); the Sender reports it as Transport::send_error(). A plain read; it clears once the port sends again.

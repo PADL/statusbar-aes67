@@ -364,7 +364,7 @@ class LoopTransport final : public Transport
 
     /// A frame send port (frame_ports): the frames written to a ring of FRAME_RING frames, and send_due() the engine
     /// that sends the run it was given by a PacketSchedule of its plan, each packet's payload the frames committed for
-    /// it or silence, a packet with none committed left out. As a device would, the engine takes a run start() gave
+    /// it or silence, a packet with none committed left out. As a device would, the engine accepts a run start() gave
     /// at its next send_due(), so progress() describes the run before until then.
     class FrameTx final
         : public SendPort
@@ -432,24 +432,24 @@ class LoopTransport final : public Transport
             }
             return true;
         }
-        /// The run taken: what it has sent, and its next packet (its first until that is due).
+        /// The run accepted: what it has sent, and its next packet (its first until that is due).
         [[nodiscard]] auto progress() const noexcept -> SendProgress override
         {
-            if (!taken) {
+            if (!accepted) {
                 return {};
             }
-            uint64_t const next = schedule.started() ? schedule.next_index() : taken->first_index;
-            return {.ssrc = taken->ssrc, .first_index = taken->first_index, .next_index = next, .packets = sent};
+            uint64_t const next = schedule.started() ? schedule.next_index() : accepted->first_index;
+            return {.ssrc = accepted->ssrc, .first_index = accepted->first_index, .next_index = next, .packets = sent};
         }
         /// The transport's frame_error.
         [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.frame_error; }
 
-        /// The engine at `now_index`: a run given taken, started once its first packet is due, then every packet due
+        /// The engine at `now_index`: a run given is accepted, started once its first packet is due, then every packet due
         /// sent.
         void send_due(uint64_t const now_index)
         {
-            if (pending && taken != pending) {
-                taken = pending;
+            if (pending && accepted != pending) {
+                accepted = pending;
                 sent = 0;
             }
             if (pending && schedule.is_due(pending->first_index, now_index, send_offset)) {
@@ -467,18 +467,18 @@ class LoopTransport final : public Transport
             }
         }
 
-        LoopTransport& transport;        ///< where its packets go
-        SendPlan plan;                   ///< what it was opened for
-        PacketSchedule schedule;         ///< the run's grid, sequence and SSRC
-        std::vector<uint8_t> ring;       ///< FRAME_RING frames
-        std::vector<uint64_t> slots;     ///< the index committed in each ring slot, or NONE
-        std::optional<SendRun> pending;  ///< a run given, its first packet not yet due
-        std::optional<SendRun> taken;    ///< the run the engine took last
-        std::vector<SendRun> runs;       ///< every start()
-        size_t stops{0};                 ///< stop() calls
-        uint32_t send_offset{0};         ///< the run's
-        uint32_t sent{0};                ///< packets sent in the run taken
-        uint64_t lost{0};                ///< frames sent as silence or skipped
+        LoopTransport& transport;         ///< where its packets go
+        SendPlan plan;                    ///< what it was opened for
+        PacketSchedule schedule;          ///< the run's grid, sequence and SSRC
+        std::vector<uint8_t> ring;        ///< FRAME_RING frames
+        std::vector<uint64_t> slots;      ///< the index committed in each ring slot, or NONE
+        std::optional<SendRun> pending;   ///< a run given, its first packet not yet due
+        std::optional<SendRun> accepted;  ///< the run the engine accepted last
+        std::vector<SendRun> runs;        ///< every start()
+        size_t stops{0};                  ///< stop() calls
+        uint32_t send_offset{0};          ///< the run's
+        uint32_t sent{0};                 ///< packets sent in the run accepted
+        uint64_t lost{0};                 ///< frames sent as silence or skipped
 
       private:
         /// The packet at the schedule's next index, to the queue.

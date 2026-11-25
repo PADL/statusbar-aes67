@@ -273,14 +273,14 @@ void Receiver::drain_frames(uint64_t const now_index) noexcept
 {
     follow_offset();
     auto const drained = frames_->drain(now_index, handler_ ? handler_ : NO_FRAMES);
-    take_drain(drained);
+    apply_drain(drained);
     notify_port_error();
     if (drained.accepted) {
         receive_state_.store(frames_->receive_state());
     }
 }
 
-void Receiver::take_drain(FrameDrain const& drained) noexcept
+void Receiver::apply_drain(FrameDrain const& drained) noexcept
 {
     depacketizer_.adopt_counters(frames_->counters());  // counters() reads them there
     if (drained.offset_forgotten) {
@@ -352,7 +352,7 @@ auto Receiver::receive_batches(uint64_t const now_index) noexcept -> bool
 
 void Receiver::set_gate(uint64_t const now_index, bool const backlog) noexcept
 {
-    if (depacketizer_.take_restarted()) {
+    if (depacketizer_.clear_restarted()) {
         next_poll_index_ = 0;  // the drain adopted a new source: as reset_stream()
     }
     if (backlog) {
