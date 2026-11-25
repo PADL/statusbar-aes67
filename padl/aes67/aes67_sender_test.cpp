@@ -914,4 +914,33 @@ TEST(aes67_sender, extension_attributes_are_announced_one_session_version_on)
     EXPECT_TRUE(padl::sdp::to_string(session_for(replacement)).find("a=x-test-id:1234\r\n") != std::string::npos);
 }
 
+// The plan a transport is asked to open: the destination, its marking and tag, the format, payload type and grid.
+TEST(aes67_sender, a_send_plan_carries_the_destination_format_and_grid)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_dscp(46);
+    sender.set_packet_phase(30);
+    EXPECT_TRUE(sender.set_vlan(statusbar::ieee::VlanTag{100, false, 5}));
+    EXPECT_TRUE(sender.configure(Destination{.address = IPv4Address{239, 69, 1, 2}, .port = 5006, .payload_type = 99, .ttl = 16}));
+    EXPECT_EQ(transport.send_plans.size(), size_t{1});
+    auto const& plan = transport.send_plans.back();
+    EXPECT_TRUE(plan.destination == (Endpoint{.address = IPv4Address{239, 69, 1, 2}, .port = 5006}));
+    EXPECT_TRUE(plan.ttl == 16 && plan.dscp == 46 && plan.vlan.has_value() && plan.vlan->get_vid() == 100);
+    EXPECT_TRUE(plan.format == STEREO_L24 && plan.payload_type == 99 && plan.phase == 30);
+    EXPECT_TRUE(
+        plan ==
+        (SendPlan{
+            .destination = {.address = IPv4Address{239, 69, 1, 2}, .port = 5006},
+            .ttl = 16,
+            .dscp = 46,
+            .vlan = statusbar::ieee::VlanTag{100, false, 5},
+            .format = STEREO_L24,
+            .payload_type = 99,
+            .phase = 30,
+        }));
+    EXPECT_TRUE(transport.vlan.has_value());  // the default open_send_stream(): open_send() with the tag
+}
+
 TEST_MAIN(padl_aes67, aes67_sender_test)

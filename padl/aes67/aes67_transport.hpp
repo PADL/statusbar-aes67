@@ -7,6 +7,7 @@
 /// a SendPort per sender and an RtcpPort per RTCP session. The control thread opens and destroys
 /// ports, safely while the real-time thread ticks; it brackets each tick with begin_tick() / end_tick().
 
+#include "padl/aes67/aes67_plan.hpp"
 #include "padl/rtp/rtp_frame.hpp"
 #include "padl/rtp/rtp_header.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -221,6 +222,18 @@ class Transport
     }
     /// Send to `options.destination`.
     [[nodiscard]] virtual auto open_send(SendOptions const& options) -> statusbar::StatusValue<std::unique_ptr<SendPort>> = 0;
+    /// Receive the stream `plan` describes. Default: open_receive_from() its join source when the destination is a
+    /// source-specific group (RFC 4607), else open_receive().
+    [[nodiscard]] virtual auto open_receive_stream(ReceivePlan const& plan) -> statusbar::StatusValue<std::unique_ptr<ReceivePort>>
+    {
+        bool const specific = plan.join_source && statusbar::net::is_source_specific_group(plan.destination.address);
+        return specific ? open_receive_from(plan.destination, *plan.join_source) : open_receive(plan.destination);
+    }
+    /// Send the stream `plan` describes. Default: open_send() to its destination with its TTL, DSCP and tag.
+    [[nodiscard]] virtual auto open_send_stream(SendPlan const& plan) -> statusbar::StatusValue<std::unique_ptr<SendPort>>
+    {
+        return open_send({.destination = plan.destination, .ttl = plan.ttl, .dscp = plan.dscp, .vlan = plan.vlan});
+    }
     /// RTCP to and from `options.destination`, joining it if it is a group. Not supported by default.
     [[nodiscard]] virtual auto open_rtcp(RtcpOptions const& options) -> statusbar::StatusValue<std::unique_ptr<RtcpPort>>
     {

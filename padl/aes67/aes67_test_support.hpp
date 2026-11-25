@@ -6,6 +6,7 @@
 /// Test support: an in-memory Transport, a pattern source and a recording sink, and crafted
 /// sessions and RTP packets, for the tests of AES67 senders and receivers.
 
+#include "padl/aes67/aes67_plan.hpp"
 #include "padl/aes67/aes67_receiver.hpp"
 #include "padl/aes67/aes67_sender.hpp"
 #include "padl/aes67/aes67_transport.hpp"
@@ -237,6 +238,18 @@ class LoopTransport final : public Transport
         vlan = options.vlan;
         return std::make_unique<Tx>(*this, options.destination);
     }
+    /// The plan recorded; the default (an Rx).
+    auto open_receive_stream(ReceivePlan const& plan) -> statusbar::StatusValue<std::unique_ptr<ReceivePort>> override
+    {
+        receive_plans.push_back(plan);
+        return Transport::open_receive_stream(plan);
+    }
+    /// The plan recorded; the default (a Tx).
+    auto open_send_stream(SendPlan const& plan) -> statusbar::StatusValue<std::unique_ptr<SendPort>> override
+    {
+        send_plans.push_back(plan);
+        return Transport::open_send_stream(plan);
+    }
 
     /// failing.
     [[nodiscard]] auto send_error() const noexcept -> std::error_code override { return failing; }
@@ -255,6 +268,8 @@ class LoopTransport final : public Transport
     std::optional<statusbar::ieee::VlanTag> vlan;             ///< the open port's tag
     size_t receives{0};                                       ///< receive() calls
     std::optional<statusbar::ip::IPv4Address> joined_source;  ///< the last port's source-specific join, if it was one
+    std::vector<ReceivePlan> receive_plans;                   ///< every open_receive_stream()
+    std::vector<SendPlan> send_plans;                         ///< every open_send_stream()
 };
 
 /// A two-channel L24 stream to `destination`, PT 97, on a direct media clock at `offset` (none: not PTP-locked).

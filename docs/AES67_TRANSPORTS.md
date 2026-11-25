@@ -34,6 +34,10 @@ module overview in [AES67_MODULE.md](AES67_MODULE.md).
 - RTCP DSCP (AES67-2023 Clause 6.2): a sender marks its RTCP as its RTP stream, a receiver
   as it would mark a similar stream. `RtcpOptions::dscp` is that value; the caller passes
   the stream's (or would-be stream's) `SendOptions::dscp`, not the RTCP class of its own.
+- `Receiver` and `Sender` open their ports with `open_receive_stream(ReceivePlan)` and
+  `open_send_stream(SendPlan)`: the whole stream, so a transport may choose how to carry it.
+  The defaults call `open_receive_from()` (a source-specific group with a source to join
+  for), `open_receive()` and `open_send()`; `UdpTransport` and `XdpTransport` keep them.
 
 ## UdpTransport
 

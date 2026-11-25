@@ -32,6 +32,17 @@ namespace padl::aes67 {
     sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Transport const& transport)
     -> statusbar::StatusValue<Endpoint>;
 
+/// The plan of a receiver of `format` for `media` on `connection` over `transport`, `sender_clock` or direct
+/// (Receiver::set_sender_clock()): where receive_endpoint() says, joined and filtered by the SDP's source filter
+/// (RFC 4570) or an offer's sender. Fails as receive_endpoint().
+[[nodiscard]] auto receive_plan(
+    sdp::Session const& session,
+    sdp::Media const& media,
+    sdp::Connection const& connection,
+    StreamFormat const& format,
+    bool sender_clock,
+    Transport const& transport) -> statusbar::StatusValue<ReceivePlan>;
+
 class Receiver
 {
   public:
@@ -95,27 +106,20 @@ class Receiver
     void accept(Datagram const& datagram, uint64_t now_index, uint64_t offset) noexcept;
     /// Forgets the stream's source and sequence, and opens the due-tick gate.
     void reset_stream() noexcept;
-    /// From configure(), the media validated: open the port where receive_endpoint() says and set the stream up from
-    /// the SDP; on failure State::error and error().
+    /// From configure(), the media validated: open the port receive_plan() plans and set the stream up from the SDP; on
+    /// failure State::error and error().
     [[nodiscard]] auto open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
         -> statusbar::Status;
-    /// The stream's payload type, packet size, offset, source filter and RTCP endpoints, from the SDP, received at
-    /// `endpoint`.
+    /// The plan's payload type, packet size, offset and source filter, the filter published as ReceiveState::source
+    /// until a source is learnt; and the RTCP endpoints from the SDP.
     void apply_media(
-        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
-    /// The source filter (RFC 4570, or an offer's sender), published as ReceiveState::source until a source is learnt.
-    void set_source_filter(
-        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);
-    /// clear(), then open the transport for `destination`, joined for `source` alone when it is a source-specific
-    /// group (RFC 4607) and a source is given; on failure State::error and error().
-    [[nodiscard]] auto reopen(Endpoint const& destination, std::optional<statusbar::ip::IPv4Address> const& source)
-        -> statusbar::Status;
+        sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, ReceivePlan const& plan);
+    /// clear(), then open the transport for `plan` (Transport::open_receive_stream()); on failure State::error and error().
+    [[nodiscard]] auto reopen(ReceivePlan const& plan) -> statusbar::Status;
     /// State::error with `error`, returned.
     [[nodiscard]] auto refused(std::error_code error) noexcept -> statusbar::Status;
     /// Adopts the port reopen() opened, or records why it did not open as State::error and error().
     [[nodiscard]] auto adopt(statusbar::StatusValue<std::unique_ptr<ReceivePort>> port) -> statusbar::Status;
-    /// offset_'s value for a stream with `clock`: a direct clock's offset, flagged set; 0 when sender-clocked.
-    [[nodiscard]] auto initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t;
     /// From configure(): the RTCP endpoints, or why there are none.
     void set_rtcp(
         sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint);

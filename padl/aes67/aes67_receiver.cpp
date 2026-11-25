@@ -67,6 +67,33 @@ auto receive_endpoint(
     return statusbar::failure(Aes67Error::foreign_destination);
 }
 
+auto receive_plan(
+    sdp::Session const& session,
+    sdp::Media const& media,
+    sdp::Connection const& connection,
+    StreamFormat const& format,
+    bool const sender_clock,
+    Transport const& transport) -> statusbar::StatusValue<ReceivePlan>
+{
+    auto const endpoint = receive_endpoint(session, media, connection, transport);
+    if (!endpoint) {
+        return statusbar::failure(endpoint.error());
+    }
+    auto const join = matching_source(session.effective_source_filter(media), connection.address);
+    auto const clock = session.effective_media_clock(media);
+    bool const offer = !join && endpoint->address != connection.address;  // c= is the sender (AES67-2023 Clause 8.5.2)
+    return ReceivePlan{
+        .destination = *endpoint,
+        .join_source = join,
+        .format = format,
+        .payload_type = media.payload_type,
+        .max_frames = max_frames_for(media),
+        .source_filter = offer ? std::optional{connection.address} : join,
+        .offset = !sender_clock && clock && clock->direct_offset ? clock->direct_offset : std::nullopt,
+        .sender_clock = sender_clock,
+    };
+}
+
 Receiver::Receiver(StreamFormat const& format, FrameHandler handler, Transport& transport) noexcept
     : format_{format}
     , handler_{std::move(handler)}
@@ -93,45 +120,31 @@ auto Receiver::configure(sdp::Session const& session, size_t const media_index) 
 auto Receiver::open_stream(sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection)
     -> statusbar::Status
 {
-    auto const endpoint = receive_endpoint(session, media, connection, transport_);
-    if (auto const opened = endpoint
-            ? reopen(*endpoint, matching_source(session.effective_source_filter(media), connection.address))
-            : refused(endpoint.error());
-        !opened) {
+    auto const plan = receive_plan(session, media, connection, format_, sender_clock(), transport_);
+    if (auto const opened = plan ? reopen(*plan) : refused(plan.error()); !opened) {
         return opened;
     }
-    apply_media(session, media, connection, *endpoint);
+    apply_media(session, media, connection, *plan);
     state_ = State::ready;
     error_.clear();
     return statusbar::success();
 }
 
 void Receiver::apply_media(
-    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
+    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, ReceivePlan const& plan)
 {
-    depacketizer_.set_stream(media.payload_type, max_frames_for(media));
-    offset_.store(initial_offset(session.effective_media_clock(media)), std::memory_order_release);
-    set_source_filter(session, media, connection, endpoint);
-    set_rtcp(session, media, connection, endpoint);
+    depacketizer_.set_stream(plan.payload_type, plan.max_frames);
+    offset_.store(plan.offset ? OFFSET_SET | *plan.offset : 0, std::memory_order_release);
+    depacketizer_.set_source_filter(plan.source_filter);
+    receive_state_.store({.source = plan.source_filter.value_or(statusbar::ip::IPv4Address{})});
+    set_rtcp(session, media, connection, plan.destination);
 }
 
-void Receiver::set_source_filter(
-    sdp::Session const& session, sdp::Media const& media, sdp::Connection const& connection, Endpoint const& endpoint)
-{
-    auto source_filter = matching_source(session.effective_source_filter(media), connection.address);
-    if (!source_filter && endpoint.address != connection.address) {
-        source_filter = connection.address;  // an offer: c= is the sender (AES67-2023 Clause 8.5.2)
-    }
-    depacketizer_.set_source_filter(source_filter);
-    receive_state_.store({.source = source_filter.value_or(statusbar::ip::IPv4Address{})});
-}
-
-auto Receiver::reopen(Endpoint const& destination, std::optional<statusbar::ip::IPv4Address> const& source) -> statusbar::Status
+auto Receiver::reopen(ReceivePlan const& plan) -> statusbar::Status
 {
     clear();
     receive_state_.store({});  // not drained while cleared, so drain() is not storing too
-    bool const specific = source && statusbar::net::is_source_specific_group(destination.address);
-    return adopt(specific ? transport_.open_receive_from(destination, *source) : transport_.open_receive(destination));
+    return adopt(transport_.open_receive_stream(plan));
 }
 
 auto Receiver::adopt(statusbar::StatusValue<std::unique_ptr<ReceivePort>> port) -> statusbar::Status
@@ -148,11 +161,6 @@ auto Receiver::refused(std::error_code const error) noexcept -> statusbar::Statu
     state_ = State::error;
     error_ = error;
     return statusbar::failure(error);
-}
-
-auto Receiver::initial_offset(std::optional<sdp::MediaClock> const& clock) const noexcept -> uint64_t
-{
-    return !sender_clock() && clock && clock->direct_offset ? OFFSET_SET | *clock->direct_offset : 0;
 }
 
 void Receiver::set_rtcp(

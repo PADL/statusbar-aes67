@@ -9,6 +9,7 @@
 #include "padl/aes67/aes67_depacketizer.hpp"
 #include "padl/aes67/aes67_error.hpp"
 #include "padl/aes67/aes67_packet_schedule.hpp"
+#include "padl/aes67/aes67_plan.hpp"
 #include "padl/aes67/aes67_receiver.hpp"
 #include "padl/aes67/aes67_rtcp.hpp"
 #include "padl/aes67/aes67_sender.hpp"

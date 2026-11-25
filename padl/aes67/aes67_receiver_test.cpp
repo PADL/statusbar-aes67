@@ -589,6 +589,38 @@ TEST(aes67_receiver, an_any_source_group_or_an_unfiltered_one_is_joined_for_any_
     EXPECT_FALSE(transport.joined_source.has_value());
 }
 
+// The plan a transport is asked to open: the SDP's group and port, its source filter's source to join for and admit,
+// its payload type, packet size and offset.
+TEST(aes67_receiver, a_receive_plan_carries_what_the_sdp_says)
+{
+    LoopTransport transport;
+    IPv4Address const sender{10, 0, 0, 5};
+    auto session = stream_session({.address = IPv4Address{232, 10, 1, 1}, .port = 5004}, 0x1000);
+    session.source_filter = padl::sdp::SourceFilter{.destination = IPv4Address{232, 10, 1, 1}, .source = sender};
+    session.media[0].max_packet_time_us = 4000;
+    Receiver receiver{STEREO_L24, {}, transport};
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_EQ(transport.receive_plans.size(), size_t{1});
+    ReceivePlan const expected{
+        .destination = {.address = IPv4Address{232, 10, 1, 1}, .port = 5004},
+        .join_source = sender,
+        .format = STEREO_L24,
+        .payload_type = 97,
+        .max_frames = 192,
+        .source_filter = sender,
+        .offset = 0x1000,
+        .sender_clock = false,
+    };
+    EXPECT_TRUE(transport.receive_plans.back() == expected);
+    EXPECT_EQ(transport.joined_source, std::optional{sender});  // the default open_receive_stream(): joined for it
+    // An offer: received here, admitted from its sender alone, joined for none.
+    auto offer = stream_session({.address = sender, .port = 5010});
+    offer.origin_address = "10.0.0.5";
+    auto const plan = receive_plan(offer, offer.media[0], *offer.connection, STEREO_L24, false, transport);
+    EXPECT_TRUE(plan && plan->destination == (Endpoint{.address = transport.local_address(), .port = 5010}));
+    EXPECT_TRUE(plan && !plan->join_source && plan->source_filter == std::optional{sender});
+}
+
 // A drain that adopts a new source opens the due-tick gate, as a reset stream's is, even when it places nothing (a
 // sender-clocked stream's new source, its offset forgotten): after a step back the port is asked at once.
 TEST(aes67_receiver, a_new_source_reopens_the_due_tick_gate)

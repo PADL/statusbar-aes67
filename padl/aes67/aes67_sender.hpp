@@ -228,8 +228,11 @@ class Sender
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
-    /// clear(), then open the transport to `destination`; on failure State::error and error().
+    /// clear(), then open the transport for send_plan(`destination`) (Transport::open_send_stream()); on failure
+    /// State::error and error().
     [[nodiscard]] auto open_port(Destination const& destination) -> statusbar::Status;
+    /// The plan of this sender's stream to `destination`.
+    [[nodiscard]] auto send_plan(Destination const& destination) const noexcept -> SendPlan;
     /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.
     void seed_run();
     /// A new session version, and the session id from the origin and name when none was set.

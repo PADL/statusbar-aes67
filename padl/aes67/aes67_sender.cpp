@@ -82,12 +82,7 @@ auto Sender::configure(sdp::Session const& session) -> statusbar::Status
 auto Sender::open_port(Destination const& destination) -> statusbar::Status
 {
     clear();
-    auto port = transport_.open_send({
-        .destination = {.address = destination.address, .port = destination.port},
-        .ttl = destination.ttl,
-        .dscp = dscp_,
-        .vlan = vlan_,
-    });
+    auto port = transport_.open_send_stream(send_plan(destination));
     if (!port) {
         state_ = State::error;
         error_ = port.error();
@@ -96,6 +91,19 @@ auto Sender::open_port(Destination const& destination) -> statusbar::Status
     port_ = std::move(*port);
     destination_ = destination;
     return statusbar::success();
+}
+
+auto Sender::send_plan(Destination const& destination) const noexcept -> SendPlan
+{
+    return SendPlan{
+        .destination = {.address = destination.address, .port = destination.port},
+        .ttl = destination.ttl,
+        .dscp = dscp_,
+        .vlan = vlan_,
+        .format = format_,
+        .payload_type = destination.payload_type,
+        .phase = schedule_.phase(),
+    };
 }
 
 auto Sender::set_vlan(std::optional<statusbar::ieee::VlanTag> const& vlan) noexcept -> statusbar::Status
