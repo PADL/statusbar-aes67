@@ -81,7 +81,7 @@ class Depacketizer
     /// Forgets the source, its sequence, reorder window and jitter: the next packet starts the stream afresh.
     void reset() noexcept;
     /// Whether admit() restarted the stream (adopted a new source) since the last call.
-    [[nodiscard]] auto take_restarted() noexcept -> bool
+    [[nodiscard]] auto clear_restarted() noexcept -> bool
     {
         if (!restarted_) {
             return false;  // read alone: the drain's common case stores nothing

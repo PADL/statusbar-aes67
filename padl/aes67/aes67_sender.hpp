@@ -242,7 +242,7 @@ class Sender
         auto const error = transport_.send_error();
         return error || frames_ == nullptr ? error : frames_->error();
     }
-    /// Takes `port` as the stream's, and a frame port's start lead.
+    /// Adopts `port` as the stream's, and a frame port's start lead.
     void adopt_port(std::unique_ptr<SendPort> port) noexcept;
     /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.
     void seed_run();
@@ -277,7 +277,7 @@ class Sender
     void follow_send_offset() noexcept;
     /// Writes the packets from the schedule's next index up to `newest` to the frame port, and counts them.
     void write_until(uint64_t newest) noexcept;
-    /// Renders and commits the packet at the schedule's next index into the port; true when the port took it.
+    /// Renders and commits the packet at the schedule's next index into the port; true when the port accepted it.
     [[nodiscard]] auto write_packet() noexcept -> bool;
     /// Copies the packet at `first_index` from the staging buffer into the port, piece by piece where its storage
     /// wraps; false when it has no room.

@@ -145,8 +145,8 @@ class Receiver
     [[nodiscard]] auto gate_closed(uint64_t now_index) const noexcept -> bool;
     /// drain() from a frame port: the offset passed on, its frames handed on, its state published.
     void drain_frames(uint64_t now_index) noexcept;
-    /// What a frame port's drain did: its counters taken for counters(), its offset forgotten, the state running.
-    void take_drain(FrameDrain const& drained) noexcept;
+    /// Applies what a frame port's drain did: its counters adopted for counters(), its offset forgotten, the state running.
+    void apply_drain(FrameDrain const& drained) noexcept;
     /// Passes a changed offset on to the frame port.
     void follow_offset() noexcept;
     /// Forgets the offset, as the frame port did for a sender-clocked stream's new source.

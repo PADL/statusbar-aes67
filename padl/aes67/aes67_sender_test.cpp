@@ -1002,7 +1002,7 @@ TEST(aes67_sender, a_frame_port_sends_what_the_packet_path_sends)
     EXPECT_TRUE(senders.frame.state() == State::running);
 }
 
-// A frame port's run starts its start lead past the newest due packet, on the grid, so it can take the run off the
+// A frame port's run starts its start lead past the newest due packet, on the grid, so it can accept the run off the
 // real-time thread; a pause stops it, and the next tick starts a new run under a new SSRC.
 TEST(aes67_sender, a_frame_port_run_starts_its_lead_ahead_and_a_pause_stops_it)
 {

@@ -44,7 +44,7 @@ module overview in [AES67_MODULE.md](AES67_MODULE.md).
 
 ## Frame ports
 
-A port may packetise and depacketise the stream itself, beside the network, and take or give
+A port may packetise and depacketise the stream itself, beside the network, and accept or give
 frames at sample indices: `ReceivePort::frames()` returns its `FrameReceive`, `SendPort::frames()`
 its `FrameSend` (both null for a packet port, and constant for the port's life).
 
@@ -63,7 +63,7 @@ its `FrameSend` (both null for a packet port, and constant for the port's life).
   newest due packet, and a changed send offset is passed on. A packet the port had no room for is
   dropped, and the run leaves it out (its sequence number spent), as a packet port does. The
   `SendState` an RTCP session reads comes from the port's `progress()` once that names the run
-  (`SendProgress::ssrc` and `first_index`); until the port has taken it, the run's first packet
+  (`SendProgress::ssrc` and `first_index`); until the port has accepted it, the run's first packet
   is published as not yet sent. A port that refused or stopped the run and will not try it
   again unasked says why in `error()`, a plain read the tick makes; the sender is in
   `State::error` with it, as with `Transport::send_error()`, until it clears.

@@ -372,7 +372,7 @@ auto Sender::newest_due(uint64_t const now_index) noexcept -> std::optional<uint
 {
     auto const newest =
         schedule_.newest_due(now_index, send_offset_.load(std::memory_order_relaxed), holds_for_reports(), counters_.lost);
-    if (!newest && schedule_.take_placed()) {
+    if (!newest && schedule_.clear_placed()) {
         place_held();
     }
     return newest;
@@ -573,7 +573,7 @@ auto Sender::run_progress() const noexcept -> SendProgress
     if (progress.ssrc == ssrc() && progress.first_index == run_first_index_) {
         return progress;
     }
-    return {.ssrc = ssrc(), .first_index = run_first_index_, .next_index = run_first_index_, .packets = 0};  // not taken yet
+    return {.ssrc = ssrc(), .first_index = run_first_index_, .next_index = run_first_index_, .packets = 0};  // not accepted yet
 }
 
 auto Sender::session() const -> std::optional<sdp::Session>
