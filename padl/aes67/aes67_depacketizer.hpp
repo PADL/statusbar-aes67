@@ -48,11 +48,35 @@ class Depacketizer
     [[nodiscard]] auto admit(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address const& source, uint64_t now_index) noexcept
         -> std::expected<uint32_t, DropReason>;
     /// Notes an admitted packet's arrival: the interarrival jitter (RFC 3550 Appendix A.8) and its timestamp.
-    void notify_arrival(uint32_t timestamp, uint64_t now_index) noexcept;
+    void notify_arrival(uint32_t const timestamp, uint64_t const now_index) noexcept
+    {
+        // RFC 3550 Appendix A.8 on the first packet of each drain (its index is the arrival time,
+        // shared by the batch): transit = arrival - timestamp; J += (|D| - J) / 16, kept x16.
+        uint32_t const transit = static_cast<uint32_t>(now_index) - timestamp;
+        if (have_transit_ && now_index != last_arrival_index_) {
+            auto const d = static_cast<int32_t>(transit - last_transit_);
+            uint32_t const magnitude = d < 0 ? 0U - static_cast<uint32_t>(d) : static_cast<uint32_t>(d);
+            jitter_x16_ += magnitude - ((jitter_x16_ + 8) >> 4U);
+        }
+        if (!have_transit_ || now_index != last_arrival_index_) {
+            last_transit_ = transit;
+            last_arrival_index_ = now_index;
+            have_transit_ = true;
+        }
+        last_rtp_ts_ = timestamp;
+    }
     /// Counts a refused packet: dropped, and its reason.
-    void drop(DropReason reason) noexcept;
+    void drop(DropReason const reason) noexcept
+    {
+        ++counters_.dropped;
+        ++counters_.drops[reason];
+    }
     /// Counts a packet of `frames` handed on.
-    void delivered(uint32_t frames) noexcept;
+    void delivered(uint32_t const frames) noexcept
+    {
+        ++counters_.packets;
+        counters_.frames += frames;
+    }
 
     /// Forgets the source, its sequence, reorder window and jitter: the next packet starts the stream afresh.
     void reset() noexcept;

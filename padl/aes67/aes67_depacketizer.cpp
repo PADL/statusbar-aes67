@@ -26,12 +26,6 @@ void Depacketizer::restart_sequence() noexcept
     window_.reset();
 }
 
-void Depacketizer::drop(DropReason const reason) noexcept
-{
-    ++counters_.dropped;
-    ++counters_.drops[reason];
-}
-
 auto Depacketizer::admit(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address const& source, uint64_t const now_index) noexcept
     -> std::expected<uint32_t, DropReason>
 {
@@ -102,30 +96,6 @@ auto Depacketizer::admit_sequence(uint16_t const seq, uint32_t const frames, uin
     // A packet on probation (a new source's first) is handed on all the same:
     // its timestamp, not its sequence number, places it, and index_of_rtp() puts it about now.
     return place(seq, frames);
-}
-
-void Depacketizer::notify_arrival(uint32_t const timestamp, uint64_t const now_index) noexcept
-{
-    // RFC 3550 Appendix A.8 on the first packet of each drain (its index is the arrival time,
-    // shared by the batch): transit = arrival - timestamp; J += (|D| - J) / 16, kept x16.
-    uint32_t const transit = static_cast<uint32_t>(now_index) - timestamp;
-    if (have_transit_ && now_index != last_arrival_index_) {
-        auto const d = static_cast<int32_t>(transit - last_transit_);
-        uint32_t const magnitude = d < 0 ? 0U - static_cast<uint32_t>(d) : static_cast<uint32_t>(d);
-        jitter_x16_ += magnitude - ((jitter_x16_ + 8) >> 4U);
-    }
-    if (!have_transit_ || now_index != last_arrival_index_) {
-        last_transit_ = transit;
-        last_arrival_index_ = now_index;
-        have_transit_ = true;
-    }
-    last_rtp_ts_ = timestamp;
-}
-
-void Depacketizer::delivered(uint32_t const frames) noexcept
-{
-    ++counters_.packets;
-    counters_.frames += frames;
 }
 
 auto Depacketizer::place(uint16_t const seq, uint32_t const frames) noexcept -> bool

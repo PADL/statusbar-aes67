@@ -240,7 +240,8 @@ class Sender
     /// placement published; nullopt when none is to be sent.
     [[nodiscard]] auto newest_due(uint64_t now_index) noexcept -> std::optional<uint64_t>;
     /// Publishes the held run's first packet, placed at PacketSchedule::held().
-    void place_held() noexcept;
+    /// Not inlined: rare, and off newest_due()'s path.
+    [[gnu::noinline]] void place_held() noexcept;
     /// Sends the packets from the schedule's next index up to `newest`, then flushes them.
     void send_until(uint64_t newest) noexcept;
     /// Renders and queues the packet at the schedule's next index; true when the transport accepted it.

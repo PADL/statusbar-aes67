@@ -40,7 +40,13 @@ class PacketSchedule
     [[nodiscard]] auto phase() const noexcept -> uint32_t { return phase_; }
 
     /// A new generator seed from the system, a random SSRC (neither 0 nor the last) and sequence. Not real-time safe.
-    void seed();
+    void seed()
+    {
+        std::random_device random;
+        rng_.seed((uint64_t{random()} << 32U) | random());
+        ssrc_.store(fresh_ssrc(), std::memory_order_relaxed);  // never 0, nor the last run's
+        sequence_ = static_cast<uint16_t>(random());
+    }
     /// A new run's SSRC and sequence from the generator, nothing held.
     void renew() noexcept
     {
@@ -62,8 +68,18 @@ class PacketSchedule
     /// The newest packet due at `now_index` with `send_offset` (frames), next_index() resynchronised; a run's first
     /// packet waits for its report while `hold` (FIRST_REPORT_LEAD_US). Frames skipped, too far behind to send in
     /// time, are added to `lost`; nullopt when no packet is to be sent.
-    [[nodiscard]] auto newest_due(uint64_t now_index, uint64_t send_offset, bool hold, uint64_t& lost) noexcept
-        -> std::optional<uint64_t>;
+    [[nodiscard]] auto newest_due(uint64_t const now_index, uint64_t const send_offset, bool const hold, uint64_t& lost) noexcept
+        -> std::optional<uint64_t>
+    {
+        uint64_t const fpp = format_.frames_per_packet;
+        uint64_t const phase = phase_;
+        if (now_index + 1 < send_offset + fpp + phase) {
+            return std::nullopt;  // no packet due yet (only near the epoch)
+        }
+        // The newest packet (on the grid shifted by the phase) whose last frame is send_offset or more behind now.
+        uint64_t const newest = ((((now_index + 1 - send_offset - phase) / fpp) - 1) * fpp) + phase;
+        return resync(newest, hold, lost) ? std::optional{newest} : std::nullopt;
+    }
     /// Whether newest_due() placed a held run's first packet (afresh) at held() since the last call.
     [[nodiscard]] auto take_placed() noexcept -> bool { return std::exchange(placed_, false); }
 
@@ -93,17 +109,68 @@ class PacketSchedule
   private:
     /// Moves next_index_ toward `newest` after a start or a clock step, frames skipped added to `lost`; false to wait
     /// out a small step back, or while a held run's first packet is not yet due (start_held()).
-    [[nodiscard]] auto resync(uint64_t newest, bool hold, uint64_t& lost) noexcept -> bool;
+    [[nodiscard]] auto resync(uint64_t const newest, bool const hold, uint64_t& lost) noexcept -> bool
+    {
+        uint64_t const fpp = format_.frames_per_packet;
+        if (!started_ && hold && !start_held(newest)) {
+            return false;  // the run's first packet waits for its SR
+        }
+        if (!started_) {
+            next_index_ = run_first_ = newest;
+            started_ = true;
+        } else if (next_index_ > newest + fpp) {
+            // The clock went back. A small step is waited out (nothing is due
+            // until now catches up, so no index is sent twice); a large one,
+            // more than MAX_BURST packets, resynchronises.
+            if (next_index_ - (newest + fpp) <= uint64_t{MAX_BURST} * fpp) {
+                return false;
+            }
+            next_index_ = newest;
+        } else if (next_index_ + (uint64_t{MAX_BURST} * fpp) <= newest) {
+            lost += newest - next_index_;  // too far behind: skip what cannot be sent in time
+            next_index_ = newest;
+        }
+        return true;
+    }
+
     /// Whether a held run starts at `newest`: its first packet, FIRST_REPORT_LEAD_US ahead, is due; placed afresh when
     /// none is yet, or the clock stepped back past it or forward past a burst (its SR would name a packet never sent).
-    [[nodiscard]] auto start_held(uint64_t newest) noexcept -> bool;
-    /// The packet a held run starts at: FIRST_REPORT_LEAD_US past `newest`, on the packet grid.
-    [[nodiscard]] auto held_first(uint64_t newest) const noexcept -> uint64_t;
+    [[nodiscard]] auto start_held(uint64_t const newest) noexcept -> bool
+    {
+        uint64_t const burst = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
+        if (!held_first_ || newest > *held_first_ + burst || *held_first_ > held_first(newest)) {
+            held_first_ = held_first(newest);
+            placed_ = true;
+            return false;
+        }
+        if (newest < *held_first_) {
+            return false;  // its SR has until then; the run starts then whether or not it went
+        }
+        next_index_ = run_first_ = *held_first_;
+        started_ = true;
+        return true;
+    }
 
-    /// Draws from rng_ (seeded by seed() from std::random_device): no syscall on the ticking thread.
-    [[nodiscard]] auto next_random() noexcept -> uint32_t;
+    /// The packet a held run starts at: FIRST_REPORT_LEAD_US past `newest`, on the packet grid.
+    [[nodiscard]] auto held_first(uint64_t const newest) const noexcept -> uint64_t
+    {
+        uint64_t const fpp = format_.frames_per_packet;
+        uint64_t const lead = ((uint64_t{format_.sample_rate} * FIRST_REPORT_LEAD_US) / 1'000'000) + fpp - 1;
+        return newest + ((lead / fpp) * fpp);
+    }
+
+    /// Draws from rng_ (seeded by seed()): no syscall on the ticking thread.
+    [[nodiscard]] auto next_random() noexcept -> uint32_t { return static_cast<uint32_t>(rng_() >> 32U); }
     /// A random SSRC, neither 0 nor the current one.
-    [[nodiscard]] auto fresh_ssrc() noexcept -> uint32_t;
+    [[nodiscard]] auto fresh_ssrc() noexcept -> uint32_t
+    {
+        uint32_t const old = ssrc();
+        uint32_t next = next_random();
+        while (next == 0 || next == old) {
+            next = next_random();
+        }
+        return next;
+    }
 
     StreamFormat format_;
     std::atomic<uint32_t> ssrc_{0};
