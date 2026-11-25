@@ -195,7 +195,8 @@ class Sender
     void tick(uint64_t now_index, uint64_t tick_ns) noexcept;
     /// Send nothing until the next tick(), which starts a new run on the index grid with a new SSRC and
     /// sequence (RFC 3550 Section 8): send_state() is cleared (the RTCP session says BYE), state() reads
-    /// idle, or error while Transport::send_error() says so. Real-time safe; the ticking thread only.
+    /// idle, or error while Transport::send_error() (or a frame port's error()) says so. Real-time safe; the ticking
+    /// thread only.
     void pause() noexcept;
 
     /// The stream's SDP, or nullopt when not configured.
@@ -206,8 +207,8 @@ class Sender
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
     /// Every counter to zero; the run, its SSRC and sequence go on. The ticking thread.
     void reset_counters() noexcept { counters_ = {}; }
-    /// Why the transport refused the last configure(), or why it cannot send
-    /// (Transport::send_error(), seen by the last tick), for State::error.
+    /// Why the transport refused the last configure(), or why it cannot send (Transport::send_error(), else a frame
+    /// port's FrameSend::error(), seen by the last tick), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
     /// The current run's SSRC (a resumed run draws a new one on the ticking thread). Any thread.
@@ -235,6 +236,12 @@ class Sender
     [[nodiscard]] auto open_port(Destination const& destination) -> statusbar::Status;
     /// The plan of this sender's stream to `destination`.
     [[nodiscard]] auto send_plan(Destination const& destination) const noexcept -> SendPlan;
+    /// Why the stream cannot be sent: the transport's send_error(), else a frame port's error(); none when it can.
+    [[nodiscard]] auto stream_error() const noexcept -> std::error_code
+    {
+        auto const error = transport_.send_error();
+        return error || frames_ == nullptr ? error : frames_->error();
+    }
     /// Takes `port` as the stream's, and a frame port's start lead.
     void adopt_port(std::unique_ptr<SendPort> port) noexcept;
     /// A new run: the staging buffer sized, a random SSRC, generator seed and sequence, SR counts from zero.

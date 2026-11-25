@@ -183,6 +183,9 @@ class FrameSend
     /// What the run it last took has sent. It may still describe the run before start() until the change takes
     /// effect: SendProgress::ssrc and first_index say which run it is, and the Sender reads it only for its own.
     [[nodiscard]] virtual auto progress() const noexcept -> SendProgress = 0;
+    /// Why the port cannot send the run and will not try again unasked (it refused or stopped it), or none (the
+    /// default); the Sender reports it as Transport::send_error(). A plain read; it clears once the port sends again.
+    [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX

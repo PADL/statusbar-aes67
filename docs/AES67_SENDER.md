@@ -58,8 +58,9 @@ How the `aes67` module's `Sender` frames, times and describes a stream; the modu
   dropped), the frames are pulled into a staging buffer instead, so a missing pull is
   counted lost all the same; when the transport refuses the packet after rendering, the
   frames were already pulled and the packet is counted dropped without a second pull.
-- A sender is in `State::error` while its transport reports `send_error()`, checked every
-  tick, and returns to ready when it clears.
+- A sender is in `State::error` while its transport reports `send_error()`, or its frame port
+  `FrameSend::error()` (a run the port refused or stopped and will not retry unasked), checked
+  every tick and at `pause()`, and returns to ready when it clears.
 - `session()` gives origin the transport's interface address, the group with its TTL, the
   encoding, channels, rate and ptime, `ts-refclk:ptp=IEEE1588-2008:<EUI-64>:<domain>` and
   `clock-domain:PTPv2 <domain>` from `set_grandmaster()` (none set: `ts-refclk:localmac=` with

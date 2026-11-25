@@ -342,8 +342,8 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
         schedule_.renew();
         rtcp_counts_ = {};
     }
-    // A transport that cannot get packets out puts the sender in error until it can.
-    if (auto const send_error = transport_.send_error()) {
+    // A transport (or frame port) that cannot get packets out puts the sender in error until it can.
+    if (auto const send_error = stream_error()) {
         state_ = State::error;
         error_ = send_error;
     } else if (state_ == State::error) {
@@ -448,7 +448,7 @@ void Sender::pause() noexcept
         send_state_.store({});  // the RTCP session reads an SSRC of 0 as not sending
         stop_run();
     }
-    if (auto const send_error = transport_.send_error()) {
+    if (auto const send_error = stream_error()) {
         state_ = State::error;
         error_ = send_error;
     } else {
