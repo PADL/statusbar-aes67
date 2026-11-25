@@ -10,6 +10,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/ip/ip_ipv4_address.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -86,5 +87,30 @@ struct UdpFrame
 [[nodiscard]] auto serialize_rtp_frame_headers(
     FrameAddressing const& addressing, RtpHeader const& header, size_t payload_length, std::span<uint8_t> buffer) noexcept
     -> std::optional<size_t>;
+
+/// The headers serialize_rtp_frame_headers() writes for every packet of one stream, with sequence number, timestamp
+/// and SSRC zero, and where those three go: a packet's headers are these bytes with the three written (write()).
+struct FrameHeaderTemplate
+{
+    /// The most header bytes: a tagged frame's.
+    static constexpr size_t CAPACITY = 14 + statusbar::ieee::VlanTag::LENGTH + 20 + 8 + RtpHeader::LENGTH;
+
+    std::array<uint8_t, CAPACITY> bytes{};
+    size_t length{0};            ///< header bytes before the payload: 54 untagged, 58 tagged
+    size_t sequence_offset{0};   ///< the RTP sequence number's, two octets in network order
+    size_t timestamp_offset{0};  ///< the RTP timestamp's, four octets
+    size_t ssrc_offset{0};       ///< the SSRC's, four octets
+
+    /// The header bytes, `length` of them.
+    [[nodiscard]] auto header() const noexcept -> std::span<uint8_t const> { return std::span{bytes}.first(length); }
+    /// Writes the headers of the packet with `sequence`, `timestamp` and `ssrc` to the start of `out`; false, writing
+    /// nothing, when `out` is shorter than `length`.
+    [[nodiscard]] auto write(uint16_t sequence, uint32_t timestamp, uint32_t ssrc, std::span<uint8_t> out) const noexcept -> bool;
+};
+
+/// serialize_rtp_frame_headers()'s headers to `addressing` for RTP payload type `payload_type` and a
+/// `payload_length`-byte payload, as a template; nullopt where serialize_rtp_frame_headers() would fail on length.
+[[nodiscard]] auto frame_header_template(FrameAddressing const& addressing, uint8_t payload_type, size_t payload_length) noexcept
+    -> std::optional<FrameHeaderTemplate>;
 
 }  // namespace padl::rtp

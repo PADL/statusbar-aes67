@@ -3,11 +3,13 @@
 
 #include "padl/rtp/rtp_frame.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/checksum/checksum_ones_complement.hpp"
 #include "statusbar/ip/ip_ipv4.hpp"
 #include "statusbar/ip/ip_udp.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
 
 namespace padl::rtp {
@@ -121,6 +123,47 @@ constexpr uint16_t IPV4_FRAGMENT_OFFSET = 0x1FFF;
     return udp;
 }
 
+/// True when an RTP payload of `payload_length` octets fits one IPv4 datagram with its headers.
+[[nodiscard]] constexpr auto fits_ipv4(size_t const payload_length) noexcept -> bool
+{
+    return payload_length <= std::numeric_limits<uint16_t>::max() - statusbar::ip::IPv4Header::MIN_LENGTH -
+        statusbar::ip::UdpHeader::LENGTH - RtpHeader::LENGTH;
+}
+
+/// Appends the Ethernet, IPv4 and UDP headers around an `rtp_length`-octet RTP packet to `addressing`; false when
+/// they do not fit the writer.
+[[nodiscard]] auto append_udp_headers(
+    statusbar::BufferSerializerBuilderWithBuffer& writer, FrameAddressing const& addressing, size_t const rtp_length) noexcept
+    -> bool
+{
+    return static_cast<bool>(writer.append(ethernet_header(addressing))
+                                 .append(ipv4_header(addressing, rtp_length))
+                                 .append(udp_header(addressing, static_cast<uint16_t>(rtp_length))));
+}
+
+/// A template whose RTP header starts at `rtp`: its length and the offsets of its varying fields.
+[[nodiscard]] auto template_at(FrameHeaderTemplate result, size_t const rtp) noexcept -> FrameHeaderTemplate
+{
+    result.length = rtp + RtpHeader::LENGTH;
+    result.sequence_offset = rtp + offsetof(RtpHeader, sequence);
+    result.timestamp_offset = rtp + offsetof(RtpHeader, timestamp);
+    result.ssrc_offset = rtp + offsetof(RtpHeader, ssrc);
+    return result;
+}
+
+/// `result` with the RTP header of `payload_type`, sequence, timestamp and SSRC zero, at `rtp`; nullopt when it does not
+/// fit.
+[[nodiscard]] auto with_rtp_header(FrameHeaderTemplate result, size_t const rtp, uint8_t const payload_type) noexcept
+    -> std::optional<FrameHeaderTemplate>
+{
+    RtpHeader header{};
+    header.init(payload_type, 0, 0, 0);
+    if (!serialize_rtp_header(header, 0, std::span{result.bytes}.subspan(rtp))) {
+        return std::nullopt;
+    }
+    return template_at(result, rtp);
+}
+
 }  // namespace
 
 auto parse_udp_frame(std::span<uint8_t const> const frame) noexcept -> std::optional<UdpFrame>
@@ -153,15 +196,11 @@ auto serialize_rtp_frame_headers(
     size_t const payload_length,
     std::span<uint8_t> const buffer) noexcept -> std::optional<size_t>
 {
-    if (payload_length > std::numeric_limits<uint16_t>::max() - statusbar::ip::IPv4Header::MIN_LENGTH -
-            statusbar::ip::UdpHeader::LENGTH - RtpHeader::LENGTH) {
+    if (!fits_ipv4(payload_length)) {
         return std::nullopt;
     }
-    size_t const rtp_length = RtpHeader::LENGTH + payload_length;
     statusbar::BufferSerializerBuilderWithBuffer writer{buffer};
-    if (!writer.append(ethernet_header(addressing))
-             .append(ipv4_header(addressing, rtp_length))
-             .append(udp_header(addressing, static_cast<uint16_t>(rtp_length)))) {
+    if (!append_udp_headers(writer, addressing, RtpHeader::LENGTH + payload_length)) {
         return std::nullopt;
     }
     size_t const headers = writer.position();
@@ -182,6 +221,30 @@ auto serialize_rtp_frame(
     }
     std::ranges::copy(payload, buffer.begin() + static_cast<std::ptrdiff_t>(*offset));
     return *offset + payload.size();
+}
+
+auto frame_header_template(FrameAddressing const& addressing, uint8_t const payload_type, size_t const payload_length) noexcept
+    -> std::optional<FrameHeaderTemplate>
+{
+    FrameHeaderTemplate result{};
+    statusbar::BufferSerializerBuilderWithBuffer writer{std::span{result.bytes}};
+    if (!fits_ipv4(payload_length) || !append_udp_headers(writer, addressing, RtpHeader::LENGTH + payload_length)) {
+        return std::nullopt;
+    }
+    return with_rtp_header(result, writer.position(), payload_type);
+}
+
+auto FrameHeaderTemplate::write(
+    uint16_t const sequence, uint32_t const timestamp, uint32_t const ssrc, std::span<uint8_t> const out) const noexcept -> bool
+{
+    if (out.size() < length) {
+        return false;
+    }
+    statusbar::span_copy(out, header());
+    statusbar::span_store(out.subspan(sequence_offset), doublet_t{sequence});
+    statusbar::span_store(out.subspan(timestamp_offset), quadlet_t{timestamp});
+    statusbar::span_store(out.subspan(ssrc_offset), quadlet_t{ssrc});
+    return true;
 }
 
 }  // namespace padl::rtp

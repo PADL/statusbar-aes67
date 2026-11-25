@@ -32,6 +32,7 @@ nanoseconds and injects the random generator.
 - `RtpSequence` — one source's sequence state (RFC 3550 Appendix A.1) and its counts (Appendix A.3: `expected()`, `received()`).
 - `FrameAddressing` — the MACs, optional VLAN tag, IPv4 addresses, UDP ports, TTL and DSCP around a packet in a frame.
 - `RtpFrame` — a parsed frame: its addressing, its UDP payload and the RTP packet; `UdpFrame` — the same without the RTP parse (`parse_udp_frame()`, for RTCP).
+- `FrameHeaderTemplate`, `frame_header_template()` — the headers `serialize_rtp_frame_headers()` writes for every packet of one stream (Ethernet, IPv4, UDP and RTP with sequence number, timestamp and SSRC zero), and the offsets of those three, so a packet's headers are the template with them written (`write()`).
 - `multicast_mac()` — an IPv4 group's Ethernet address (RFC 1112 Section 6.4); `rtp_frame_overhead()` — 42 or 46 bytes.
 - `RtcpHeader`, `SenderInfo`, `ReportBlock` — the RFC 3550 Section 6.4.1 wire structs.
 - `RtcpCompound` — what `parse_rtcp()` found: the first SR, RR, SDES chunk and BYE, as views (`RtcpSenderReport`, `RtcpReceiverReport`, `RtcpSdes`, `RtcpBye`).
@@ -68,7 +69,7 @@ auto echo(std::span<uint8_t const> datagram, rtp::RtpSequence& sequence) -> bool
 - `padl/rtp/rtp.hpp` — the module header: every header below.
 - `padl/rtp/rtp_header.hpp` — `RtpHeader`, `RtpPacket`, `parse_rtp()`, `serialize_rtp()`, `serialize_rtp_header()`.
 - `padl/rtp/rtp_sequence.hpp` — `RtpSequence` (header-only).
-- `padl/rtp/rtp_frame.hpp` — `FrameAddressing`, `RtpFrame`, `UdpFrame`, `parse_udp_frame()`, `parse_rtp_frame()`, `serialize_rtp_frame()`, `serialize_rtp_frame_headers()`, `multicast_mac()`.
+- `padl/rtp/rtp_frame.hpp` — `FrameAddressing`, `RtpFrame`, `UdpFrame`, `parse_udp_frame()`, `parse_rtp_frame()`, `serialize_rtp_frame()`, `serialize_rtp_frame_headers()`, `FrameHeaderTemplate`, `frame_header_template()`, `multicast_mac()`.
 - `padl/rtp/rtp_rtcp_packet.hpp` — the RTCP wire structs, `parse_rtcp()`, `RtcpWriter`, `padded_to_word()`.
 - `padl/rtp/rtp_error.hpp` — `RtpError` (`padl.rtp`), what `RtcpWriter::status()` reports.
 - `padl/rtp/rtp_rtcp_ipmx.hpp` — `IpmxInfoBlock`, `serialize_ipmx_info_block()`, `parse_ipmx_info_block()`.

@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <random>
 #include <span>
 #include <vector>
 
@@ -62,6 +63,25 @@ auto eight_channel_frame(size_t const payload) -> std::vector<uint8_t>
     frame[IP + 25] = static_cast<uint8_t>(udp_length);
     fix_checksum(frame, IP);
     return frame;
+}
+
+/// Random addressing, tagged about half the time.
+auto random_addressing(std::mt19937& random) -> FrameAddressing
+{  // NOLINT(statusbar-block-statements): a crafted addressing, field by field
+    auto const octet = [&random] { return static_cast<uint8_t>(random()); };
+    FrameAddressing a{};
+    a.destination_mac = ieee::Eui48{octet(), octet(), octet(), octet(), octet(), octet()};
+    a.source_mac = ieee::Eui48{octet(), octet(), octet(), octet(), octet(), octet()};
+    if ((random() & 1U) != 0) {
+        a.vlan = ieee::VlanTag{static_cast<uint16_t>(random() % 4095), false, static_cast<uint8_t>(random() % 8)};
+    }
+    a.source_address = ip::IPv4Address{octet(), octet(), octet(), octet()};
+    a.destination_address = ip::IPv4Address{octet(), octet(), octet(), octet()};
+    a.source_port = static_cast<uint16_t>(random());
+    a.destination_port = static_cast<uint16_t>(random());
+    a.ttl = octet();
+    a.dscp = static_cast<uint8_t>(random() % 64);
+    return a;
 }
 
 }  // namespace
@@ -281,6 +301,57 @@ TEST(rtp_frame, refuses_a_frame_cut_short_by_a_one_kib_receive_buffer)
     // What a NIC writing 1 KiB buffers hands an AF_XDP socket of a larger frame: its first KiB.
     auto const frame = eight_channel_frame(1152);
     EXPECT_FALSE(parse_udp_frame(std::span{frame}.first(1024)).has_value());
+}
+
+TEST(rtp_frame, a_patched_header_template_is_the_serialized_frame)
+{
+    std::mt19937 random{20261125};
+    for (int round = 0; round < 2000; ++round) {
+        auto const addressing = random_addressing(random);
+        RtpHeader header{};
+        header.init(static_cast<uint8_t>(random() % 128), static_cast<uint16_t>(random()), random(), random());
+        std::vector<uint8_t> payload(random() % 1461);
+        std::ranges::generate(payload, [&random] { return static_cast<uint8_t>(random()); });
+        std::vector<uint8_t> expected(1600);
+        auto const length = serialize_rtp_frame(addressing, header, payload, expected);
+        auto const t = frame_header_template(addressing, header.payload_type(), payload.size());
+        EXPECT_TRUE(length && t);
+        std::vector<uint8_t> patched(1600);
+        EXPECT_TRUE(t && t->write(header.sequence.get(), header.timestamp.get(), header.ssrc.get(), patched));
+        std::ranges::copy(payload, patched.begin() + static_cast<std::ptrdiff_t>(t ? t->length : 0));
+        EXPECT_TRUE(length && t && *length == t->length + payload.size());
+        EXPECT_TRUE(length && std::ranges::equal(std::span{patched}.first(*length), std::span{expected}.first(*length)));
+    }
+}
+
+TEST(rtp_frame, a_header_template_names_where_sequence_timestamp_and_ssrc_go)
+{
+    auto const parsed = parse_rtp_frame(FRAME);
+    EXPECT_TRUE(parsed.has_value());
+    auto addressing = parsed->addressing;
+    auto const untagged = frame_header_template(addressing, 96, 1152);
+    EXPECT_TRUE(untagged && untagged->length == 54 && untagged->sequence_offset == 44);
+    EXPECT_TRUE(untagged && untagged->timestamp_offset == 46 && untagged->ssrc_offset == 50);
+    // The varying fields are zero; the rest is a packet's.
+    EXPECT_TRUE(untagged && std::ranges::all_of(untagged->header().subspan(44, 10), [](uint8_t b) { return b == 0; }));
+    EXPECT_TRUE(untagged && untagged->header()[42] == 0x80 && untagged->header()[43] == 96);
+    addressing.vlan = ieee::VlanTag{100, false, 5};
+    auto const tagged = frame_header_template(addressing, 96, 1152);
+    EXPECT_TRUE(tagged && tagged->length == 58 && tagged->sequence_offset == 48);
+    EXPECT_TRUE(tagged && tagged->timestamp_offset == 50 && tagged->ssrc_offset == 54);
+}
+
+TEST(rtp_frame, a_header_template_refuses_what_serialize_refuses)
+{
+    auto const parsed = parse_rtp_frame(FRAME);
+    EXPECT_TRUE(parsed.has_value());
+    EXPECT_TRUE(frame_header_template(parsed->addressing, 96, 65535 - 40).has_value());
+    EXPECT_FALSE(frame_header_template(parsed->addressing, 96, 65535 - 39).has_value());
+    // A buffer shorter than the headers is left alone.
+    auto const t = frame_header_template(parsed->addressing, 96, 4);
+    std::vector<uint8_t> small(53, 0xEE);
+    EXPECT_TRUE(t && !t->write(1, 2, 3, small));
+    EXPECT_TRUE(std::ranges::all_of(small, [](uint8_t b) { return b == 0xEE; }));
 }
 
 TEST_MAIN(padl_rtp, rtp_frame_test)
