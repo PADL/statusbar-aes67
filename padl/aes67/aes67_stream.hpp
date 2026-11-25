@@ -17,8 +17,10 @@
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace padl::aes67 {
@@ -212,6 +214,22 @@ struct Grandmaster
 
     auto operator==(Grandmaster const&) const noexcept -> bool = default;
 };
+
+/// The grandmaster one level's ts-refclk `references` name, as Grandmaster::references() writes it: the first that
+/// names one, its domain 0 when omitted (IEEE 1588's default), traceable when a `ptp=<its version>:traceable` stands
+/// beside it; nullopt when none names one. A level's references are equivalent (RFC 7273 Section 4.8), so the first
+/// stands for them all; a match against a known clock tries every one instead (sdp::Session::names_clock()).
+[[nodiscard]] inline auto named_grandmaster(std::span<sdp::PtpReference const> const references) -> std::optional<Grandmaster>
+{
+    for (auto const& r : references) {
+        if (r.grandmaster && r.version != sdp::PtpVersion::other) {
+            bool const traceable =
+                std::ranges::any_of(references, [&r](sdp::PtpReference const& t) { return t.traceable && t.version == r.version; });
+            return Grandmaster{.identity = *r.grandmaster, .domain = r.domain, .version = r.version, .traceable = traceable};
+        }
+    }
+    return std::nullopt;
+}
 
 enum class State : uint8_t
 {

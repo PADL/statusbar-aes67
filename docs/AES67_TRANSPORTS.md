@@ -36,6 +36,9 @@ module overview in [AES67_MODULE.md](AES67_MODULE.md).
   the stream's (or would-be stream's) `SendOptions::dscp`, not the RTCP class of its own.
 - `Receiver` and `Sender` open their ports with `open_receive_stream(ReceivePlan)` and
   `open_send_stream(SendPlan)`: the whole stream, so a transport may choose how to carry it.
+  A plan names the PTP grandmaster and domain of the stream's ts-refclk when it is known (a
+  receiver's from the SDP, a sender's from `set_grandmaster()` before `configure()`), so a
+  transport may tell a stream of another clock from its own.
   The defaults call `open_receive_from()` (a source-specific group with a source to join
   for), `open_receive()` and `open_send()`; `UdpTransport` and `XdpTransport` keep them.
 

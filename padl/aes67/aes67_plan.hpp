@@ -31,6 +31,9 @@ struct ReceivePlan
     std::optional<statusbar::ip::IPv4Address> source_filter;
     std::optional<uint32_t> offset;  ///< the RTP offset of a direct media clock (RFC 7273 Section 5.2); nullopt: none yet
     bool sender_clock{false};        ///< `mediaclk:sender`: the offset comes from its sender's reports
+    /// The PTP grandmaster and domain the stream's ts-refclk names (named_grandmaster(), RFC 7273 Section 4.8); nullopt:
+    /// it names none.
+    std::optional<Grandmaster> grandmaster;
 
     auto operator==(ReceivePlan const&) const noexcept -> bool = default;
 };
@@ -45,6 +48,9 @@ struct SendPlan
     StreamFormat format;
     uint8_t payload_type{96};
     uint32_t phase{0};  ///< where the packet grid starts, in frames modulo frames_per_packet
+    /// The PTP grandmaster and domain its ts-refclk names (Sender::grandmaster()) when it is opened; nullopt: not known.
+    /// One learnt after configure() reaches a plan only at the next configure(): the Sender reopens nothing for it.
+    std::optional<Grandmaster> grandmaster;
 
     auto operator==(SendPlan const&) const noexcept -> bool = default;
 };

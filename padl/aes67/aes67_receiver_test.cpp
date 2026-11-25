@@ -763,6 +763,28 @@ TEST(aes67_receiver, a_receive_plan_carries_what_the_sdp_says)
     EXPECT_TRUE(plan && !plan->join_source && plan->source_filter == std::optional{sender});
 }
 
+// A receive plan names the grandmaster the stream's ts-refclk does (the media level's over the session's), none when it
+// names none or only says traceable.
+TEST(aes67_receiver, a_receive_plan_names_the_grandmaster_its_ts_refclk_does)
+{
+    LoopTransport transport;
+    Receiver receiver{STEREO_L24, {}, transport};
+    auto session = stream_session({.address = IPv4Address{239, 69, 1, 2}, .port = 5004});
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_FALSE(transport.receive_plans.back().grandmaster.has_value());
+    session.clocks = padl::sdp::ReferenceClocks::of(padl::sdp::PtpReference{.traceable = true});
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_FALSE(transport.receive_plans.back().grandmaster.has_value());
+    Grandmaster const gptp{.identity = GRANDMASTER.identity, .version = padl::sdp::PtpVersion::ieee802_1as, .traceable = true};
+    session.clocks = gptp.references();
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_TRUE(transport.receive_plans.back().grandmaster == std::optional{gptp});
+    Grandmaster const domain7{.identity = GRANDMASTER.identity, .domain = 7};
+    session.media[0].clocks = domain7.references();
+    EXPECT_TRUE(receiver.configure(session).has_value());
+    EXPECT_TRUE(transport.receive_plans.back().grandmaster == std::optional{domain7});
+}
+
 // A drain that adopts a new source opens the due-tick gate, as a reset stream's is, even when it places nothing (a
 // sender-clocked stream's new source, its offset forgotten): after a step back the port is asked at once.
 TEST(aes67_receiver, a_new_source_reopens_the_due_tick_gate)
