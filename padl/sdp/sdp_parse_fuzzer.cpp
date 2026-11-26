@@ -3,9 +3,7 @@
 
 /// libFuzzer harness for sdp::parse: it may not crash or read out of bounds, every pair of a media's
 /// reference clocks in force (RFC 7273 Section 4.8) compares consistently, and a media's channel order
-/// (ST 2110-30 Section 6.2.2) and maxptime are well formed and survive to_string() and parse() again, and an extension
-/// attribute written beside them stays on its line (no NUL, CR or LF in its value), one with a reserved name is not
-/// written, and neither changes what parse() reads.
+/// (ST 2110-30 Section 6.2.2) and maxptime are well formed and round-trip, extension attributes as check_attributes().
 
 #include "padl/sdp/sdp_session.hpp"
 

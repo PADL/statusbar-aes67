@@ -3,10 +3,9 @@
 // Copyright 2026 PADL Software Pty Ltd
 // SPDX-License-Identifier: MIT
 
-/// When an AES67 sender's packets go: the packet grid on the sample index, the rule that a packet is due once its last
-/// frame is the send offset behind now, the resynchronisation after a start, a clock step or a stall, a run held for
-/// its first report, and each run's SSRC and sequence (RFC 3550 Section 8). seed() draws from the system; the rest is
-/// real-time safe, one thread.
+/// When an AES67 sender's packets go: the packet grid on the sample index, a packet due once its last frame is the send
+/// offset behind now, resynchronisation, a run held for its first report, and each run's SSRC and sequence (RFC 3550
+/// Section 8). seed() draws from the system; the rest is real-time safe, one thread.
 
 #include "padl/aes67/aes67_plan.hpp"
 #include "padl/aes67/aes67_stream.hpp"

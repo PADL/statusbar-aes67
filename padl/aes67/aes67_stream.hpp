@@ -215,10 +215,9 @@ struct Grandmaster
     auto operator==(Grandmaster const&) const noexcept -> bool = default;
 };
 
-/// The grandmaster one level's ts-refclk `references` name, as Grandmaster::references() writes it: the first that
-/// names one, its domain 0 when omitted (IEEE 1588's default), traceable when a `ptp=<its version>:traceable` stands
-/// beside it; nullopt when none names one. A level's references are equivalent (RFC 7273 Section 4.8), so the first
-/// stands for them all; a match against a known clock tries every one instead (sdp::Session::names_clock()).
+/// The grandmaster one level's ts-refclk `references` name, as Grandmaster::references() writes it: the first that names
+/// one (a level's references are equivalent, RFC 7273 Section 4.8), its domain 0 when omitted, traceable when a
+/// `ptp=<its version>:traceable` stands beside it; nullopt when none names one.
 [[nodiscard]] inline auto named_grandmaster(std::span<sdp::PtpReference const> const references) -> std::optional<Grandmaster>
 {
     for (auto const& r : references) {

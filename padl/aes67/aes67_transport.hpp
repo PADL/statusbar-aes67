@@ -156,11 +156,9 @@ struct SendProgress
     uint32_t packets{0};      ///< packets sent in the run, mod 2^32
 };
 
-/// A send port that packetises the stream itself, by a PacketSchedule of its SendPlan and the SendRun it is given, from
-/// frames the Sender writes at sample indices (SendPort::frames()). The ticking thread calls it and nothing here may
-/// block or make a system call: start(), stop() and set_send_offset() only record the change, which the
-/// implementation publishes off the real-time thread (a run is placed start_lead_frames() ahead for that). Destroying
-/// the port stops its run.
+/// A send port that packetises the stream itself, by a PacketSchedule of its SendPlan and its SendRun, from frames the
+/// Sender writes at sample indices. The ticking thread calls it, so nothing may block or make a system call: start(),
+/// stop() and set_send_offset() only record a change, published off that thread. Destroying the port stops its run.
 class FrameSend
 {
   public:

@@ -362,10 +362,9 @@ class LoopTransport final : public Transport
         }
     };
 
-    /// A frame send port (frame_ports): the frames written to a ring of FRAME_RING frames, and send_due() the engine
-    /// that sends the run it was given by a PacketSchedule of its plan, each packet's payload the frames committed for
-    /// it or silence, a packet with none committed left out. As a device would, the engine accepts a run start() gave
-    /// at its next send_due(), so progress() describes the run before until then.
+    /// A frame send port (frame_ports): frames written to a ring of FRAME_RING frames; send_due() sends the run by a
+    /// PacketSchedule of its plan, each packet its committed frames or silence (none committed: left out). As a device
+    /// would, it accepts a run start() gave at its next send_due(), so progress() describes the run before until then.
     class FrameTx final
         : public SendPort
         , public FrameSend

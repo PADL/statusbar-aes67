@@ -190,8 +190,7 @@ class Sender
 
     /// Send every packet due by `now_index` (the media clock's index at the current PTP time), each
     /// handed to the transport departing at `tick_ns`, this tick's time in the ns the sending NIC's
-    /// PHC reads (0: untimed; SendPort::send_rendered_at). On a frame port (SendPort::frames()) the due packets'
-    /// frames are written at their indices instead, for the port's run to send.
+    /// PHC reads (0: untimed; SendPort::send_rendered_at); a frame port's due frames are written at their indices.
     void tick(uint64_t now_index, uint64_t tick_ns) noexcept;
     /// Send nothing until the next tick(), which starts a new run on the index grid with a new SSRC and
     /// sequence (RFC 3550 Section 8): send_state() is cleared (the RTCP session says BYE), state() reads

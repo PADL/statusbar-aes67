@@ -5,8 +5,7 @@
 
 /// SDP - RFC 8866 session descriptions, the subset AES67 uses: origin, name, IPv4 connection, L16/L24/L32/AM824 audio
 /// media, ptime, RFC 7273 clocks, RAVENNA clock-domain, RFC 4570 source filters, the RFC 3605 RTCP port, maxptime and
-/// fmtp's channel-order and IPMX, and session-level extension attributes (written only). Session- or media-level values
-/// resolve through the effective_*() accessors.
+/// fmtp's channel-order and IPMX, session-level extension attributes (written only); effective_*() resolve the levels.
 
 #include "padl/sdp/sdp_error.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -458,9 +457,8 @@ struct Session
 [[nodiscard]] auto media_clock_value(MediaClock const& clock) -> std::string;
 
 /// Write a session description, CRLF line endings, fields in RFC 8866 order, sanitised so the
-/// output always parses. A PtpReference with neither grandmaster nor traceable, a unicast
-/// connection's TTL, and an Attribute whose name is not a token or is reserved are not written. Every media
-/// should have an effective connection.
+/// output always parses: a PtpReference with neither grandmaster nor traceable, a unicast connection's TTL and an
+/// Attribute whose name is not a token or is reserved are not written. Every media should have an effective connection.
 [[nodiscard]] auto to_string(Session const& session) -> std::string;
 
 }  // namespace padl::sdp
