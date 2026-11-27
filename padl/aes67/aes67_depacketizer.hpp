@@ -92,7 +92,11 @@ class Depacketizer
 
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
     /// Every counter to zero; the stream, its source and sequence go on.
-    void reset_counters() noexcept { counters_ = {}; }
+    void reset_counters() noexcept
+    {
+        counters_ = {};
+        jump_lost_ = 0;
+    }
     /// The counters of a stream depacketized elsewhere (a frame port's), for counters() to read.
     void adopt_counters(Counters const& counters) noexcept { counters_ = counters; }
     /// The SSRC learnt from the stream's first packet.
@@ -124,14 +128,19 @@ class Depacketizer
     /// Validates the sequence number (RFC 3550 Appendix A.1) and places it, the sequence restarted first after a silence
     /// of `silent` frames past RtpSequence::MAX_DROPOUT packets; false to drop the packet.
     [[nodiscard]] auto admit_sequence(uint16_t sequence, uint32_t frames, uint64_t silent) noexcept -> bool;
-    /// Accounts a validated packet's place in the sequence; false to drop it.
-    [[nodiscard]] auto place(uint16_t sequence, uint32_t frames) noexcept -> bool;
+    /// Whether a packet `sequence` RtpSequence admitted `step` past its highest is a step of a validated sequence,
+    /// whose gap is lost; a jump it confirmed back to where the recent jumps left withdraws their loss (notify_jump()).
+    [[nodiscard]] auto notify_step(bool was_validated, uint16_t sequence, uint16_t step) noexcept -> bool;
+    /// Accounts an admitted packet's place in the sequence, its gap lost when `counted`; false to drop it.
+    [[nodiscard]] auto place(uint16_t sequence, uint32_t frames, bool counted) noexcept -> bool;
     /// Forgets the sequence and its reorder window: the next packet starts them afresh, counting nothing lost.
     void restart_sequence() noexcept;
     /// Restarts the reorder window at `sequence`.
     void start_window(uint16_t sequence) noexcept;
-    /// Moves the window `ahead` to `sequence`, counting the packets skipped as lost.
-    void advance_window(uint16_t sequence, uint16_t ahead, uint32_t frames) noexcept;
+    /// Moves the window `ahead` to `sequence`, counting the packets skipped as lost when `counted`.
+    void advance_window(uint16_t sequence, uint16_t ahead, uint32_t frames, bool counted) noexcept;
+    /// Keeps the loss `gap` of a step of WINDOW or more until RtpSequence::MAX_MISORDER packets follow on from it.
+    void notify_jump(uint16_t ahead, uint64_t gap) noexcept;
     /// Marks a late packet `behind` the newest; false for a duplicate.
     [[nodiscard]] auto mark_late(uint16_t behind, uint32_t frames) noexcept -> bool;
 
@@ -150,6 +159,11 @@ class Depacketizer
     uint16_t max_seq_{0};
     /// Bit i: max_seq_ - i received, for i up to RtpSequence::MAX_MISORDER.
     std::bitset<128> window_;
+    /// The loss counted by recent jumps of WINDOW or more (another stream's packets under the learnt source, should
+    /// the old sequence be confirmed again), the newest sequence number before the first, and the packets since the last.
+    uint64_t jump_lost_{0};
+    uint16_t jump_from_{0};
+    uint16_t since_jump_{0};
     Counters counters_;
 
     // RFC 3550 Appendix A.8 interarrival jitter.

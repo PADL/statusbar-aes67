@@ -24,6 +24,7 @@ void Depacketizer::restart_sequence() noexcept
     have_max_ = false;
     max_seq_ = 0;
     window_.reset();
+    jump_lost_ = 0;
 }
 
 auto Depacketizer::admit(rtp::RtpPacket const& packet, statusbar::ip::IPv4Address const& source, uint64_t const now_index) noexcept
@@ -90,20 +91,33 @@ auto Depacketizer::admit_sequence(uint16_t const seq, uint32_t const frames, uin
         restart_sequence();
     }
     bool const was_validated = sequence_.validated();
+    auto const step = static_cast<uint16_t>(seq - static_cast<uint16_t>(sequence_.extended_max()));
     if (!sequence_.update(seq) && was_validated) {
         return false;  // an unconfirmed jump
     }
-    // A packet on probation (a new source's first) is handed on all the same:
+    // A packet on probation (a new source's first) is handed on all the same, nothing counted lost:
     // its timestamp, not its sequence number, places it, and index_of_rtp() puts it about now.
-    return place(seq, frames);
+    return place(seq, frames, notify_step(was_validated, seq, step));
 }
 
-auto Depacketizer::place(uint16_t const seq, uint32_t const frames) noexcept -> bool
+auto Depacketizer::notify_step(bool const was_validated, uint16_t const seq, uint16_t const step) noexcept -> bool
+{
+    constexpr uint32_t SEQ_MOD = 1U << 16U;
+    if (was_validated && step >= rtp::RtpSequence::MAX_DROPOUT && step <= SEQ_MOD - rtp::RtpSequence::MAX_MISORDER) {
+        // RFC 3550 A.1 confirmed a jump back to the sequence the recent jumps left: theirs was another's, not loss.
+        auto const resumed = static_cast<uint16_t>(seq - jump_from_) < rtp::RtpSequence::MAX_DROPOUT;
+        counters_.lost -= resumed ? std::min(counters_.lost, jump_lost_) : 0;
+        jump_lost_ = 0;
+    }
+    return was_validated;
+}
+
+auto Depacketizer::place(uint16_t const seq, uint32_t const frames, bool const counted) noexcept -> bool
 {
     auto const ahead = static_cast<uint16_t>(seq - max_seq_);
     auto const behind = static_cast<uint16_t>(max_seq_ - seq);
     if (have_max_ && ahead != 0 && ahead < rtp::RtpSequence::MAX_DROPOUT) {
-        advance_window(seq, ahead, frames);
+        advance_window(seq, ahead, frames, counted);
         return true;
     }
     if (have_max_ && behind < WINDOW) {  // up to RtpSequence::MAX_MISORDER behind, as it accepts
@@ -121,9 +135,11 @@ void Depacketizer::start_window(uint16_t const seq) noexcept
     window_.set(0);
 }
 
-void Depacketizer::advance_window(uint16_t const seq, uint16_t const ahead, uint32_t const frames) noexcept
+void Depacketizer::advance_window(uint16_t const seq, uint16_t const ahead, uint32_t const frames, bool const counted) noexcept
 {
-    counters_.lost += uint64_t{ahead - 1U} * frames;  // assumes the stream's packets are all this size
+    uint64_t const gap = counted ? uint64_t{ahead - 1U} * frames : 0;  // assumes the stream's packets are all this size
+    counters_.lost += gap;
+    notify_jump(ahead, gap);
     if (ahead >= WINDOW) {
         window_.reset();
     } else {
@@ -131,6 +147,20 @@ void Depacketizer::advance_window(uint16_t const seq, uint16_t const ahead, uint
     }
     window_.set(0);
     max_seq_ = seq;
+}
+
+void Depacketizer::notify_jump(uint16_t const ahead, uint64_t const gap) noexcept
+{
+    if (ahead >= WINDOW) {
+        jump_from_ = jump_lost_ == 0 ? max_seq_ : jump_from_;
+        jump_lost_ += gap;
+        since_jump_ = 0;
+        return;
+    }
+    if (since_jump_ < rtp::RtpSequence::MAX_MISORDER) {
+        ++since_jump_;
+        jump_lost_ = since_jump_ == rtp::RtpSequence::MAX_MISORDER ? 0 : jump_lost_;  // went on: its gap was loss
+    }
 }
 
 auto Depacketizer::mark_late(uint16_t const behind, uint32_t const frames) noexcept -> bool
