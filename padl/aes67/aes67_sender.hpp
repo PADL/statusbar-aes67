@@ -210,6 +210,9 @@ class Sender
     /// port's FrameSend::error(), seen by the last tick), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
+    /// The open port as a frame port (SendPort::frames()), or nullptr: a packet port, or none; valid from configure()
+    /// until clear(). The thread that configures the sender.
+    [[nodiscard]] auto frame_port() noexcept -> FrameSend* { return frames_; }
     /// The current run's SSRC (a resumed run draws a new one on the ticking thread). Any thread.
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return schedule_.ssrc(); }
 
@@ -221,12 +224,16 @@ class Sender
     std::vector<sdp::Attribute> attributes_;
     /// One version on (the first: the wall clock's seconds, one on).
     void bump_session_version();
+    /// The frames a frame port found missing in its run (SendProgress::lost) since the last reading, counted lost; a
+    /// reading behind the last (a page older than one already read) counts nothing.
+    void count_port_lost(SendProgress const& progress) noexcept;
     /// Fill `payload` with the provider's `frames` frames from `first_index`, or
     /// silence when it has none; what the provider said.
     [[nodiscard]] auto render_payload(uint64_t first_index, uint32_t frames, std::span<uint8_t> payload) noexcept -> Supply;
 
     std::unique_ptr<SendPort> port_;
     FrameSend* frames_{nullptr};  ///< port_ as a frame port, or nullptr
+    SendProgress port_lost_{};    ///< the run and its SendProgress::lost as counters_.lost last counted them
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 

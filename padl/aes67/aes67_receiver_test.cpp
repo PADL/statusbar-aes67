@@ -825,4 +825,23 @@ TEST(aes67_receiver, a_frame_port_needs_no_handler)
     EXPECT_TRUE(receiver.state() == State::running);
 }
 
+// A receiver's frame port is its open port as a frame port, none for a packet port; by default its frames are held
+// nowhere another port could read them.
+TEST(aes67_receiver, the_frame_port_is_the_open_ports_and_holds_its_frames_nowhere_by_default)
+{
+    LoopTransport transport;
+    Receiver packets{STEREO_L24, {}, transport};
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(packets.configure(stream_session(group)));
+    EXPECT_TRUE(packets.frame_port() == nullptr);
+    transport.frame_ports = true;
+    Receiver frames{STEREO_L24, {}, transport};
+    EXPECT_TRUE(frames.frame_port() == nullptr);  // none open yet
+    EXPECT_TRUE(frames.configure(stream_session(group)));
+    EXPECT_TRUE(frames.frame_port() != nullptr && frames.frame_port() == transport.frame_rx);
+    EXPECT_FALSE(frames.frame_port()->location().has_value());
+    frames.clear();
+    EXPECT_TRUE(frames.frame_port() == nullptr);
+}
+
 TEST_MAIN(padl_aes67, aes67_receiver_test)

@@ -99,6 +99,9 @@ class Receiver
     /// receive (ReceivePort::error()), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
     [[nodiscard]] auto configured() const noexcept -> bool { return port_ != nullptr; }
+    /// The open port as a frame port (ReceivePort::frames()), or nullptr: a packet port, or none; valid from
+    /// configure() until clear(). The thread that configures the receiver.
+    [[nodiscard]] auto frame_port() const noexcept -> FrameReceive const* { return frames_; }
     /// The SSRC learnt from the stream's first packet.
     [[nodiscard]] auto ssrc() const noexcept -> std::optional<uint32_t>;
 

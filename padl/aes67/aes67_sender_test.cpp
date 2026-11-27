@@ -1253,4 +1253,50 @@ TEST(aes67_sender, a_report_hold_ended_before_its_packet_restarts_the_frame_port
     EXPECT_EQ(tx.lost, uint64_t{0});
 }
 
+// A sender's frame port is its open port as a frame port, none for a packet port; by default it gathers nothing from
+// other ports: an empty route set is accepted, any other refused and nothing changes.
+TEST(aes67_sender, the_frame_port_gathers_only_what_is_written_by_default)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender packets{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(packets.configure(GROUP));
+    EXPECT_TRUE(packets.frame_port() == nullptr);
+    transport.frame_ports = true;
+    Sender frames{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(frames.configure(GROUP));
+    EXPECT_TRUE(frames.frame_port() != nullptr && frames.frame_port() == transport.frame_tx);
+    EXPECT_TRUE(frames.frame_port()->gather_from({}).has_value());
+    std::array const routes{FrameRoute{.source = {.device = 1, .buffer = 2}, .count = 2}};
+    auto const refused = frames.frame_port()->gather_from(routes);
+    EXPECT_TRUE(!refused && refused.error() == std::errc::operation_not_supported);
+}
+
+// What a frame port found missing in its run (SendProgress::lost) is counted lost once, as it grows; a reading behind
+// the last counts nothing, and a new run's count starts from its own zero
+TEST(aes67_sender, a_frame_ports_missing_frames_are_counted_lost)
+{
+    LoopTransport transport;
+    transport.frame_ports = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    sender.tick(base + 47, 0);
+    transport.frame_tx->send_due(base + 47);
+    EXPECT_EQ(sender.counters().lost, uint64_t{0});
+    transport.frame_lost = 12;
+    sender.tick(base + 95, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{12});
+    sender.tick(base + 143, 0);  // the same reading: nothing more
+    EXPECT_EQ(sender.counters().lost, uint64_t{12});
+    transport.frame_lost = 6;  // behind the last
+    sender.tick(base + 191, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{12});
+    transport.frame_lost = 18;
+    sender.tick(base + 239, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{18});
+}
+
 TEST_MAIN(padl_aes67, aes67_sender_test)
