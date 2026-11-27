@@ -17,9 +17,18 @@
 
 namespace padl::aes67 {
 
+/// How a UdpTransport sends.
+struct UdpTransportOptions
+{
+    /// A sender's datagrams to a group also reach this host's receivers of it (IP_MULTICAST_LOOP); off, they leave by
+    /// the interface alone. A loopback interface returns them either way.
+    bool multicast_loop{false};
+};
+
 class UdpTransport final : public Transport
 {
   public:
+    using Options = UdpTransportOptions;
     /// Datagrams one receive() reads at most.
     static constexpr size_t RECEIVE_BATCH = 32;
     /// Packets one sender may queue before flush().
@@ -28,10 +37,12 @@ class UdpTransport final : public Transport
     static constexpr size_t MAX_DATAGRAM = 1500;
 
     /// A transport on `interface`, which must have an IPv4 address.
-    [[nodiscard]] static auto open(std::string_view interface) -> statusbar::StatusValue<std::unique_ptr<UdpTransport>>;
+    [[nodiscard]] static auto open(std::string_view interface, Options const& options = {})
+        -> statusbar::StatusValue<std::unique_ptr<UdpTransport>>;
 
-    explicit UdpTransport(InterfaceInfo interface) noexcept
+    explicit UdpTransport(InterfaceInfo interface, Options const& options = {}) noexcept
         : interface_{std::move(interface)}
+        , options_{options}
     {}
     /// Every receive port must be gone first (asserted).
     ~UdpTransport() override;
@@ -50,7 +61,8 @@ class UdpTransport final : public Transport
     /// A group's socket joined for `source` alone: the kernel delivers nothing else to it.
     [[nodiscard]] auto open_receive_from(Endpoint const& destination, statusbar::ip::IPv4Address const& source)
         -> statusbar::StatusValue<std::unique_ptr<ReceivePort>> override;
-    /// Fails operation_not_supported for a SendOptions::vlan: a socket cannot tag.
+    /// A group's socket loops its sends back only with Options::multicast_loop. Fails operation_not_supported for a
+    /// SendOptions::vlan: a socket cannot tag.
     [[nodiscard]] auto open_send(SendOptions const& options) -> statusbar::StatusValue<std::unique_ptr<SendPort>> override;
     /// A socket bound to the group (joined) or to RtcpOptions::local, marked
     /// with RtcpOptions::dscp; multicast loops back, so a session sees its own reports.
@@ -74,6 +86,7 @@ class UdpTransport final : public Transport
         -> statusbar::StatusValue<std::unique_ptr<ReceivePort>>;
 
     InterfaceInfo interface_;
+    Options options_;
     std::vector<Endpoint> unicast_;  ///< destinations of the unicast receive ports (control thread)
     size_t live_ports_{0};           ///< receive ports not yet destroyed (control thread)
     RefusalCounter refusals_;

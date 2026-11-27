@@ -5,7 +5,8 @@
 /// interface reaches only that interface's RTP and RTCP ports. Two XdpTransports on one pair: a
 /// tagged stream is received through the tagged group rule, a membership on an up VLAN link
 /// beside; a priority-tagged one is not received. A UdpTransport: an offer is received from its sender
-/// alone. Needs root (or a user and network namespace, but for AF_XDP); skips without it.
+/// alone; a group sender's datagram comes back to its own host only when asked. Needs root (or a
+/// user and network namespace, but for AF_XDP); skips without it.
 
 #include "padl/aes67/aes67_receiver.hpp"
 #include "padl/aes67/aes67_udp_transport.hpp"
@@ -165,6 +166,36 @@ auto mac_for(std::string const& interface) -> std::optional<ieee::Eui48>
     return mac;
 }
 
+/// A packet socket bound to `interface`, reading every frame on it; invalid when it cannot be opened.
+auto capture_on(std::string const& interface) -> net::FileDescriptor
+{
+    net::FileDescriptor fd{::socket(AF_PACKET, SOCK_RAW | SOCK_NONBLOCK, htons(ETH_P_ALL))};
+    sockaddr_ll address{};
+    address.sll_family = AF_PACKET;
+    address.sll_protocol = htons(ETH_P_ALL);
+    address.sll_ifindex = static_cast<int>(::if_nametoindex(interface.c_str()));
+    bool const bound = fd.get() >= 0 && address.sll_ifindex != 0 &&
+        ::bind(fd.get(), reinterpret_cast<sockaddr const*>(&address), sizeof(address)) == 0;
+    return bound ? std::move(fd) : net::FileDescriptor{};
+}
+
+/// The RTP frames to `destination` `capture` holds after 20 ms.
+auto captured(net::FileDescriptor const& capture, Endpoint const& destination) -> size_t
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    std::array<uint8_t, 2048> frame{};
+    size_t total = 0;
+    for (ssize_t n = ::recv(capture.get(), frame.data(), frame.size(), 0); n > 0;
+         n = ::recv(capture.get(), frame.data(), frame.size(), 0)) {
+        auto const parsed = padl::rtp::parse_rtp_frame(std::span<uint8_t const>{frame}.first(static_cast<size_t>(n)));
+        total += parsed && parsed->addressing.destination_address == destination.address &&
+                parsed->addressing.destination_port == destination.port
+            ? 1
+            : 0;
+    }
+    return total;
+}
+
 }  // namespace
 
 TEST(aes67_veth, a_tagged_stream_is_received_through_the_tagged_group_rule)
@@ -313,6 +344,45 @@ TEST(aes67_veth, a_group_joined_on_two_interfaces_is_received_only_where_it_arri
     EXPECT_EQ(received(**first_rtcp), size_t{0});
     EXPECT_EQ(received(**second_rtcp), size_t{1});
     EXPECT_EQ((*first_rtcp)->dropped() + (*second_rtcp)->dropped(), uint64_t{0});
+}
+
+// A group sender's datagram leaves by its interface and reaches this host's receiver on that interface only when
+// its transport loops sends back (UdpTransportOptions::multicast_loop).
+TEST(aes67_veth, a_group_sender_reaches_this_host_only_when_looped)
+{
+    if (::geteuid() != 0) {
+        std::println("  skipped: needs root to create veth pairs");
+        return;
+    }
+    VethPair const pair{"a67lveth0", "a67lveth1", "10.239.0.1/24"};
+    auto const capture = pair.ok() ? capture_on("a67lveth1") : net::FileDescriptor{};
+    if (!capture.valid()) {
+        std::println("  skipped: cannot create a veth pair");
+        return;
+    }
+    auto quiet = UdpTransport::open("a67lveth0");
+    auto looped = UdpTransport::open("a67lveth0", {.multicast_loop = true});
+    EXPECT_TRUE(quiet && looped);
+    if (!quiet || !looped) {
+        return;
+    }
+    Endpoint const rtp{.address = IPv4Address{239, 69, 239, 1}, .port = 45260};
+    auto port = (*quiet)->open_receive(rtp);
+    auto quiet_sender = (*quiet)->open_send({.destination = rtp});
+    auto looped_sender = (*looped)->open_send({.destination = rtp});
+    EXPECT_TRUE(port && quiet_sender && looped_sender);
+    if (!port || !quiet_sender || !looped_sender) {
+        return;
+    }
+    padl::rtp::RtpHeader header{};
+    header.init(97, 1, 2, 3);
+    std::array<uint8_t, 12> const payload{};
+    EXPECT_TRUE(copy_send(**quiet_sender, header, payload) && (*quiet_sender)->flush() == 0);
+    EXPECT_EQ(captured(capture, rtp), size_t{1});
+    EXPECT_EQ(received(**port), size_t{0});
+    EXPECT_TRUE(copy_send(**looped_sender, header, payload) && (*looped_sender)->flush() == 0);
+    EXPECT_EQ(captured(capture, rtp), size_t{1});
+    EXPECT_EQ(received(**port), size_t{1});
 }
 
 // Over UdpTransport the kernel reads a priority-tagged frame (VID 0) as untagged (IEEE 802.1Q) and the group's

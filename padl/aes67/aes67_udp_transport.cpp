@@ -179,13 +179,14 @@ void set_receive_buffer(int const fd) noexcept
 
 }  // namespace
 
-auto UdpTransport::open(std::string_view const interface) -> statusbar::StatusValue<std::unique_ptr<UdpTransport>>
+auto UdpTransport::open(std::string_view const interface, Options const& options)
+    -> statusbar::StatusValue<std::unique_ptr<UdpTransport>>
 {
     auto info = find_interface(interface);
     if (!info) {
         return statusbar::failure(info.error());
     }
-    return std::make_unique<UdpTransport>(std::move(*info));
+    return std::make_unique<UdpTransport>(std::move(*info), options);
 }
 
 UdpTransport::~UdpTransport()
@@ -245,7 +246,7 @@ auto UdpTransport::open_send(SendOptions const& options) -> statusbar::StatusVal
     if (options.vlan) {
         return statusbar::failure(std::errc::operation_not_supported);  // a socket cannot write the tag
     }
-    auto fd = open_send_socket(interface_, options);
+    auto fd = open_send_socket(interface_, options, options_.multicast_loop);
     if (!fd) {
         return statusbar::failure(fd.error());
     }
