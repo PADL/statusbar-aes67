@@ -550,6 +550,45 @@ TEST(aes67_receiver, a_jump_the_sequence_follows_on_from_stays_lost)
     EXPECT_EQ(receiver.counters().lost, uint64_t{2900} * FPP);
 }
 
+// Genuine loss survives a jump RtpSequence confirms back: steps of 891 and 1491 stay lost when the sequence
+// goes back before the second; one back into the second's gap withdraws that step's loss alone, less what arrived late.
+TEST(aes67_receiver, a_confirmed_jump_back_withdraws_only_the_newest_step_not_recovered)
+{
+    LoopTransport transport;
+    RecordingSink sink;
+    Receiver receiver{STEREO_L24, sink.handler(), transport};
+    transport.every_tick = true;
+    Endpoint const group{.address = IPv4Address{239, 69, 1, 2}, .port = 5004};
+    EXPECT_TRUE(receiver.configure(stream_session(group)));
+    uint64_t const base = 48'000ULL * 9000;
+    uint64_t n = 0;
+    auto send = [&](uint16_t const seq) {
+        transport.queue.push_back({group, rtp_packet(seq, static_cast<uint32_t>(base + (n * FPP)))});
+        receiver.drain(base + (n * FPP));
+        ++n;
+    };
+    auto run = [&](uint16_t const from, uint16_t const to) {
+        for (uint16_t s = from; s <= to; ++s) {
+            send(s);
+        }
+    };
+    run(0, 9);
+    run(900, 909);    // 890 lost
+    run(2400, 2409);  // 1490 lost
+    send(905);
+    send(906);  // confirmed: before the newest step, so both stay lost
+    EXPECT_EQ(receiver.counters().lost, uint64_t{890 + 1490} * FPP);
+    run(907, 916);
+    run(1300, 1309);  // 383 lost
+    run(1440, 1449);  // 130 lost: the newest step
+    for (uint16_t s = 1350; s < 1440; ++s) {
+        send(s);  // 90 of its gap late, not withdrawn again
+    }
+    send(1312);
+    send(1313);  // confirmed back into the newest step's gap: its 40 not recovered withdrawn
+    EXPECT_EQ(receiver.counters().lost, uint64_t{890 + 1490 + 383} * FPP);
+}
+
 TEST(aes67_receiver, a_packet_of_more_frames_than_the_maxptime_is_refused)
 {
     LoopTransport transport;

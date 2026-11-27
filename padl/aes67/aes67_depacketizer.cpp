@@ -104,7 +104,7 @@ auto Depacketizer::notify_step(bool const was_validated, uint16_t const seq, uin
 {
     constexpr uint32_t SEQ_MOD = 1U << 16U;
     if (was_validated && step >= rtp::RtpSequence::MAX_DROPOUT && step <= SEQ_MOD - rtp::RtpSequence::MAX_MISORDER) {
-        // RFC 3550 A.1 confirmed a jump back to the sequence the recent jumps left: theirs was another's, not loss.
+        // RFC 3550 A.1 confirmed a jump back to the sequence the newest step left: its gap was another's, not loss.
         auto const resumed = static_cast<uint16_t>(seq - jump_from_) < rtp::RtpSequence::MAX_DROPOUT;
         counters_.lost -= resumed ? std::min(counters_.lost, jump_lost_) : 0;
         jump_lost_ = 0;
@@ -152,8 +152,8 @@ void Depacketizer::advance_window(uint16_t const seq, uint16_t const ahead, uint
 void Depacketizer::notify_jump(uint16_t const ahead, uint64_t const gap) noexcept
 {
     if (ahead >= WINDOW) {
-        jump_from_ = jump_lost_ == 0 ? max_seq_ : jump_from_;
-        jump_lost_ += gap;
+        jump_from_ = max_seq_;
+        jump_lost_ = gap;  // an earlier step's loss stays lost
         since_jump_ = 0;
         return;
     }
@@ -171,6 +171,7 @@ auto Depacketizer::mark_late(uint16_t const behind, uint32_t const frames) noexc
     window_.set(behind);
     counters_.late += frames;
     counters_.lost -= std::min<uint64_t>(counters_.lost, frames);
+    jump_lost_ -= std::min<uint64_t>(jump_lost_, frames);  // recovered: not withdrawn again
     return true;
 }
 
