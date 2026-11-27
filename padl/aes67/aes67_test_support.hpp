@@ -438,7 +438,12 @@ class LoopTransport final : public Transport
                 return {};
             }
             uint64_t const next = schedule.started() ? schedule.next_index() : accepted->first_index;
-            return {.ssrc = accepted->ssrc, .first_index = accepted->first_index, .next_index = next, .packets = sent};
+            return {
+                .ssrc = accepted->ssrc,
+                .first_index = accepted->first_index,
+                .next_index = next,
+                .packets = sent,
+                .lost = transport.frame_lost};
         }
         /// The transport's frame_error.
         [[nodiscard]] auto error() const noexcept -> std::error_code override { return transport.frame_error; }
@@ -576,6 +581,7 @@ class LoopTransport final : public Transport
     std::error_code failing;                                  ///< send_error()
     std::error_code port_error;                               ///< every receive port's error()
     std::error_code frame_error;                              ///< every FrameTx's error()
+    uint32_t frame_lost{0};                                   ///< every FrameTx's progress(): frames it found missing
     bool every_tick{false};                                   ///< drain_every_tick()
     bool refuse_tag{false};                                   ///< set_vlan() refuses a tag, as a socket does
     std::optional<statusbar::ieee::VlanTag> vlan;             ///< the open port's tag

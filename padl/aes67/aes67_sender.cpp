@@ -554,6 +554,7 @@ void Sender::count_written(uint32_t const packets) noexcept
     counters_.packets += packets;
     counters_.frames += uint64_t{packets} * format_.frames_per_packet;
     auto const progress = run_progress();
+    count_port_lost(progress);
     send_state_.store({
         .ssrc = ssrc(),
         .packets = progress.packets,
@@ -565,6 +566,17 @@ void Sender::count_written(uint32_t const packets) noexcept
     if (packets > 0 && state_ != State::error) {
         state_ = State::running;
     }
+}
+
+void Sender::count_port_lost(SendProgress const& progress) noexcept
+{
+    bool const same = progress.ssrc == port_lost_.ssrc && progress.first_index == port_lost_.first_index;
+    auto const found = static_cast<uint32_t>(progress.lost - (same ? port_lost_.lost : 0U));
+    if (found >= (1U << 31U)) {
+        return;  // behind the last reading: nothing new
+    }
+    counters_.lost += found;
+    port_lost_ = progress;
 }
 
 auto Sender::run_progress() const noexcept -> SendProgress

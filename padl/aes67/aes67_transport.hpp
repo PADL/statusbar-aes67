@@ -102,6 +102,29 @@ class RefusalCounter
 // Frame ports
 //
 
+/// Where a frame port's frames are held in its device's memory, so that another frame port of that device can read them
+/// without the host: the device, its buffer there, and the clock whose sample indices address the buffer.
+struct FrameLocation
+{
+    uint64_t device{0};
+    uint32_t buffer{0};
+    uint32_t clock{0};
+
+    auto operator==(FrameLocation const&) const noexcept -> bool = default;
+};
+
+/// `count` of a send port's channels from `first_sink`, read from channels from `first_source` of the frames at
+/// `source`, frame by frame at the same sample indices.
+struct FrameRoute
+{
+    FrameLocation source;
+    uint16_t first_source{0};
+    uint16_t first_sink{0};
+    uint16_t count{0};
+
+    auto operator==(FrameRoute const&) const noexcept -> bool = default;
+};
+
 /// What one FrameReceive::drain() did.
 struct FrameDrain
 {
@@ -129,6 +152,9 @@ class FrameReceive
     /// Places packets by `offset` (Receiver::set_offset()) from now on, or holds them no_offset (nullopt). It replaces
     /// the plan's; a change applies once published, after the call returns.
     virtual void set_offset(std::optional<uint32_t> offset) noexcept = 0;
+    /// Where the frames it places are held for another frame port of its device to read (FrameSend::gather_from()),
+    /// while it places them there; none (the default) when they are not. The thread that configures its receiver.
+    [[nodiscard]] virtual auto location() const -> std::optional<FrameLocation> { return std::nullopt; }
 };
 
 /// Datagrams addressed to one receiver's destination.
@@ -154,6 +180,7 @@ struct SendProgress
     uint64_t first_index{0};  ///< the run's SendRun::first_index
     uint64_t next_index{0};   ///< the first frame of the next packet it sends
     uint32_t packets{0};      ///< packets sent in the run, mod 2^32
+    uint32_t lost{0};         ///< frames of its packets the port itself found missing and sent as silence, mod 2^32
 };
 
 /// A send port that packetises the stream itself, by a PacketSchedule of its SendPlan and its SendRun, from frames the
@@ -184,6 +211,16 @@ class FrameSend
     /// Why the port cannot send the run and will not try again unasked (it refused or stopped it), or none (the
     /// default); the Sender reports it as Transport::send_error(). A plain read; it clears once the port sends again.
     [[nodiscard]] virtual auto error() const noexcept -> std::error_code { return {}; }
+    /// Packetises `routes`' channels from the frames other ports of its device hold (FrameReceive::location()), not
+    /// from the frames written to it; empty: from those again. Idempotent; the thread that configures its sender. On
+    /// failure it packetises the frames written to it. Default: success for empty, operation_not_supported otherwise.
+    [[nodiscard]] virtual auto gather_from(std::span<FrameRoute const> const routes) -> statusbar::Status
+    {
+        if (!routes.empty()) {
+            return statusbar::failure(std::errc::operation_not_supported);
+        }
+        return statusbar::success();
+    }
 };
 
 /// Writes a packet's payload in place, exactly the length asked of send_rendered(), into the TX

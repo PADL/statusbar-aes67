@@ -291,7 +291,8 @@ struct Counters
 {
     uint64_t packets{0};  ///< packets handed on (receiver) or sent (sender)
     uint64_t frames{0};
-    uint64_t lost{0};     ///< receiver: frames in sequence gaps not yet filled; sender: frames the source lacked, or skipped
+    uint64_t lost{0};     ///< receiver: frames in sequence gaps not yet filled; sender: frames the source lacked, or skipped,
+                          ///< or a frame port found missing (SendProgress::lost)
     uint64_t late{0};     ///< receiver: frames that arrived out of order (still handed on)
     uint64_t dropped{0};  ///< packets refused (receiver) or not sent (sender)
     DropCounts drops;     ///< receiver: `dropped` by reason
