@@ -51,9 +51,9 @@ inline constexpr size_t PKTINFO_SPACE = CMSG_SPACE(sizeof(in_pktinfo));
     std::optional<statusbar::ip::IPv4Address> const& source = std::nullopt)
     -> statusbar::StatusValue<statusbar::net::FileDescriptor>;
 
-/// A sender's unconnected UDP socket, marked with `options.dscp`: to a group out of `interface` with `options.ttl`
-/// and loopback; to a unicast destination bound to `interface` and its address (IP_UNICAST_IF) with `options.ttl`,
-/// at socket priority 0, so the DSCP never maps it to an SR class's queue (AES67-2023 Annex C.1.2).
+/// A sender's unconnected UDP socket, marked with `options.dscp`: to a group out of `interface` with `options.ttl` and
+/// loopback, from the group's port; to a unicast destination bound to `interface` and its address (IP_UNICAST_IF), with
+/// `options.ttl`, at socket priority 0, so the DSCP never maps it to an SR class's queue (AES67-2023 Annex C.1.2).
 [[nodiscard]] auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options)
     -> statusbar::StatusValue<statusbar::net::FileDescriptor>;
 

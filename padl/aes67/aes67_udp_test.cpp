@@ -10,6 +10,7 @@
 #include "padl/mediaclock/mediaclock_ptp_clock.hpp"
 #include "padl/mediaclock/mediaclock_timebase.hpp"
 #include "padl/rtp/rtp_header.hpp"
+#include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <unistd.h>
@@ -594,6 +595,9 @@ TEST(aes67_udp, a_unicast_send_socket_is_pinned_to_its_interface_at_priority_zer
     EXPECT_TRUE(group.has_value());
     EXPECT_EQ(::getsockopt(group->get(), SOL_SOCKET, SO_PRIORITY, &value, &length), 0);
     EXPECT_EQ(value, 2);  // a group's keeps the one AF41 maps to (TC_PRIO_BULK, rt_tos2priority())
+    bound_length = sizeof(bound);
+    EXPECT_EQ(::getsockname(group->get(), reinterpret_cast<sockaddr*>(&bound), &bound_length), 0);
+    EXPECT_EQ(net::ipv4_endpoint(bound).port, uint16_t{45022});  // a group's from its own port
     // a unicast stream's RTCP socket leaves as its stream's: by the interface, with its TTL, at priority 0
     auto rtcp = open_rtcp_socket(*info, {.destination = {.address = own_loopback(), .port = 45023}, .ttl = 9});
     EXPECT_TRUE(rtcp.has_value());
@@ -608,6 +612,38 @@ TEST(aes67_udp, a_unicast_send_socket_is_pinned_to_its_interface_at_priority_zer
     socklen_t index_length = sizeof(index);
     EXPECT_EQ(::getsockopt((*rtcp)->fd(), IPPROTO_IP, IP_UNICAST_IF, &index, &index_length), 0);
     EXPECT_EQ(ntohl(index), info->index);
+}
+
+// A group's datagrams leave from the group's own port, as a receiver of the group on the same host sees them, and
+// the send socket, sharing that port, receives none of them itself
+TEST(aes67_udp, a_group_s_datagrams_leave_from_its_port)
+{
+    auto transport = UdpTransport::open("lo");
+    EXPECT_TRUE(transport.has_value());
+    Endpoint const group{.address = own_group(), .port = 45010};
+    auto port = (*transport)->open_receive(group);
+    auto info = find_interface("lo");
+    auto fd = info ? open_send_socket(*info, {.destination = group}) : statusbar::failure(Aes67Error::interface_not_found);
+    if (!port || !fd) {
+        std::println("  skipped: cannot join a group on lo");
+        return;
+    }
+    std::array<uint8_t, 4> const payload{1, 2, 3, 4};
+    sockaddr_in to = net::ipv4_sockaddr_in(group.address, group.port);
+    EXPECT_EQ(::sendto(fd->get(), payload.data(), payload.size(), 0, net::sockaddr_cast(to), sizeof(to)), 4);
+    std::array<Datagram, UdpTransport::RECEIVE_BATCH> batch{};
+    size_t n = 0;
+    for (int tries = 0; tries < 200 && n == 0; ++tries) {
+        n = (*port)->receive(batch);
+        std::this_thread::sleep_for(std::chrono::milliseconds{n == 0 ? 1 : 0});
+    }
+    if (n == 0) {
+        std::println("  skipped: the host does not route multicast on lo");
+        return;
+    }
+    EXPECT_EQ(batch[0].source.port, group.port);
+    std::array<uint8_t, 16> echo{};
+    EXPECT_EQ(::recv(fd->get(), echo.data(), echo.size(), MSG_DONTWAIT), -1);  // nothing for the send socket
 }
 
 TEST(aes67_udp, a_source_specific_group_is_joined_on_loopback)

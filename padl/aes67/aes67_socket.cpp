@@ -252,6 +252,24 @@ class UdpRtcpPort final : public RtcpPort
 
 }  // namespace
 
+namespace {
+
+/// A group's send socket bound to the group and its port: it sends from the destination's port and the route's
+/// address, sharing the port with the host's receivers of the group but receiving nothing (it joins no group and,
+/// IP_MULTICAST_ALL off, has none another socket joined).
+[[nodiscard]] auto bind_group_source(int const fd, Endpoint const& destination) noexcept -> statusbar::Status
+{
+    if (auto set = statusbar::net::set_reuse_addr(fd); !set) {
+        return set;
+    }
+    if (auto set = statusbar::net::set_multicast_all(fd, false); !set) {
+        return set;
+    }
+    return bind_to(fd, destination);
+}
+
+}  // namespace
+
 auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options)
     -> statusbar::StatusValue<statusbar::net::FileDescriptor>
 {
@@ -261,6 +279,11 @@ auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options
     }
     if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, true); !set) {
         return statusbar::failure(set.error());
+    }
+    if (options.destination.address.is_multicast()) {
+        if (auto bound = bind_group_source(fd->get(), options.destination); !bound) {
+            return statusbar::failure(bound.error());
+        }
     }
     return std::move(*fd);
 }
