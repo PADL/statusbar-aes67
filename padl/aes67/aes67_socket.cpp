@@ -208,19 +208,20 @@ class UdpRtcpPort final : public RtcpPort
     };
 }
 
-/// A send socket's route and marking: out of `interface` with `ttl` (a group with loopback, a unicast destination by
-/// IP_UNICAST_IF and from its address when `bind_source`), then `dscp`; a unicast socket then gets priority 0, so its
-/// DSCP never puts it in an SR class's queue (AES67-2023 Annex C.1.2).
+/// A send socket's route and marking: out of `interface` with `ttl` (a group looped back to this host when `loop`, a
+/// unicast destination by IP_UNICAST_IF and from its address when `bind_source`), then `dscp`; a unicast socket then
+/// gets priority 0, so its DSCP never puts it in an SR class's queue (AES67-2023 Annex C.1.2).
 [[nodiscard]] auto prepare_send(
     int const fd,
     InterfaceInfo const& interface,
     statusbar::ip::IPv4Address const& destination,
     uint8_t const ttl,
     uint8_t const dscp,
-    bool const bind_source) noexcept -> statusbar::Status
+    bool const bind_source,
+    bool const loop) noexcept -> statusbar::Status
 {
     bool const multicast = destination.is_multicast();
-    auto const routed = multicast ? statusbar::net::set_multicast_send(fd, interface.index, ttl, true)
+    auto const routed = multicast ? statusbar::net::set_multicast_send(fd, interface.index, ttl, loop)
                                   : statusbar::net::set_unicast_send(fd, AF_INET, interface.index, ttl);
     if (!routed) {
         return routed;
@@ -252,14 +253,14 @@ class UdpRtcpPort final : public RtcpPort
 
 }  // namespace
 
-auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options)
+auto open_send_socket(InterfaceInfo const& interface, SendOptions const& options, bool const loop)
     -> statusbar::StatusValue<statusbar::net::FileDescriptor>
 {
     auto fd = statusbar::net::make_udp_socket();
     if (!fd) {
         return statusbar::failure(fd.error());
     }
-    if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, true); !set) {
+    if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, true, loop); !set) {
         return statusbar::failure(set.error());
     }
     return std::move(*fd);
@@ -323,8 +324,9 @@ auto open_rtcp_socket(InterfaceInfo const& interface, RtcpOptions const& options
     if (!fd) {
         return statusbar::failure(fd.error());
     }
-    // Out by the interface as its stream's socket (already bound to local), marked as it.
-    if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, false); !set) {
+    // Out by the interface as its stream's socket (already bound to local), marked as it; a group's
+    // reports loop back, so the host's other sessions on the group see them.
+    if (auto set = prepare_send(fd->get(), interface, options.destination.address, options.ttl, options.dscp, false, true); !set) {
         return statusbar::failure(set.error());
     }
     return std::make_unique<UdpRtcpPort>(

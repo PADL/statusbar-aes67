@@ -107,6 +107,13 @@ its `FrameSend` (both null for a packet port, and constant for the port's life).
   in an SR class's queue (AES67-2023 Annex C.1.2). Both carry the sender's DSCP (`SendOptions::dscp`, from
   `Sender::set_dscp()`, by default `rtp::FrameAddressing::DSCP_MEDIA`, 34). A tick's packets are written straight
   into the `SEND_BATCH` slots of the sender's `sendmmsg()` batch.
+- A sender's socket to a group has `IP_MULTICAST_LOOP` off, so its datagrams leave by the
+  interface and never come back into this host's stack. With it on, the kernel copies every
+  packet to the sending CPU's backlog, whether or not a local socket wants it; at a fast packet
+  rate that is work queued behind the real-time thread on its own CPU. A host that receives its
+  own streams (a bench looping an output back into an input) opens the transport with
+  `UdpTransportOptions::multicast_loop`. A loopback interface returns the datagrams either way.
+  `XdpTransport` writes frames past the IP stack, so nothing it sends loops back.
 - An RTCP port is one socket for both directions. For a group it is bound to the group at
   the RTCP port, joined, and sends there with loopback on, so a session receives its own
   reports and must skip its own SSRC; for a unicast peer it is bound to `RtcpOptions::local`

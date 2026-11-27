@@ -29,6 +29,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 
 using namespace statusbar;
 using namespace padl::aes67;
@@ -608,6 +609,71 @@ TEST(aes67_udp, a_unicast_send_socket_is_pinned_to_its_interface_at_priority_zer
     socklen_t index_length = sizeof(index);
     EXPECT_EQ(::getsockopt((*rtcp)->fd(), IPPROTO_IP, IP_UNICAST_IF, &index, &index_length), 0);
     EXPECT_EQ(ntohl(index), info->index);
+}
+
+namespace {
+
+/// IP_MULTICAST_LOOP on `fd`, or -1 when it cannot be read.
+auto multicast_loop_for(int const fd) -> int
+{
+    int value = -1;
+    socklen_t length = sizeof(value);
+    return ::getsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &value, &length) == 0 ? value : -1;
+}
+
+/// The sockets this process has open, by descriptor.
+auto open_sockets() -> std::vector<int>
+{
+    std::vector<int> sockets;
+    for (int fd = 0; fd < 1024; ++fd) {
+        struct stat status{};
+        if (::fstat(fd, &status) == 0 && S_ISSOCK(status.st_mode)) {
+            sockets.push_back(fd);
+        }
+    }
+    return sockets;
+}
+
+/// IP_MULTICAST_LOOP on the socket a UdpTransport on lo opens for a group's sender, or -1.
+auto sender_loop_for(UdpTransport::Options const& options) -> int
+{
+    auto transport = UdpTransport::open("lo", options);
+    auto const before = open_sockets();
+    auto port = transport ? (*transport)->open_send({.destination = {.address = own_group(), .port = 45024}})
+                          : statusbar::failure(Aes67Error::interface_not_found);
+    auto const after = open_sockets();
+    auto const added = std::ranges::find_if(after, [&](int const fd) { return !std::ranges::contains(before, fd); });
+    return port && added != after.end() ? multicast_loop_for(*added) : -1;
+}
+
+}  // namespace
+
+// A group's sender does not loop its datagrams back to this host unless asked; an RTCP port on a group does, so
+// the host's other sessions there see its reports.
+TEST(aes67_udp, a_group_sender_does_not_loop_its_sends_back)
+{
+    auto info = find_interface("lo");
+    EXPECT_TRUE(info.has_value());
+    if (!info) {
+        return;
+    }
+    Endpoint const group{.address = own_group(), .port = 45024};
+    auto quiet = open_send_socket(*info, {.destination = group});
+    auto looped = open_send_socket(*info, {.destination = group}, true);
+    EXPECT_TRUE(quiet.has_value() && looped.has_value());
+    if (!quiet || !looped) {
+        return;
+    }
+    EXPECT_EQ(multicast_loop_for(quiet->get()), 0);
+    EXPECT_EQ(multicast_loop_for(looped->get()), 1);
+    EXPECT_EQ(sender_loop_for({}), 0);
+    EXPECT_EQ(sender_loop_for({.multicast_loop = true}), 1);
+    auto rtcp = open_rtcp_socket(*info, {.destination = {.address = group.address, .port = 45025}});
+    if (!rtcp) {
+        std::println("  skipped the RTCP port: cannot join a group on lo");
+        return;
+    }
+    EXPECT_EQ(multicast_loop_for((*rtcp)->fd()), 1);
 }
 
 TEST(aes67_udp, a_source_specific_group_is_joined_on_loopback)
