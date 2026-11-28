@@ -279,6 +279,9 @@ class SendPort
     /// What a packet port has sent from frames gathered elsewhere (gather_from()): the run it is of and the frames it
     /// found missing (SendProgress::lost); ssrc 0 (the default) when none. The ticking thread; a plain read.
     [[nodiscard]] virtual auto progress() const noexcept -> SendProgress { return {}; }
+    /// The sender's send offset (Sender::set_send_offset()), told at its first tick and at each change: a packet is due
+    /// once its last frame is `frames` behind now. The ticking thread, which never waits for it. Default: nothing.
+    virtual void set_send_offset(uint32_t const frames) noexcept { (void)frames; }
 };
 
 /// Where a sender's packets go and how they are marked.

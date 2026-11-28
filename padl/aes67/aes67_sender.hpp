@@ -284,6 +284,8 @@ class Sender
     void start_run(uint64_t first_index) noexcept;
     /// Stops the frame port's run, if one was started.
     void stop_run() noexcept;
+    /// Tells a packet port its send offset at the first tick and at each change (SendPort::set_send_offset()).
+    void tell_send_offset() noexcept;
     /// Passes a changed send offset on to the frame port's run.
     void follow_send_offset() noexcept;
     /// Writes the packets from the schedule's next index up to `newest` to the frame port, and counts them.
@@ -324,9 +326,10 @@ class Sender
     std::optional<Grandmaster> grandmaster_;
     uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
     std::atomic<uint32_t> send_offset_;
-    uint32_t run_send_offset_{0};  ///< the send offset the frame port's run was given (real-time thread)
-    uint64_t run_first_index_{0};  ///< the first index the frame port's run was given (real-time thread)
-    bool run_started_{false};      ///< the frame port has a run (real-time thread)
+    uint32_t run_send_offset_{0};            ///< the send offset the frame port's run was given (real-time thread)
+    uint32_t port_send_offset_{UINT32_MAX};  ///< the send offset a packet port was last told (real-time thread)
+    uint64_t run_first_index_{0};            ///< the first index the frame port's run was given (real-time thread)
+    bool run_started_{false};                ///< the frame port has a run (real-time thread)
     std::optional<statusbar::ieee::VlanTag> vlan_;
     std::atomic<uint32_t> holds_{0};  ///< the ReportHolds held: real-time reads wait-free
     /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.

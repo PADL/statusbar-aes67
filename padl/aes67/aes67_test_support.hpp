@@ -220,6 +220,8 @@ class LoopTransport final : public Transport
             transport.gathered.assign(routes.begin(), routes.end());
             return statusbar::success();
         }
+        /// Each send offset told, recorded in send_offsets.
+        void set_send_offset(uint32_t const frames) noexcept override { transport.send_offsets.push_back(frames); }
         /// While gathering, run 1 with frame_lost frames found missing; else none.
         auto progress() const noexcept -> SendProgress override
         {
@@ -598,6 +600,7 @@ class LoopTransport final : public Transport
     uint32_t frame_lost{0};                                   ///< every FrameTx's progress(): frames it found missing
     bool packet_gather{false};                                ///< a Tx's gather_from() accepts routes
     std::vector<FrameRoute> gathered;                         ///< the routes a Tx gathers from
+    std::vector<uint32_t> send_offsets;                       ///< every send offset a Tx was told
     bool every_tick{false};                                   ///< drain_every_tick()
     bool refuse_tag{false};                                   ///< set_vlan() refuses a tag, as a socket does
     std::optional<statusbar::ieee::VlanTag> vlan;             ///< the open port's tag

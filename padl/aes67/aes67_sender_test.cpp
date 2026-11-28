@@ -1348,4 +1348,22 @@ TEST(aes67_sender, a_gathering_packet_ports_missing_frames_are_counted_lost)
     EXPECT_EQ(sender.counters().lost, uint64_t{18});
 }
 
+// A packet port is told the send offset at the sender's first tick that sends, and again only when it changes
+TEST(aes67_sender, a_packet_port_is_told_each_send_offset_once)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(6);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    sender.tick(base + 47, 0);
+    sender.tick(base + 95, 0);
+    EXPECT_TRUE(transport.send_offsets == std::vector<uint32_t>({6}));
+    sender.set_send_offset(48);
+    sender.tick(base + 191, 0);
+    sender.tick(base + 239, 0);
+    EXPECT_TRUE(transport.send_offsets == std::vector<uint32_t>({6, 48}));
+}
+
 TEST_MAIN(padl_aes67, aes67_sender_test)
