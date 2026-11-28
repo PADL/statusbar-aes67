@@ -1346,6 +1346,9 @@ TEST(aes67_sender, a_gathering_packet_ports_missing_frames_are_counted_lost)
     transport.frame_lost = 18;
     sender.tick(base + 191, 0);
     EXPECT_EQ(sender.counters().lost, uint64_t{18});
+    EXPECT_EQ(sender.lost_elsewhere(), uint64_t{18});  // all of it the port's
+    sender.reset_counters();
+    EXPECT_TRUE(sender.counters().lost == 0 && sender.lost_elsewhere() == 0);
 }
 
 namespace {
@@ -1419,6 +1422,7 @@ TEST(aes67_sender, a_resend_further_back_than_a_burst_is_bounded_and_counted_los
     auto const again = sent_since(transport, from);
     EXPECT_TRUE(again.size() == Sender::MAX_BURST && again.front().first == static_cast<uint32_t>(next - (7 * FPP)));
     EXPECT_EQ(sender.counters().lost, uint64_t{5} * FPP);
+    EXPECT_EQ(sender.lost_elsewhere(), uint64_t{5} * FPP);  // found where it sends, not in the provider's frames
     LoopTransport plain;
     Sender unrouted{STEREO_L24, source.provider(), plain, "Test"};
     unrouted.set_send_offset(0);

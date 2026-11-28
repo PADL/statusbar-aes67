@@ -205,7 +205,14 @@ class Sender
     [[nodiscard]] auto state() const noexcept -> State { return state_; }
     [[nodiscard]] auto counters() const noexcept -> Counters const& { return counters_; }
     /// Every counter to zero; the run, its SSRC and sequence go on. The ticking thread.
-    void reset_counters() noexcept { counters_ = {}; }
+    void reset_counters() noexcept
+    {
+        counters_ = {};
+        lost_elsewhere_ = 0;
+    }
+    /// The part of counters().lost found where the packets are sent rather than in the provider's frames: a frame port's
+    /// or a gathering packet port's missing frames (SendProgress::lost) and a resend's skipped ones. The ticking thread.
+    [[nodiscard]] auto lost_elsewhere() const noexcept -> uint64_t { return lost_elsewhere_; }
     /// Why the transport refused the last configure(), or why it cannot send (Transport::send_error(), else a frame
     /// port's FrameSend::error(), seen by the last tick), for State::error.
     [[nodiscard]] auto error() const noexcept -> std::error_code { return error_; }
@@ -238,6 +245,7 @@ class Sender
     std::unique_ptr<SendPort> port_;
     FrameSend* frames_{nullptr};         ///< port_ as a frame port, or nullptr
     SendProgress port_lost_{};           ///< the run and its SendProgress::lost as counters_.lost last counted them
+    uint64_t lost_elsewhere_{0};         ///< lost_elsewhere()
     std::atomic<bool> gathered_{false};  ///< a packet port offered routes since configure(): its progress() and resends read
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for

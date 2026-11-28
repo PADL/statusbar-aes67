@@ -383,7 +383,10 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
 void Sender::resend_if_asked(uint64_t const newest) noexcept
 {
     if (auto const from = port_->resend_from()) {
-        uncount_sent(schedule_.rewind(*from, newest, counters_.lost));  // counted again as they go
+        uint64_t skipped = 0;
+        uncount_sent(schedule_.rewind(*from, newest, skipped));  // counted again as they go
+        counters_.lost += skipped;
+        lost_elsewhere_ += skipped;
     }
 }
 
@@ -625,6 +628,7 @@ void Sender::count_port_lost(SendProgress const& progress) noexcept
         return;  // behind the last reading: nothing new
     }
     counters_.lost += found;
+    lost_elsewhere_ += found;
     port_lost_ = progress;
 }
 
