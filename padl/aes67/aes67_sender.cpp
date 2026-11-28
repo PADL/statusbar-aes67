@@ -170,11 +170,11 @@ auto Sender::gather_from(std::span<FrameRoute const> const routes) -> statusbar:
     if (frames_ != nullptr) {
         return frames_->gather_from(routes);
     }
-    auto gathered = port_->gather_from(routes);
-    if (gathered && !routes.empty()) {
-        gathered_.store(true, std::memory_order_relaxed);  // its lost read at each flush from here
+    if (!routes.empty()) {
+        // Its lost and resends read at each tick from here, a handover still under way (a failure here) included.
+        gathered_.store(true, std::memory_order_relaxed);
     }
-    return gathered;
+    return port_->gather_from(routes);
 }
 
 void Sender::continue_from(Sender const& previous)
@@ -373,8 +373,30 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
     }
     if (auto const newest = newest_due(now_index)) {
         tell_send_offset();
+        if (gathered_.load(std::memory_order_relaxed)) [[unlikely]] {
+            resend_if_asked(*newest);
+        }
         send_until(*newest);
     }
+}
+
+void Sender::resend_if_asked(uint64_t const newest) noexcept
+{
+    if (auto const from = port_->resend_from()) {
+        uint64_t skipped = 0;
+        uncount_sent(schedule_.rewind(*from, newest, skipped));  // counted again as they go
+        counters_.lost += skipped;
+        lost_elsewhere_ += skipped;
+    }
+}
+
+void Sender::uncount_sent(uint32_t const packets) noexcept
+{
+    uint64_t const frames = uint64_t{packets} * format_.frames_per_packet;
+    counters_.packets -= std::min<uint64_t>(counters_.packets, packets);
+    counters_.frames -= std::min(counters_.frames, frames);
+    rtcp_counts_.packets -= std::min(rtcp_counts_.packets, packets);
+    rtcp_counts_.octets -= std::min(rtcp_counts_.octets, static_cast<uint32_t>(packets * payload_.size()));
 }
 
 void Sender::tell_send_offset() noexcept
@@ -606,6 +628,7 @@ void Sender::count_port_lost(SendProgress const& progress) noexcept
         return;  // behind the last reading: nothing new
     }
     counters_.lost += found;
+    lost_elsewhere_ += found;
     port_lost_ = progress;
 }
 

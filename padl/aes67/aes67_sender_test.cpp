@@ -1346,6 +1346,91 @@ TEST(aes67_sender, a_gathering_packet_ports_missing_frames_are_counted_lost)
     transport.frame_lost = 18;
     sender.tick(base + 191, 0);
     EXPECT_EQ(sender.counters().lost, uint64_t{18});
+    EXPECT_EQ(sender.lost_elsewhere(), uint64_t{18});  // all of it the port's
+    sender.reset_counters();
+    EXPECT_TRUE(sender.counters().lost == 0 && sender.lost_elsewhere() == 0);
+}
+
+namespace {
+
+/// The timestamps and sequences of what `transport` sent since `from`, in order.
+auto sent_since(LoopTransport const& transport, size_t const from) -> std::vector<std::pair<uint32_t, uint16_t>>
+{
+    std::vector<std::pair<uint32_t, uint16_t>> sent;
+    for (size_t i = from; i < transport.queue.size(); ++i) {
+        auto const packet = padl::rtp::parse_rtp(transport.queue[i].bytes);
+        sent.emplace_back(packet->header.timestamp.get(), packet->header.sequence.get());
+    }
+    return sent;
+}
+
+/// `sender` on a gathering packet port, ticked a packet at a time from `base` for `packets` packets.
+void gather_and_send(Sender& sender, uint64_t const base, int const packets)
+{
+    std::array const routes{FrameRoute{.source = {.device = 1, .buffer = 2}, .count = 2}};
+    EXPECT_TRUE(sender.gather_from(routes).has_value());
+    for (int k = 0; k < packets; ++k) {
+        sender.tick(base + FPP - 1 + (uint64_t{FPP} * static_cast<uint64_t>(k)), 0);
+    }
+}
+
+}  // namespace
+
+// A gathering packet port's packets that went nowhere are sent again from where it says, with the timestamps and
+// sequences they had, at the next tick, before that tick's own; they are counted sent once
+TEST(aes67_sender, a_gathering_packet_ports_packets_that_went_nowhere_are_sent_again)
+{
+    LoopTransport transport;
+    transport.packet_gather = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    gather_and_send(sender, base, 10);
+    auto const before = sent_since(transport, 0);
+    uint64_t const packets = sender.counters().packets;
+    uint64_t const next = sender.send_state().next_index;
+    transport.resend = next - (3 * FPP);  // the last three went nowhere
+    size_t const from = transport.queue.size();
+    sender.tick(next + FPP - 1, 0);
+    auto const again = sent_since(transport, from);
+    EXPECT_EQ(again.size(), size_t{4});
+    EXPECT_TRUE(again.size() == 4 && std::ranges::equal(std::span{again}.first(3), std::span{before}.last(3)));
+    EXPECT_TRUE(
+        again.size() == 4 && again[3].first == static_cast<uint32_t>(next) &&
+        again[3].second == static_cast<uint16_t>(before.back().second + 1));
+    EXPECT_TRUE(sender.counters().packets == packets + 1 && sender.counters().lost == 0);
+}
+
+// Further back than a burst, a resend goes from MAX_BURST - 1 packets behind the newest due packet, the frames before
+// counted lost; a port not gathering is never asked
+TEST(aes67_sender, a_resend_further_back_than_a_burst_is_bounded_and_counted_lost)
+{
+    LoopTransport transport;
+    transport.packet_gather = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    gather_and_send(sender, base, 20);
+    uint64_t const next = sender.send_state().next_index;
+    transport.resend = next - (12 * FPP);
+    size_t const from = transport.queue.size();
+    sender.tick(next + FPP - 1, 0);  // the newest due is `next`: seven packets behind it, and it
+    auto const again = sent_since(transport, from);
+    EXPECT_TRUE(again.size() == Sender::MAX_BURST && again.front().first == static_cast<uint32_t>(next - (7 * FPP)));
+    EXPECT_EQ(sender.counters().lost, uint64_t{5} * FPP);
+    EXPECT_EQ(sender.lost_elsewhere(), uint64_t{5} * FPP);  // found where it sends, not in the provider's frames
+    LoopTransport plain;
+    Sender unrouted{STEREO_L24, source.provider(), plain, "Test"};
+    unrouted.set_send_offset(0);
+    EXPECT_TRUE(unrouted.configure(GROUP));
+    plain.resend = base;
+    unrouted.tick(base + FPP - 1, 0);
+    unrouted.tick(base + (2 * FPP) - 1, 0);
+    EXPECT_TRUE(plain.resend_asks == 0 && plain.resend.has_value());
 }
 
 // A packet port is told the send offset at the sender's first tick that sends, and again only when it changes

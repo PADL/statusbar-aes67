@@ -282,6 +282,10 @@ class SendPort
     /// The sender's send offset (Sender::set_send_offset()), told at its first tick and at each change: a packet is due
     /// once its last frame is `frames` behind now. The ticking thread, which never waits for it. Default: nothing.
     virtual void set_send_offset(uint32_t const frames) noexcept { (void)frames; }
+    /// A gathering packet port's packets from frame index `first` on went nowhere (the run elsewhere ended first): its
+    /// sender sends them again (PacketSchedule::rewind()), asked once a tick, each answer given once. The ticking
+    /// thread. Default: none.
+    [[nodiscard]] virtual auto resend_from() noexcept -> std::optional<uint64_t> { return std::nullopt; }
 };
 
 /// Where a sender's packets go and how they are marked.
