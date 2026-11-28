@@ -1416,6 +1416,7 @@ TEST(aes67_sender, a_resend_further_back_than_a_burst_is_bounded_and_counted_los
     uint64_t const base = 48'000ULL * 1'000'000;
     gather_and_send(sender, base, 20);
     uint64_t const next = sender.send_state().next_index;
+    uint64_t const packets = sender.counters().packets;
     transport.resend = next - (12 * FPP);
     size_t const from = transport.queue.size();
     sender.tick(next + FPP - 1, 0);  // the newest due is `next`: seven packets behind it, and it
@@ -1423,6 +1424,7 @@ TEST(aes67_sender, a_resend_further_back_than_a_burst_is_bounded_and_counted_los
     EXPECT_TRUE(again.size() == Sender::MAX_BURST && again.front().first == static_cast<uint32_t>(next - (7 * FPP)));
     EXPECT_EQ(sender.counters().lost, uint64_t{5} * FPP);
     EXPECT_EQ(sender.lost_elsewhere(), uint64_t{5} * FPP);  // found where it sends, not in the provider's frames
+    EXPECT_EQ(sender.counters().packets, packets - 5 + 1);  // the five too far back never went, nor are they sent
     LoopTransport plain;
     Sender unrouted{STEREO_L24, source.provider(), plain, "Test"};
     unrouted.set_send_offset(0);
@@ -1431,6 +1433,27 @@ TEST(aes67_sender, a_resend_further_back_than_a_burst_is_bounded_and_counted_los
     unrouted.tick(base + FPP - 1, 0);
     unrouted.tick(base + (2 * FPP) - 1, 0);
     EXPECT_TRUE(plain.resend_asks == 0 && plain.resend.has_value());
+}
+
+// A resend from before a resynchronisation's skip (the sender away): each frame missing counted lost once, those the skip
+// counted and that now go again no longer lost, and the packets counted sent those that went
+TEST(aes67_sender, a_resend_across_a_resync_counts_each_missing_frame_once)
+{
+    LoopTransport transport;
+    transport.packet_gather = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    gather_and_send(sender, base, 10);
+    uint64_t const n10 = sender.send_state().next_index;
+    sender.tick(n10 + (21 * FPP) - 1, 0);  // away 20 packets: skipped, counted lost; the newest sent
+    EXPECT_EQ(sender.counters().lost, uint64_t{20} * FPP);
+    transport.resend = n10 - (2 * FPP);  // the last two before the skip went nowhere
+    sender.tick(n10 + (22 * FPP) - 1, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{16} * FPP);  // n10 - 2 to n10 + 13: the rest goes again
+    EXPECT_EQ(sender.counters().packets, uint64_t{16});     // 8 before, 8 now: n10 + 14 to n10 + 21
 }
 
 // A packet port is told the send offset at the sender's first tick that sends, and again only when it changes

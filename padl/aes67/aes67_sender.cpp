@@ -383,10 +383,12 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
 void Sender::resend_if_asked(uint64_t const newest) noexcept
 {
     if (auto const from = port_->resend_from()) {
-        uint64_t skipped = 0;
-        uncount_sent(schedule_.rewind(*from, newest, skipped));  // counted again as they go
-        counters_.lost += skipped;
-        lost_elsewhere_ += skipped;
+        // What went nowhere is not counted sent (counted again as it goes); what is left behind is lost; what a resync
+        // counted lost and goes now is not.
+        auto const rewound = schedule_.rewind(*from, newest);
+        uncount_sent(static_cast<uint32_t>(rewound.unsent / std::max<uint32_t>(format_.frames_per_packet, 1)));
+        counters_.lost = counters_.lost + rewound.lost - std::min(counters_.lost + rewound.lost, rewound.recovered);
+        lost_elsewhere_ += rewound.lost;
     }
 }
 

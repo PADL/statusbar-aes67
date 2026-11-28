@@ -117,19 +117,30 @@ class PacketSchedule
         next_index_ += format_.frames_per_packet;
     }
 
-    /// Back to the packet at `first_index`, behind next_index(), its sequence with it, so that packets that went nowhere
-    /// go again: no further than MAX_BURST - 1 packets behind `newest`, on the grid, the frames skipped added to `lost`.
-    /// The packets moved back; 0 when not started or `first_index` is not behind.
-    [[nodiscard]] auto rewind(uint64_t const first_index, uint64_t const newest, uint64_t& lost) noexcept -> uint32_t
+    /// What a rewind() did: the packets moved back, and how the frames it touched were counted before.
+    struct Rewound
     {
+        uint32_t packets{0};    ///< moved back: sent again
+        uint64_t unsent{0};     ///< frames counted sent that went nowhere: sent again, or now lost
+        uint64_t lost{0};       ///< frames counted sent that are left behind: lost now
+        uint64_t recovered{0};  ///< frames a resynchronisation counted lost that are sent again
+    };
+    /// Back to the packet at `first_index`, behind next_index(), its sequence with it, so that packets that went nowhere
+    /// go again: no further than MAX_BURST - 1 packets behind `newest`, on the grid. The frames' counts as Rewound says:
+    /// those a resynchronisation skipped were counted lost then, never sent; nothing when not started or not behind.
+    [[nodiscard]] auto rewind(uint64_t const first_index, uint64_t const newest) noexcept -> Rewound
+    {  // NOLINT(statusbar-block-statements): the step back, then each part of the frames it touched counted
         if (!started_ || format_.frames_per_packet == 0 || first_index >= next_index_) {
-            return 0;
+            return {};
         }
         uint64_t const reach = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
+        uint64_t const before = next_index_;
         uint32_t const packets = packets_behind(std::max(first_index, newest > reach ? newest - reach : 0));
-        lost += next_index_ - first_index - (uint64_t{packets} * format_.frames_per_packet);  // further back, or off the grid
         step_back(packets);
-        return packets;
+        uint64_t const recovered = skipped_in(next_index_, before);  // counted lost by a resync, going now
+        uint64_t const left_lost = skipped_in(first_index, next_index_);
+        uint64_t const lost = next_index_ - first_index - left_lost;  // further back, or off the grid
+        return {.packets = packets, .unsent = (before - first_index) - recovered - left_lost, .lost = lost, .recovered = recovered};
     }
 
     /// The current run's SSRC. Any thread.
@@ -165,7 +176,8 @@ class PacketSchedule
             next_index_ = newest;
         } else if (next_index_ + (uint64_t{MAX_BURST} * fpp) <= newest) {
             lost += newest - next_index_;  // too far behind: skip what cannot be sent in time
-            next_index_ = newest;
+            skipped_from_ = next_index_;
+            next_index_ = resumed_ = newest;
         }
         return true;
     }
@@ -204,6 +216,13 @@ class PacketSchedule
     {
         return first_index < next_index_ ? static_cast<uint32_t>((next_index_ - first_index) / format_.frames_per_packet) : 0U;
     }
+    /// The frames of [from, to) the last resynchronisation skipped (counted lost, never sent).
+    [[nodiscard]] auto skipped_in(uint64_t const from, uint64_t const to) const noexcept -> uint64_t
+    {
+        uint64_t const a = std::max(from, skipped_from_);
+        uint64_t const b = std::min(to, resumed_);
+        return b > a ? b - a : 0;
+    }
     /// Back `packets` packets, the sequence with them.
     void step_back(uint32_t const packets) noexcept
     {
@@ -231,9 +250,11 @@ class PacketSchedule
     uint32_t phase_{0};
     uint32_t start_lead_{0};
     bool started_{false};
-    bool placed_{false};                  ///< start_held() placed a held run's first packet since clear_placed()
-    uint64_t next_index_{0};              ///< first frame of the next packet to send
-    uint64_t run_first_{0};               ///< the run's first packet
+    bool placed_{false};        ///< start_held() placed a held run's first packet since clear_placed()
+    uint64_t next_index_{0};    ///< first frame of the next packet to send
+    uint64_t run_first_{0};     ///< the run's first packet
+    uint64_t skipped_from_{0};  ///< the last resynchronisation's skip, [skipped_from_, resumed_): counted lost, never sent
+    uint64_t resumed_{0};
     std::optional<uint64_t> held_first_;  ///< the packet a run held for its first SR starts at
 };
 
