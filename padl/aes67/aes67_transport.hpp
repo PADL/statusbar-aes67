@@ -265,6 +265,20 @@ class SendPort
     /// The port as a frame port, which the Sender writes frames to instead of sending packets; nullptr (the default): a
     /// packet port. Constant for the port's life.
     [[nodiscard]] virtual auto frames() noexcept -> FrameSend* { return nullptr; }
+    /// A packet port's packets carry `routes`' channels from the frames other ports of its device hold
+    /// (FrameReceive::location()), not the payloads rendered for it; empty: those again. Each packet keeps the sequence
+    /// and timing its sender gives it. Idempotent; the thread that configures its sender. On failure it sends what is
+    /// rendered. Default: success for empty, operation_not_supported otherwise.
+    [[nodiscard]] virtual auto gather_from(std::span<FrameRoute const> const routes) -> statusbar::Status
+    {
+        if (!routes.empty()) {
+            return statusbar::failure(std::errc::operation_not_supported);
+        }
+        return statusbar::success();
+    }
+    /// What a packet port has sent from frames gathered elsewhere (gather_from()): the run it is of and the frames it
+    /// found missing (SendProgress::lost); ssrc 0 (the default) when none. The ticking thread; a plain read.
+    [[nodiscard]] virtual auto progress() const noexcept -> SendProgress { return {}; }
 };
 
 /// Where a sender's packets go and how they are marked.

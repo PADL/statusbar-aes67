@@ -211,6 +211,20 @@ class LoopTransport final : public Transport
         }
         /// Nothing batched: 0.
         auto flush() noexcept -> size_t override { return 0; }
+        /// Under packet_gather, `routes` accepted and recorded in gathered; else the default.
+        auto gather_from(std::span<FrameRoute const> const routes) -> statusbar::Status override
+        {
+            if (!transport.packet_gather) {
+                return SendPort::gather_from(routes);
+            }
+            transport.gathered.assign(routes.begin(), routes.end());
+            return statusbar::success();
+        }
+        /// While gathering, run 1 with frame_lost frames found missing; else none.
+        auto progress() const noexcept -> SendProgress override
+        {
+            return transport.gathered.empty() ? SendProgress{} : SendProgress{.ssrc = 1, .lost = transport.frame_lost};
+        }
         /// The tag recorded in vlan; refused, as a socket refuses it, under refuse_tag.
         auto set_vlan(std::optional<statusbar::ieee::VlanTag> const& vlan) noexcept -> statusbar::Status override
         {
@@ -582,6 +596,8 @@ class LoopTransport final : public Transport
     std::error_code port_error;                               ///< every receive port's error()
     std::error_code frame_error;                              ///< every FrameTx's error()
     uint32_t frame_lost{0};                                   ///< every FrameTx's progress(): frames it found missing
+    bool packet_gather{false};                                ///< a Tx's gather_from() accepts routes
+    std::vector<FrameRoute> gathered;                         ///< the routes a Tx gathers from
     bool every_tick{false};                                   ///< drain_every_tick()
     bool refuse_tag{false};                                   ///< set_vlan() refuses a tag, as a socket does
     std::optional<statusbar::ieee::VlanTag> vlan;             ///< the open port's tag

@@ -1299,4 +1299,53 @@ TEST(aes67_sender, a_frame_ports_missing_frames_are_counted_lost)
     EXPECT_EQ(sender.counters().lost, uint64_t{18});
 }
 
+// The sender's gather_from() reaches its open port, a packet port or a frame port, each by its own default; with none
+// open, only an empty route set is accepted.
+TEST(aes67_sender, gather_from_reaches_the_open_port_packet_or_frame)
+{
+    LoopTransport transport;
+    PatternSource source{6};
+    std::array const routes{FrameRoute{.source = {.device = 1, .buffer = 2}, .count = 2}};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(sender.gather_from({}).has_value());
+    auto const closed = sender.gather_from(routes);
+    EXPECT_TRUE(!closed && closed.error() == std::errc::not_connected);
+    EXPECT_TRUE(sender.configure(GROUP));
+    auto const refused = sender.gather_from(routes);
+    EXPECT_TRUE(!refused && refused.error() == std::errc::operation_not_supported);
+    transport.packet_gather = true;
+    EXPECT_TRUE(sender.gather_from(routes).has_value());
+    EXPECT_TRUE(transport.gathered.size() == 1 && transport.gathered.front() == routes.front());
+    transport.frame_ports = true;
+    Sender frames{STEREO_L24, source.provider(), transport, "Test"};
+    EXPECT_TRUE(frames.configure(GROUP));
+    auto const frame_refused = frames.gather_from(routes);
+    EXPECT_TRUE(!frame_refused && frame_refused.error() == std::errc::operation_not_supported);
+}
+
+// A packet port that gathers from elsewhere: what it found missing in its run (SendProgress::lost) is counted lost once,
+// as a frame port's is; before it gathers, its progress is not read.
+TEST(aes67_sender, a_gathering_packet_ports_missing_frames_are_counted_lost)
+{
+    LoopTransport transport;
+    transport.packet_gather = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    transport.frame_lost = 12;
+    sender.tick(base + 47, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{0});  // not gathering: its progress not read
+    std::array const routes{FrameRoute{.source = {.device = 1, .buffer = 2}, .count = 2}};
+    EXPECT_TRUE(sender.gather_from(routes).has_value());
+    sender.tick(base + 95, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{12});
+    sender.tick(base + 143, 0);  // the same reading: nothing more
+    EXPECT_EQ(sender.counters().lost, uint64_t{12});
+    transport.frame_lost = 18;
+    sender.tick(base + 191, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{18});
+}
+
 TEST_MAIN(padl_aes67, aes67_sender_test)
