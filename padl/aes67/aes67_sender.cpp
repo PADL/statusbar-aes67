@@ -383,13 +383,29 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
 void Sender::resend_if_asked(uint64_t const newest) noexcept
 {
     if (auto const from = port_->resend_from()) {
-        // What went nowhere is not counted sent (counted again as it goes); what is left behind is lost; what a resync
-        // counted lost and goes now is not.
-        auto const rewound = schedule_.rewind(*from, newest);
-        uncount_sent(static_cast<uint32_t>(rewound.unsent / std::max<uint32_t>(format_.frames_per_packet, 1)));
-        counters_.lost = counters_.lost + rewound.lost - std::min(counters_.lost + rewound.lost, rewound.recovered);
-        lost_elsewhere_ += rewound.lost;
+        count_rewound(schedule_.rewind(*from, newest));
     }
+}
+
+void Sender::count_rewound(PacketSchedule::Rewound const& rewound) noexcept
+{
+    // What went nowhere is not counted sent (counted again as it goes); what is left behind is lost; what a resync
+    // counted lost and goes now, or went elsewhere, is not.
+    uint32_t const fpp = std::max<uint32_t>(format_.frames_per_packet, 1);
+    uncount_sent(static_cast<uint32_t>(rewound.unsent / fpp));
+    uint64_t const found = rewound.recovered + rewound.delivered;
+    counters_.lost = counters_.lost + rewound.lost - std::min(counters_.lost + rewound.lost, found);
+    lost_elsewhere_ += rewound.lost;
+    count_delivered(static_cast<uint32_t>(rewound.delivered / fpp));
+}
+
+void Sender::count_delivered(uint32_t const packets) noexcept
+{
+    uint64_t const frames = uint64_t{packets} * format_.frames_per_packet;
+    counters_.packets += packets;
+    counters_.frames += frames;
+    rtcp_counts_.packets += packets;
+    rtcp_counts_.octets += static_cast<uint32_t>(packets * payload_.size());
 }
 
 void Sender::uncount_sent(uint32_t const packets) noexcept

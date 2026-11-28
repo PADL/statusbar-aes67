@@ -286,6 +286,9 @@ class SendPort
     /// sender sends them again (PacketSchedule::rewind()), asked once a tick, each answer given once. The ticking
     /// thread. Default: none.
     [[nodiscard]] virtual auto resend_from() noexcept -> std::optional<uint64_t> { return std::nullopt; }
+    /// Whether the packets it sends now are those rendered for it, not gathered elsewhere (false while it gathers): a
+    /// data plane that stops feeding a routed sender feeds it again while it does. The ticking thread. Default: true.
+    [[nodiscard]] virtual auto sends_rendered() const noexcept -> bool { return true; }
 };
 
 /// Where a sender's packets go and how they are marked.

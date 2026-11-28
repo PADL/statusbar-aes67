@@ -1456,6 +1456,27 @@ TEST(aes67_sender, a_resend_across_a_resync_counts_each_missing_frame_once)
     EXPECT_EQ(sender.counters().packets, uint64_t{16});     // 8 before, 8 now: n10 + 14 to n10 + 21
 }
 
+// A resend from inside a resynchronisation's skip (the sender away while the port's run elsewhere went on, then ended):
+// the skipped frames before the resend went elsewhere, so they are neither lost nor left uncounted as sent
+TEST(aes67_sender, a_resend_from_inside_a_resync_counts_what_went_elsewhere)
+{
+    LoopTransport transport;
+    transport.packet_gather = true;
+    PatternSource source{6};
+    Sender sender{STEREO_L24, source.provider(), transport, "Test"};
+    sender.set_send_offset(0);
+    EXPECT_TRUE(sender.configure(GROUP));
+    uint64_t const base = 48'000ULL * 1'000'000;
+    gather_and_send(sender, base, 10);
+    uint64_t const n10 = sender.send_state().next_index;
+    sender.tick(n10 + (10 * FPP) - 1, 0);  // away 9 packets: skipped, counted lost; the newest sent
+    EXPECT_EQ(sender.counters().lost, uint64_t{9} * FPP);
+    transport.resend = n10 + (6 * FPP);  // the port's run elsewhere sent up to n10 + 5, then ended
+    sender.tick(n10 + (11 * FPP) - 1, 0);
+    EXPECT_EQ(sender.counters().lost, uint64_t{0});      // n10 to n10 + 5 went elsewhere, n10 + 6 on go again
+    EXPECT_EQ(sender.counters().packets, uint64_t{21});  // 10, 6 elsewhere, n10 + 6 to n10 + 10
+}
+
 // A packet port is told the send offset at the sender's first tick that sends, and again only when it changes
 TEST(aes67_sender, a_packet_port_is_told_each_send_offset_once)
 {

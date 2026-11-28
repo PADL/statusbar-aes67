@@ -224,6 +224,9 @@ class Sender
     /// frame port, SendPort::gather_from() for a packet port); empty: from the provider again. With no port open: success
     /// for empty, not_connected otherwise. The thread that configures the sender.
     [[nodiscard]] auto gather_from(std::span<FrameRoute const> routes) -> statusbar::Status;
+    /// Whether its port sends the packets rendered for it now (SendPort::sends_rendered()); true with none. The ticking
+    /// thread.
+    [[nodiscard]] auto sends_rendered() const noexcept -> bool { return port_ == nullptr || port_->sends_rendered(); }
     /// The current run's SSRC (a resumed run draws a new one on the ticking thread). Any thread.
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return schedule_.ssrc(); }
 
@@ -282,6 +285,11 @@ class Sender
     /// A gathering packet port's resend_from() followed: the schedule back there, at most a burst behind `newest`, and
     /// what went nowhere no longer counted sent. Not inlined: rare.
     [[gnu::noinline]] void resend_if_asked(uint64_t newest) noexcept;
+    /// A rewind's counts applied: what went nowhere uncounted as sent, what is left behind lost, what goes or went no
+    /// longer lost.
+    void count_rewound(PacketSchedule::Rewound const& rewound) noexcept;
+    /// `packets` a resync skipped that its port sent elsewhere counted sent, in the SR's counts too.
+    void count_delivered(uint32_t packets) noexcept;
     /// `packets` sent no longer counted sent, nor in the SR's counts.
     void uncount_sent(uint32_t packets) noexcept;
     /// Flushes the `queued` packets and counts what went out.

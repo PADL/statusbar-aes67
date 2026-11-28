@@ -124,10 +124,12 @@ class PacketSchedule
         uint64_t unsent{0};     ///< frames counted sent that went nowhere: sent again, or now lost
         uint64_t lost{0};       ///< frames counted sent that are left behind: lost now
         uint64_t recovered{0};  ///< frames a resynchronisation counted lost that are sent again
+        uint64_t delivered{0};  ///< frames a resynchronisation counted lost that went elsewhere (before the resend's)
     };
     /// Back to the packet at `first_index`, behind next_index(), its sequence with it, so that packets that went nowhere
     /// go again: no further than MAX_BURST - 1 packets behind `newest`, on the grid. The frames' counts as Rewound says:
-    /// those a resynchronisation skipped were counted lost then, never sent; nothing when not started or not behind.
+    /// those a resynchronisation skipped were counted lost then, never sent here (but before `first_index` the port sent
+    /// them elsewhere); nothing when not started or not behind.
     [[nodiscard]] auto rewind(uint64_t const first_index, uint64_t const newest) noexcept -> Rewound
     {  // NOLINT(statusbar-block-statements): the step back, then each part of the frames it touched counted
         if (!started_ || format_.frames_per_packet == 0 || first_index >= next_index_) {
@@ -140,7 +142,14 @@ class PacketSchedule
         uint64_t const recovered = skipped_in(next_index_, before);  // counted lost by a resync, going now
         uint64_t const left_lost = skipped_in(first_index, next_index_);
         uint64_t const lost = next_index_ - first_index - left_lost;  // further back, or off the grid
-        return {.packets = packets, .unsent = (before - first_index) - recovered - left_lost, .lost = lost, .recovered = recovered};
+        uint64_t const delivered = skipped_in(0, first_index);        // the port sent up to first_index: the skip's before it went
+        skipped_from_ = resumed_;                                     // the skip now counted for: none of it counted again
+        return {
+            .packets = packets,
+            .unsent = (before - first_index) - recovered - left_lost,
+            .lost = lost,
+            .recovered = recovered,
+            .delivered = delivered};
     }
 
     /// The current run's SSRC. Any thread.
