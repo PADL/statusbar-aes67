@@ -238,7 +238,7 @@ class Sender
     std::unique_ptr<SendPort> port_;
     FrameSend* frames_{nullptr};         ///< port_ as a frame port, or nullptr
     SendProgress port_lost_{};           ///< the run and its SendProgress::lost as counters_.lost last counted them
-    std::atomic<bool> gathered_{false};  ///< a packet port gathered from elsewhere since configure(): its progress() read
+    std::atomic<bool> gathered_{false};  ///< a packet port offered routes since configure(): its progress() and resends read
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
@@ -271,6 +271,11 @@ class Sender
     void send_until(uint64_t newest) noexcept;
     /// Renders and queues the packet at the schedule's next index; true when the transport accepted it.
     [[nodiscard]] auto send_packet(rtp::RtpHeader const& header) noexcept -> bool;
+    /// A gathering packet port's resend_from() followed: the schedule back there, at most a burst behind `newest`, and
+    /// what went nowhere no longer counted sent. Not inlined: rare.
+    [[gnu::noinline]] void resend_if_asked(uint64_t newest) noexcept;
+    /// `packets` sent no longer counted sent, nor in the SR's counts.
+    void uncount_sent(uint32_t packets) noexcept;
     /// Flushes the `queued` packets and counts what went out.
     void flush(uint32_t queued, uint32_t run_ssrc) noexcept;
     /// Adds `packets` sent to the SR's counts and publishes them.

@@ -117,6 +117,21 @@ class PacketSchedule
         next_index_ += format_.frames_per_packet;
     }
 
+    /// Back to the packet at `first_index`, behind next_index(), its sequence with it, so that packets that went nowhere
+    /// go again: no further than MAX_BURST - 1 packets behind `newest`, on the grid, the frames skipped added to `lost`.
+    /// The packets moved back; 0 when not started or `first_index` is not behind.
+    [[nodiscard]] auto rewind(uint64_t const first_index, uint64_t const newest, uint64_t& lost) noexcept -> uint32_t
+    {
+        if (!started_ || format_.frames_per_packet == 0 || first_index >= next_index_) {
+            return 0;
+        }
+        uint64_t const reach = uint64_t{MAX_BURST - 1} * format_.frames_per_packet;
+        uint32_t const packets = packets_behind(std::max(first_index, newest > reach ? newest - reach : 0));
+        lost += next_index_ - first_index - (uint64_t{packets} * format_.frames_per_packet);  // further back, or off the grid
+        step_back(packets);
+        return packets;
+    }
+
     /// The current run's SSRC. Any thread.
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return ssrc_.load(std::memory_order_relaxed); }
     [[nodiscard]] auto sequence() const noexcept -> uint16_t { return sequence_; }
@@ -182,6 +197,18 @@ class PacketSchedule
         uint64_t const report = hold ? (uint64_t{format_.sample_rate} * FIRST_REPORT_LEAD_US) / 1'000'000 : 0;
         uint64_t const lead = std::max<uint64_t>(report, start_lead_) + fpp - 1;
         return newest + ((lead / fpp) * fpp);
+    }
+
+    /// The whole packets from `first_index` up to next_index(); 0 when it is not behind.
+    [[nodiscard]] auto packets_behind(uint64_t const first_index) const noexcept -> uint32_t
+    {
+        return first_index < next_index_ ? static_cast<uint32_t>((next_index_ - first_index) / format_.frames_per_packet) : 0U;
+    }
+    /// Back `packets` packets, the sequence with them.
+    void step_back(uint32_t const packets) noexcept
+    {
+        next_index_ -= uint64_t{packets} * format_.frames_per_packet;
+        sequence_ = static_cast<uint16_t>(sequence_ - packets);
     }
 
     /// Draws from rng_ (seeded by seed()): no syscall on the ticking thread.

@@ -227,6 +227,12 @@ class LoopTransport final : public Transport
         {
             return transport.gathered.empty() ? SendProgress{} : SendProgress{.ssrc = 1, .lost = transport.frame_lost};
         }
+        /// The transport's resend, given once; each ask counted in resend_asks.
+        auto resend_from() noexcept -> std::optional<uint64_t> override
+        {
+            ++transport.resend_asks;
+            return std::exchange(transport.resend, std::nullopt);
+        }
         /// The tag recorded in vlan; refused, as a socket refuses it, under refuse_tag.
         auto set_vlan(std::optional<statusbar::ieee::VlanTag> const& vlan) noexcept -> statusbar::Status override
         {
@@ -601,6 +607,8 @@ class LoopTransport final : public Transport
     bool packet_gather{false};                                ///< a Tx's gather_from() accepts routes
     std::vector<FrameRoute> gathered;                         ///< the routes a Tx gathers from
     std::vector<uint32_t> send_offsets;                       ///< every send offset a Tx was told
+    std::optional<uint64_t> resend;                           ///< a Tx's resend_from(), given once
+    size_t resend_asks{0};                                    ///< a Tx's resend_from() calls
     bool every_tick{false};                                   ///< drain_every_tick()
     bool refuse_tag{false};                                   ///< set_vlan() refuses a tag, as a socket does
     std::optional<statusbar::ieee::VlanTag> vlan;             ///< the open port's tag
