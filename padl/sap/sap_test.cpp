@@ -477,6 +477,29 @@ TEST(sap_directory, a_restarted_version_counter_is_the_session_now)
     EXPECT_EQ(directory.entries().size(), size_t{1});
 }
 
+TEST(sap_directory, a_session_announced_again_after_its_deletion_is_new)
+{
+    // RFC 2974 Section 5: a deletion removes the session; what is announced after it is a new announcement,
+    // under the hash it had, or a sender's restart with a new hash, o= id and version.
+    SapDirectory directory;
+    auto const packet = announcement(dante_session("A", 1));
+    auto const deletion = make_sap_packet(true, 7, IPv4Address{10, 10, 32, 236}, "o=- 1234 1 IN IP4 10.10.32.236\r\n");
+    (void)from_origin(directory, packet, 0);
+    EXPECT_TRUE(from_origin(directory, deletion, 1).has_value());
+    auto const again = from_origin(directory, packet, 2);  // the same SDP under the same hash
+    EXPECT_TRUE(again.has_value() && again->kind == SapDirectory::Kind::announced && !again->evicted);
+    EXPECT_TRUE(again && again->entry.first_seen_ns == 2 && again->entry.message_id_hash == 7);
+    EXPECT_TRUE(directory.find("A", "") != nullptr);
+
+    EXPECT_TRUE(from_origin(directory, deletion, 3).has_value());
+    auto restarted = dante_session("A", 1795867297);
+    restarted.session_id = 5678;
+    auto const fresh = from_origin(directory, announcement(restarted, IPv4Address{10, 10, 32, 236}, 0x9a51), 4);
+    EXPECT_TRUE(fresh.has_value() && fresh->kind == SapDirectory::Kind::announced);
+    EXPECT_TRUE(fresh && fresh->entry.key.session_id == 5678 && fresh->entry.first_seen_ns == 4);
+    EXPECT_EQ(directory.entries().size(), size_t{1});
+}
+
 TEST(sap_directory, ignores_compressed_encrypted_and_other_payloads)
 {
     SapDirectory directory;
