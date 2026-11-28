@@ -213,6 +213,10 @@ class Sender
     /// The open port as a frame port (SendPort::frames()), or nullptr: a packet port, or none; valid from configure()
     /// until clear(). The thread that configures the sender.
     [[nodiscard]] auto frame_port() noexcept -> FrameSend* { return frames_; }
+    /// The open port sends `routes`' channels from frames other ports of its device hold (FrameSend::gather_from() for a
+    /// frame port, SendPort::gather_from() for a packet port); empty: from the provider again. With no port open: success
+    /// for empty, not_connected otherwise. The thread that configures the sender.
+    [[nodiscard]] auto gather_from(std::span<FrameRoute const> routes) -> statusbar::Status;
     /// The current run's SSRC (a resumed run draws a new one on the ticking thread). Any thread.
     [[nodiscard]] auto ssrc() const noexcept -> uint32_t { return schedule_.ssrc(); }
 
@@ -224,16 +228,17 @@ class Sender
     std::vector<sdp::Attribute> attributes_;
     /// One version on (the first: the wall clock's seconds, one on).
     void bump_session_version();
-    /// The frames a frame port found missing in its run (SendProgress::lost) since the last reading, counted lost; a
-    /// reading behind the last (a page older than one already read) counts nothing.
+    /// The frames a frame port, or a gathering packet port, found missing in its run (SendProgress::lost) since the last
+    /// reading, counted lost; a reading behind the last (a page older than one already read) counts nothing.
     void count_port_lost(SendProgress const& progress) noexcept;
     /// Fill `payload` with the provider's `frames` frames from `first_index`, or
     /// silence when it has none; what the provider said.
     [[nodiscard]] auto render_payload(uint64_t first_index, uint32_t frames, std::span<uint8_t> payload) noexcept -> Supply;
 
     std::unique_ptr<SendPort> port_;
-    FrameSend* frames_{nullptr};  ///< port_ as a frame port, or nullptr
-    SendProgress port_lost_{};    ///< the run and its SendProgress::lost as counters_.lost last counted them
+    FrameSend* frames_{nullptr};         ///< port_ as a frame port, or nullptr
+    SendProgress port_lost_{};           ///< the run and its SendProgress::lost as counters_.lost last counted them
+    std::atomic<bool> gathered_{false};  ///< a packet port gathered from elsewhere since configure(): its progress() read
     Destination destination_;
     std::vector<uint8_t> payload_;  ///< staging, only for a packet the transport had no TX buffer for
 
@@ -279,6 +284,8 @@ class Sender
     void start_run(uint64_t first_index) noexcept;
     /// Stops the frame port's run, if one was started.
     void stop_run() noexcept;
+    /// Tells a packet port its send offset at the first tick and at each change (SendPort::set_send_offset()).
+    void tell_send_offset() noexcept;
     /// Passes a changed send offset on to the frame port's run.
     void follow_send_offset() noexcept;
     /// Writes the packets from the schedule's next index up to `newest` to the frame port, and counts them.
@@ -319,9 +326,10 @@ class Sender
     std::optional<Grandmaster> grandmaster_;
     uint64_t tick_ns_{0};  ///< this tick's time: the departure of what it sends
     std::atomic<uint32_t> send_offset_;
-    uint32_t run_send_offset_{0};  ///< the send offset the frame port's run was given (real-time thread)
-    uint64_t run_first_index_{0};  ///< the first index the frame port's run was given (real-time thread)
-    bool run_started_{false};      ///< the frame port has a run (real-time thread)
+    uint32_t run_send_offset_{0};            ///< the send offset the frame port's run was given (real-time thread)
+    uint32_t port_send_offset_{UINT32_MAX};  ///< the send offset a packet port was last told (real-time thread)
+    uint64_t run_first_index_{0};            ///< the first index the frame port's run was given (real-time thread)
+    bool run_started_{false};                ///< the frame port has a run (real-time thread)
     std::optional<statusbar::ieee::VlanTag> vlan_;
     std::atomic<uint32_t> holds_{0};  ///< the ReportHolds held: real-time reads wait-free
     /// One more ReportHold held (`held`) or one fewer, the session version bumped when holds_for_reports() changes.

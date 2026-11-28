@@ -98,6 +98,7 @@ void Sender::adopt_port(std::unique_ptr<SendPort> port) noexcept
 {
     port_ = std::move(port);
     frames_ = port_->frames();
+    port_send_offset_ = UINT32_MAX;  // told at its first tick
     schedule_.set_start_lead(frames_ != nullptr ? frames_->start_lead_frames() : 0);
 }
 
@@ -155,9 +156,25 @@ void Sender::clear() noexcept
 {  // NOLINT(statusbar-block-statements): the port and its run, reset together
     port_.reset();
     frames_ = nullptr;
+    gathered_.store(false, std::memory_order_relaxed);
     run_started_ = false;
     schedule_.stop();
     state_ = State::idle;
+}
+
+auto Sender::gather_from(std::span<FrameRoute const> const routes) -> statusbar::Status
+{
+    if (port_ == nullptr) {
+        return routes.empty() ? statusbar::success() : statusbar::failure(std::errc::not_connected);
+    }
+    if (frames_ != nullptr) {
+        return frames_->gather_from(routes);
+    }
+    auto gathered = port_->gather_from(routes);
+    if (gathered && !routes.empty()) {
+        gathered_.store(true, std::memory_order_relaxed);  // its lost read at each flush from here
+    }
+    return gathered;
 }
 
 void Sender::continue_from(Sender const& previous)
@@ -355,7 +372,17 @@ void Sender::tick(uint64_t const now_index, uint64_t const tick_ns) noexcept
         return;
     }
     if (auto const newest = newest_due(now_index)) {
+        tell_send_offset();
         send_until(*newest);
+    }
+}
+
+void Sender::tell_send_offset() noexcept
+{
+    uint32_t const send_offset = send_offset_.load(std::memory_order_relaxed);
+    if (send_offset != port_send_offset_) [[unlikely]] {
+        port_send_offset_ = send_offset;
+        port_->set_send_offset(send_offset);
     }
 }
 
@@ -413,6 +440,9 @@ auto Sender::send_packet(rtp::RtpHeader const& header) noexcept -> bool
 void Sender::flush(uint32_t const queued, uint32_t const run_ssrc) noexcept
 {
     auto const sent = static_cast<uint32_t>(queued - port_->flush());
+    if (gathered_.load(std::memory_order_relaxed)) [[unlikely]] {
+        count_port_lost(port_->progress());
+    }
     counters_.dropped += queued - sent;
     counters_.packets += sent;
     counters_.frames += uint64_t{sent} * format_.frames_per_packet;
